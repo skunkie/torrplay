@@ -1,0 +1,2010 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+openapi: "3.0.0"
+info:
+  version: 1.0.0
+  title: TorrPlay API
+  description: A torrent streaming application with memory-managed piece storage.
+  termsOfService: https://example.com/terms/
+  contact:
+    name: TorrPlay Team
+    email: support@example.com
+    url: https://github.com/torrplay
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+security:
+  - basicAuth: []
+  - bearerAuth: []
+tags:
+  - name: auth
+    description: API authentication endpoints.
+  - name: qBittorrent
+    description: Compatibility endpoints for qBittorrent API.
+  - name: statistics
+    description: Memory and torrent statistics endpoints.
+  - name: v1
+    description: Core API endpoints for torrent management.
+  - name: TorrServer
+    description: Compatibility endpoints for TorrServer API.
+  - name: System
+    description: System information.
+
+paths:
+  /oauth/token:
+    post:
+      tags:
+        - auth
+      summary: Obtain a JWT token.
+      description: Obtain a JWT token using the Resource Owner Password Credentials Grant.
+      operationId: getToken
+      security: []
+      requestBody:
+        description: User credentials for obtaining a token.
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "200":
+          description: Token obtained successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+  /api/v1/playlist:
+    get:
+      tags:
+        - v1
+      summary: Generate a playlist for streaming.
+      description: Returns an m3u playlist for streaming torrent content.
+      operationId: getPlaylist
+      parameters:
+        - $ref: "#/components/parameters/MediaName"
+      responses:
+        "200":
+          description: m3u playlist generated successfully.
+          content:
+            application/x-mpegURL:
+              schema:
+                type: string
+                example: |
+                  #EXTM3U
+                  #EXTINF:-1,Sintel
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/stats/memory:
+    get:
+      tags:
+        - statistics
+      summary: Get global memory statistics.
+      description: Returns current memory usage and limits across all torrents in the storage system.
+      operationId: getMemoryStats
+      responses:
+        "200":
+          description: Memory statistics retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryStats"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/stats/torrents/{hash}:
+    get:
+      tags:
+        - statistics
+      summary: Get torrent statistics.
+      description: Retrieves detailed statistics about a specific torrent, including memory usage, pieces, and network activity.
+      operationId: getTorrentStats
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      responses:
+        "200":
+          description: Torrent statistics retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TorrentStats"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /api/v1/settings:
+    get:
+      tags:
+        - v1
+      summary: Get application settings.
+      description: Retrieve current application configuration and settings.
+      operationId: getSettings
+      responses:
+        "200":
+          description: Settings retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    patch:
+      tags:
+        - v1
+      summary: Update application settings.
+      description: Update application configuration. Some settings may require a restart to take effect.
+      operationId: updateSettings
+      requestBody:
+        description: New settings values.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Settings"
+      responses:
+        "204":
+          description: Settings updated successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/torrents:
+    get:
+      tags:
+        - v1
+      summary: List all torrents.
+      description: Returns a paginated list of all torrents currently managed by the system. Supports filtering by torrent IDs.
+      operationId: listTorrents
+      parameters:
+        - $ref: "#/components/parameters/TorrentCategories"
+        - $ref: "#/components/parameters/TorrentHashes"
+        - $ref: "#/components/parameters/TorrentNames"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Offset"
+      responses:
+        "200":
+          description: A paginated list of torrents.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListTorrents"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    post:
+      tags:
+        - v1
+      summary: Add a new torrent.
+      description: Add a torrent to the database. Supports magnet links, info hashes and torrent files.
+      operationId: addTorrent
+      requestBody:
+        description: |
+          Torrent data to add. Choose one of:
+          - JSON with magnet link or info hash
+          - Multipart form with torrent file and optional metadata
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TorrentAdd"
+            examples:
+              magnet:
+                summary: Add via magnet link
+                value:
+                  magnet: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel"
+                  poster: "https://example.com/poster.jpg"
+                  storage: "memory"
+                  title: "Sintel"
+              magnet_with_data_uri:
+                summary: Add via magnet with data URI poster
+                value:
+                  magnet: "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny"
+                  poster: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+                  title: "Big Buck Bunny"
+              hash:
+                summary: Add via info hash only
+                value:
+                  hash: "08ada5a7a6183aae1e09d831df6748d566095a10"
+                  storage: "memory"
+                  title: "Sintel"
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/TorrentAddFile"
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+            description: Raw torrent file content (filename should be in Content-Disposition header).
+      responses:
+        "201":
+          description: Torrent added successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Torrent"
+          headers:
+            Location:
+              description: URL of the newly created torrent.
+              schema:
+                type: string
+                format: uri
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /api/v1/torrents/backup:
+    get:
+      tags:
+        - v1
+      summary: Backup torrents and posters.
+      description: Backup all torrents and posters to a single file.
+      operationId: backupTorrents
+      responses:
+        "200":
+          description: Backup file.
+          content:
+            application/octet-stream:
+              schema:
+                $ref: "#/components/schemas/Backup"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/torrents/restore:
+    post:
+      tags:
+        - v1
+      summary: Restore torrents and posters.
+      description: Restore torrents and posters from a backup file.
+      operationId: restoreTorrents
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "204":
+          description: Restored successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/torrents/{hash}:
+    get:
+      tags:
+        - v1
+      summary: Get torrent metadata.
+      description: Retrieve detailed information about a specific torrent by its info hash.
+      operationId: getTorrent
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      responses:
+        "200":
+          description: Torrent retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Torrent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+    patch:
+      tags:
+        - v1
+      summary: Update torrent metadata.
+      description: Update metadata for an existing torrent. Only modifiable fields can be updated.
+      operationId: updateTorrent
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      requestBody:
+        description: Torrent metadata to update.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TorrentUpdate"
+      responses:
+        "200":
+          description: Torrent updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Torrent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      tags:
+        - v1
+      summary: Delete a torrent.
+      description: Remove a torrent from the system. This will also free any memory used by the torrent's pieces.
+      operationId: deleteTorrent
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      responses:
+        "204":
+          description: Torrent deleted successfully.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/stream/{hash}:
+    get:
+      tags:
+        - v1
+      summary: Stream a torrent file.
+      description: Stream a torrent file by its info hash and file path or index. Requires HTTP Range requests for partial content.
+      operationId: getStream
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+        - $ref: "#/components/parameters/Path"
+        - $ref: "#/components/parameters/Index"
+        - $ref: "#/components/parameters/Range"
+      responses:
+        "206":
+          $ref: "#/components/responses/Stream"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: Range Not Satisfiable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+    head:
+      tags:
+        - v1
+      summary: Serve a HEAD request for a streamable torrent file.
+      description: Serve a HEAD request for a streamable torrent file by its info hash and file path or index.
+      operationId: headStream
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+        - $ref: "#/components/parameters/Path"
+        - $ref: "#/components/parameters/Index"
+      responses:
+        "200":
+          description: Video resource exists, metadata sent in headers.
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+            Content-Length:
+              schema:
+                type: integer
+            Content-Type:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /api/system/info:
+    get:
+      tags:
+        - System
+      summary: Get application information.
+      description: Returns detailed information about the application.
+      operationId: getSystemInfo
+      responses:
+        "200":
+          description: Successful response with system information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          description: Too Many Requests - Rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/system/logs:
+    get:
+      tags:
+        - System
+      summary: Get recent application logs.
+      description: Returns a list of the most recent log entries.
+      operationId: getLogs
+      responses:
+        "200":
+          description: A list of log entries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LogEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  # qBittorrent Compatibility Endpoints
+  /api/v2/torrents/add:
+    post:
+      tags:
+        - qBittorrent
+      summary: Add a new torrent (qBittorrent compatible).
+      description: Compatibility endpoint for adding a new torrent.
+      operationId: qBittorrentAddTorrent
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                category:
+                  type: string
+                  description: Category for the torrent.
+                torrents:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                urls:
+                  type: string
+                  description: A list of magnet links to add.
+      responses:
+        "200":
+          description: Torrent added successfully.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "Ok."
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  # TorrServer Compatibility Endpoints
+  /cache:
+    post:
+      tags:
+        - TorrServer
+      summary: Get cache statistics (TorrServer compatible).
+      description: Compatibility endpoint for TorrServer cache statistics. Returns cache status for a specific torrent.
+      operationId: tSCache
+      requestBody:
+        description: Cache statistics request.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TSCacheRequest"
+      responses:
+        "200":
+          description: Cache statistics retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TSCacheResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /echo:
+    get:
+      tags:
+        - TorrServer
+      summary: Server status check (TorrServer compatible).
+      description: Compatibility endpoint for TorrServer status checking. Returns "OK" if server is running.
+      operationId: tSEcho
+      responses:
+        "200":
+          description: Server is running.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "OK"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /play/{hash}/{index}:
+    get:
+      tags:
+        - TorrServer
+      summary: Stream torrent content (TorrServer compatible).
+      description: Compatibility endpoint for streaming torrent content directly.
+      operationId: tSPlay
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+        - $ref: "#/components/parameters/TSIndex"
+      responses:
+        "206":
+          $ref: "#/components/responses/Stream"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "416":
+          description: Range not satisfiable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /settings:
+    post:
+      tags:
+        - TorrServer
+      summary: Update settings (TorrServer compatible).
+      description: Compatibility endpoint for TorrServer settings updates.
+      operationId: tSSettings
+      requestBody:
+        description: TorrServer settings.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TSSettings"
+      responses:
+        "200":
+          description: Settings updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /stream:
+    get:
+      tags:
+        - TorrServer
+      summary: Stream or preload torrent (TorrServer compatible).
+      description: Compatibility endpoint for streaming or preloading torrent content with various options.
+      operationId: tSStream
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/TSLink"
+        - $ref: "#/components/parameters/TSIndexQuery"
+        - $ref: "#/components/parameters/TSPlay"
+        - $ref: "#/components/parameters/TSPreload"
+        - $ref: "#/components/parameters/TSStat"
+      responses:
+        "200":
+          description: Stream or statistics returned successfully.
+          content:
+            video/*:
+              schema:
+                type: string
+                format: binary
+            audio/*:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TSTorrentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /torrents:
+    post:
+      tags:
+        - TorrServer
+      summary: Manage torrents (TorrServer compatible).
+      description: Compatibility endpoint for TorrServer torrent management (add, remove, list).
+      operationId: tSTorrents
+      requestBody:
+        description: Torrent management request.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TSTorrentRequest"
+      responses:
+        "200":
+          description: Operation completed successfully.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/TSTorrentResponse"
+                  - type: array
+                    items:
+                      $ref: "#/components/schemas/TSTorrentResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /torrent/upload:
+    post:
+      tags:
+        - TorrServer
+      summary: Add a new torrent (TorrServer compatible).
+      description: Compatibility endpoint for adding a torrent file.
+      operationId: tSTorrentUpload
+      requestBody:
+        description: |
+          - Multipart form with torrent file
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/TorrentAddFile"
+      responses:
+        "201":
+          description: Torrent added successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TSTorrentResponse"
+          headers:
+            Location:
+              description: URL of the newly created torrent.
+              schema:
+                type: string
+                format: uri
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /viewed:
+    post:
+      tags:
+        - TorrServer
+      summary: Manage torrent view tags (TorrServer compatible).
+      description: Compatibility endpoint for TorrServer view tags.
+      operationId: tSViewed
+      requestBody:
+        description: Request to set, list, or remove a view tag.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TSViewedRequest"
+      responses:
+        "200":
+          description: Operation completed successfully.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TSViewedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: session
+  parameters:
+    Hash:
+      name: hash
+      in: path
+      description: Torrent info hash.
+      required: true
+      schema:
+        type: string
+        pattern: "^[0-9a-fA-F]{40}$"
+        example: "08ada5a7a6183aae1e09d831df6748d566095a10"
+        x-go-type: metainfo.Hash
+        x-go-type-import:
+          path: github.com/anacrolix/torrent/metainfo
+    MediaName:
+      name: name
+      in: query
+      description: Media playlist by torrent name.
+      required: false
+      schema:
+        type: string
+        example: "Sintel"
+    TorrentCategories:
+      name: categories
+      in: query
+      description: Comma-separated list of torrent categories to filter results.
+      required: false
+      style: form
+      explode: false
+      schema:
+        type: array
+        items:
+          type: string
+        example: ["Movies"]
+    TorrentHashes:
+      name: hashes
+      in: query
+      description: Comma-separated list of torrent info hashes to filter results.
+      required: false
+      style: form
+      explode: false
+      schema:
+        type: array
+        items:
+          type: string
+          pattern: "^[0-9a-fA-F]{40}$"
+          x-go-type: metainfo.Hash
+          x-go-type-import:
+            path: github.com/anacrolix/torrent/metainfo
+        example: ["08ada5a7a6183aae1e09d831df6748d566095a10"]
+    TorrentNames:
+      name: names
+      in: query
+      description: Comma-separated list of torrent names to filter results. The filter performs case-insensitive matching against torrent names.
+      required: false
+      style: form
+      explode: false
+      schema:
+        type: array
+        items:
+          type: string
+        example: ["Sintel"]
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of torrents to return.
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        example: 50
+    Offset:
+      name: offset
+      in: query
+      description: Number of torrents to skip for pagination.
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Path:
+      name: path
+      in: query
+      description: Path to a torrent file. One of `path` or `index` must be provided.
+      required: false
+      schema:
+        type: string
+        example: "Sintel/Sintel.mp4"
+    Index:
+      name: index
+      in: query
+      description: Index of the file within the torrent. One of `path` or `index` must be provided.
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        example: 0
+    Range:
+      name: Range
+      in: header
+      description: Bytes range for partial content requests.
+      required: false
+      schema:
+        type: string
+        example: "bytes=0-1023"
+    TSIndex:
+      name: index
+      in: path
+      description: File index within the torrent.
+      required: true
+      schema:
+        type: integer
+        default: 1
+    TSLink:
+      name: link
+      in: query
+      description: Magnet link or info hash of the torrent.
+      required: true
+      schema:
+        type: string
+        example: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel"
+    TSIndexQuery:
+      name: index
+      in: query
+      description: File index within the torrent.
+      required: false
+      schema:
+        type: integer
+        default: 1
+    TSPlay:
+      name: play
+      in: query
+      description: Start playback immediately.
+      required: false
+      schema:
+        type: boolean
+    TSPreload:
+      name: preload
+      in: query
+      description: Preload content without playing.
+      required: false
+      schema:
+        type: boolean
+    TSStat:
+      name: stat
+      in: query
+      description: Return statistics instead of streaming.
+      required: false
+      schema:
+        type: boolean
+
+  responses:
+    Stream:
+      description: Partial content streamed successfully.
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            example: "bytes"
+        Content-Length:
+          schema:
+            type: integer
+            example: 1024
+        Content-Range:
+          schema:
+            type: string
+            example: "bytes 0-1023/1048576"
+        Content-Type:
+          schema:
+            type: string
+            example: "video/mp4"
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+
+    BadRequest:
+      description: The request was invalid or cannot be served.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Invalid info hash format."
+            code: 400
+            details: "Info hash must be 40 hex characters."
+
+    Unauthorized:
+      description: Authentication failed or is missing.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Unauthorized."
+            code: 401
+            details: "Authentication token is missing or invalid."
+
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Torrent not found."
+            code: 404
+            details: "No torrent found with hash: da39a3ee5e6b4b0d3255bfef95601890afd80709."
+
+    Conflict:
+      description: The resource already exists.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Torrent already exists."
+            code: 409
+            details: "A torrent with this info hash is already present."
+
+    InternalServerError:
+      description: An internal server error occurred.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Internal server error."
+            code: 500
+            details: "Failed to allocate memory for piece storage."
+
+    NotImplemented:
+      description: The requested feature is not implemented.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Not Implemented."
+            code: 501
+            details: "This feature is not available on the server."
+
+    GatewayTimeout:
+      description: The server did not receive a timely response from an upstream server.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Gateway timeout."
+            code: 504
+            details: "Timeout waiting for torrent metadata."
+
+  schemas:
+    Auth:
+      type: object
+      description: Authentication settings.
+      properties:
+        enabled:
+          type: boolean
+          description: Enable or disable authentication.
+          example: false
+        type:
+          type: string
+          description: Authentication type.
+          enum:
+            - "basic"
+            - "bearer"
+          example: "basic"
+        username:
+          type: string
+          description: Username for authentication.
+          minimum: 4
+          maximum: 64
+          example: "admin"
+        password:
+          type: string
+          description: Password for authentication.
+          minimum: 4
+          maximum: 128
+          example: "password"
+    Backup:
+      type: object
+      required:
+        - torrents
+        - posters
+      properties:
+        torrents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Torrent"
+        posters:
+          type: object
+          additionalProperties:
+            type: string
+            format: binary
+    Error:
+      type: object
+      required:
+        - message
+        - code
+      properties:
+        message:
+          type: string
+          description: Human-readable error message.
+          example: "Torrent not found"
+        code:
+          type: integer
+          description: HTTP status code.
+          minimum: 400
+          maximum: 599
+          example: 404
+
+    LogEntry:
+      type: object
+      required:
+        - time
+        - level
+        - message
+      properties:
+        time:
+          type: string
+          format: date-time
+          description: The timestamp of the log entry.
+        level:
+          type: string
+          description: The log level (e.g., INFO, WARN, ERROR).
+        message:
+          type: string
+          description: The log message.
+        data:
+          type: object
+          description: Additional structured data associated with the log entry.
+          additionalProperties: true
+
+    PieceInfo:
+      type: object
+      description: Information about a torrent piece that we are actively managing.
+      required:
+        - complete
+        - in_memory
+        - index
+        - size
+      properties:
+        complete:
+          type: boolean
+          description: Whether the piece is marked as complete.
+          example: true
+        in_memory:
+          type: boolean
+          description: Whether the piece data is currently loaded in memory.
+          example: true
+        index:
+          type: integer
+          format: int
+          description: Zero-based piece index within the torrent.
+          minimum: 0
+          example: 0
+        size:
+          type: integer
+          format: int64
+          description: Piece size in bytes.
+          minimum: 0
+          example: 1048576
+
+    MemoryStats:
+      type: object
+      description: Global memory usage statistics.
+      required:
+        - active_torrents
+        - max_memory
+        - total_pieces
+        - used_memory
+      properties:
+        active_torrents:
+          type: integer
+          format: int
+          description: Number of active torrents using memory.
+          minimum: 0
+          example: 5
+        max_memory:
+          type: integer
+          format: int64
+          description: Maximum memory allowed in bytes.
+          minimum: 0
+          example: 1073741824
+        total_pieces:
+          type: integer
+          format: int
+          description: Total number of pieces in memory.
+          minimum: 0
+          example: 250
+        used_memory:
+          type: integer
+          format: int64
+          description: Current memory used in bytes.
+          minimum: 0
+          example: 536870912
+
+    TokenRequest:
+      type: object
+      required:
+        - grant_type
+        - username
+        - password
+      properties:
+        grant_type:
+          type: string
+          description: The grant type. Must be 'password'.
+          enum:
+            - password
+        username:
+          type: string
+          description: The user's username.
+          example: "admin"
+        password:
+          type: string
+          description: The user's password.
+          format: password
+          example: "password"
+
+    TokenResponse:
+      type: object
+      required:
+        - access_token
+        - token_type
+      properties:
+        access_token:
+          type: string
+          description: The JWT access token.
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6ImFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        token_type:
+          type: string
+          description: The type of token. Always 'Bearer'.
+          example: "Bearer"
+        expires_in:
+          type: integer
+          description: The lifetime in seconds of the access token.
+          example: 3600
+
+    TorrentStats:
+      type: object
+      description: Statistics about torrent activity and performance.
+      required:
+        - active_peers
+        - bytes_hashed
+        - bytes_read
+        - bytes_read_data
+        - bytes_read_useful_data
+        - bytes_read_useful_intended_data
+        - bytes_written
+        - bytes_written_data
+        - chunks_read
+        - chunks_read_useful
+        - chunks_read_wasted
+        - chunks_written
+        - connected_seeders
+        - half_open_peers
+        - metadata_chunks_read
+        - pending_peers
+        - pieces_complete
+        - pieces_dirtied_bad
+        - pieces_dirtied_good
+        - total_peers
+        - completed_size
+        - in_memory
+        - in_memory_size
+        - memory_stats
+        - memory_usage_percentage
+        - pieces
+        - total_pieces
+        - total_size
+      properties:
+        active_peers:
+          type: integer
+          description: Number of currently active peers.
+        bytes_hashed:
+          type: integer
+          format: int64
+          description: Total bytes hashed during verification.
+        bytes_read:
+          type: integer
+          format: int64
+          description: Total bytes read from disk.
+        bytes_read_data:
+          type: integer
+          format: int64
+          description: Bytes read that contain actual torrent data.
+        bytes_read_useful_data:
+          type: integer
+          format: int64
+          description: Useful data bytes read from peers.
+        bytes_read_useful_intended_data:
+          type: integer
+          format: int64
+          description: Useful intended data bytes read from peers.
+        bytes_written:
+          type: integer
+          format: int64
+          description: Total bytes written to disk.
+        bytes_written_data:
+          type: integer
+          format: int64
+          description: Torrent data bytes written to disk.
+        chunks_read:
+          type: integer
+          format: int64
+          description: Total chunks read from disk.
+        chunks_read_useful:
+          type: integer
+          format: int64
+          description: Useful chunks read from peers.
+        chunks_read_wasted:
+          type: integer
+          format: int64
+          description: Wasted chunks read (duplicate or unneeded data).
+        chunks_written:
+          type: integer
+          format: int64
+          description: Total chunks written to disk.
+        connected_seeders:
+          type: integer
+          description: Number of connected seeders.
+        half_open_peers:
+          type: integer
+          description: Number of peers in half-open state (connecting).
+        metadata_chunks_read:
+          type: integer
+          format: int64
+          description: Metadata chunks read.
+        pending_peers:
+          type: integer
+          description: Number of pending peer connections.
+        pieces_complete:
+          type: integer
+          description: Number of completed pieces.
+        pieces_dirtied_bad:
+          type: integer
+          format: int64
+          description: Pieces marked as bad after verification.
+        pieces_dirtied_good:
+          type: integer
+          format: int64
+          description: Pieces marked as good after verification.
+        total_peers:
+          type: integer
+          description: Total number of known peers.
+        completed_size:
+          type: integer
+          format: int64
+          description: Total size of completed pieces in bytes.
+          minimum: 0
+          example: 52428800
+        in_memory:
+          type: integer
+          format: int
+          description: Number of pieces currently loaded in memory.
+          minimum: 0
+          example: 25
+        in_memory_size:
+          type: integer
+          format: int64
+          description: Total size of pieces currently in memory in bytes.
+          minimum: 0
+          example: 26214400
+        memory_stats:
+          $ref: "#/components/schemas/MemoryStats"
+        memory_usage_percentage:
+          type: number
+          format: double
+          description: Percentage of maximum memory used by this torrent (0-100).
+          minimum: 0
+          maximum: 100
+          example: 2.44
+        pieces:
+          type: array
+          description: Array of all managed pieces with their current status.
+          items:
+            $ref: "#/components/schemas/PieceInfo"
+        total_pieces:
+          type: integer
+          format: int
+          description: Total number of pieces in the torrent, from metadata.
+          minimum: 0
+          example: 100
+        total_size:
+          type: integer
+          format: int64
+          description: Total size of all managed pieces in bytes.
+          minimum: 0
+          example: 104857600
+
+    TorrentStorage:
+      type: string
+      description: Use memory or file storage.
+      enum:
+        - "memory"
+        - "file"
+      example: "memory"
+
+    ListTorrents:
+      type: object
+      description: List of torrents retrieved successfully.
+      required:
+        - torrents
+        - limit
+        - offset
+        - total
+      properties:
+        torrents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Torrent"
+        limit:
+          type: integer
+          description: Number of torrents returned in this response.
+          example: 50
+        offset:
+          type: integer
+          description: Pagination offset used.
+          example: 0
+        total:
+          type: integer
+          description: Total number of torrents available.
+          example: 150
+
+    Settings:
+      type: object
+      description: Application configuration settings.
+      properties:
+        auth:
+          $ref: "#/components/schemas/Auth"
+        disable_ipv6:
+          type: boolean
+          description: Disable IPv6 for torrent client.
+          example: false
+        enable_dlna:
+          type: boolean
+          description: Enable DLNA media server functionality.
+          example: false
+        enable_downloader:
+          type: boolean
+          description: Enable background downloading for torrents with file storage.
+          example: false
+        file_storage_path:
+          type: string
+          description: Path to the file storage.
+          example: "/torrplay"
+        friendly_name:
+          type: string
+          description: DLNA friendly name displayed to clients.
+          minLength: 3
+          maxLength: 15
+          example: "TorrPlay"
+        http_server_port:
+          type: integer
+          description: TCP port for HTTP server.
+          minimum: 1
+          maximum: 65535
+          example: 8090
+        log_format:
+          type: string
+          description: Log format.
+          enum:
+            - "json"
+            - "text"
+          example: "text"
+        log_level:
+          type: string
+          x-go-type: slog.Level
+          x-go-type-import:
+            path: log/slog
+          description: Log level.
+          example: "INFO"
+        log_store_size:
+          type: integer
+          description: Number of log entries to store in memory.
+          minimum: 0
+          maximum: 1000
+          example: 100
+        max_memory:
+          type: integer
+          format: int64
+          description: Maximum memory allocation for piece storage in bytes.
+          minimum: 33554432
+          maximum: 2147483648
+          example: 67108864
+        readahead_percentage:
+          type: integer
+          description: Readahead percentage value (50-100).
+          minimum: 50
+          maximum: 100
+          example: 90
+
+    Torrent:
+      allOf:
+        - $ref: "#/components/schemas/TorrentAdd"
+        - $ref: "#/components/schemas/TorrentUpdate"
+        - type: object
+          required:
+            - hash
+            - magnet
+            - name
+            - files
+            - total_size
+            - piece_count
+          properties:
+            files:
+              type: array
+              description: List of files contained in the torrent.
+              items:
+                $ref: "#/components/schemas/TorrentFile"
+            hash:
+              type: string
+              x-go-type: metainfo.Hash
+              x-go-type-import:
+                path: github.com/anacrolix/torrent/metainfo
+              description: SHA-1 info hash of the torrent (40 hex characters).
+              pattern: "^[0-9a-fA-F]{40}$"
+              example: "08ada5a7a6183aae1e09d831df6748d566095a10"
+            name:
+              type: string
+              description: Original name of the torrent from metadata.
+              example: "Sintel"
+            total_size:
+              type: integer
+              format: int64
+              description: Total size of all files in bytes.
+              example: 3711950848
+            piece_count:
+              type: integer
+              description: Total number of pieces in the torrent.
+              example: 1418
+            piece_size:
+              type: integer
+              format: int64
+              description: Standard piece size in bytes.
+              example: 262144
+            created_at:
+              type: string
+              format: date-time
+              description: When the torrent was added to the system.
+              example: "2024-01-15T10:30:00Z"
+            updated_at:
+              type: string
+              format: date-time
+              description: Last time the torrent was modified.
+              example: "2024-01-15T11:45:00Z"
+
+    TorrentAdd:
+      type: object
+      description: Input for adding a new torrent.
+      properties:
+        category:
+          type: string
+          description: Category for organizing torrents.
+          example: "Movies"
+        hash:
+          type: string
+          x-go-type: metainfo.Hash
+          x-go-type-import:
+            path: github.com/anacrolix/torrent/metainfo
+          description: SHA-1 info hash of the torrent (40 hex characters).
+          pattern: "^[0-9a-fA-F]{40}$"
+          example: "08ada5a7a6183aae1e09d831df6748d566095a10"
+        magnet:
+          type: string
+          description: Magnet URI.
+          pattern: '^magnet:\?xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})'
+          example: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel"
+        poster:
+          type: string
+          description: URL or data URI to poster image.
+          example: "https://example.com/poster.jpg"
+        storage:
+          allOf:
+            - $ref: "#/components/schemas/TorrentStorage"
+          description: Use memory or file storage.
+          default: "memory"
+        title:
+          type: string
+          description: Display title for the torrent.
+          minLength: 1
+          maxLength: 1024
+          example: "Sintel"
+
+    TorrentAddFile:
+      type: object
+      required:
+        - file
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Torrent file.
+          example: "(binary torrent file)"
+        category:
+          type: string
+          description: Category for organizing torrents.
+          example: "Movies"
+        title:
+          type: string
+          description: Display title for the torrent.
+          minLength: 1
+          maxLength: 1024
+          example: "Sintel"
+        poster:
+          type: string
+          description: URL or data URI to poster image.
+          example: "https://example.com/poster.jpg"
+
+    TorrentFileUpdate:
+      type: object
+      description: "Metadata for updating a file within a torrent."
+      required:
+        - path
+        - viewed
+      properties:
+        path:
+          type: string
+          description: The full path of the file within the torrent.
+        viewed:
+          type: boolean
+          description: Set to true to mark as viewed, false to mark as unviewed.
+
+    TorrentUpdate:
+      type: object
+      description: Updateable torrent metadata.
+      properties:
+        category:
+          type: string
+          description: Category for organizing torrents.
+          example: "Movies"
+        files:
+          type: array
+          description: List of files to update within the torrent.
+          items:
+            $ref: "#/components/schemas/TorrentFileUpdate"
+          readOnly: true
+        poster:
+          type: string
+          description: URL or data URI to poster image.
+          example: "https://example.com/new-poster.jpg"
+        storage:
+          $ref: "#/components/schemas/TorrentStorage"
+        title:
+          type: string
+          description: Display title for the torrent.
+          minLength: 1
+          maxLength: 1024
+          example: "Sintel"
+
+    TorrentFile:
+      type: object
+      description: File within a torrent.
+      required:
+        - length
+        - name
+        - path
+      properties:
+        length:
+          type: integer
+          format: int64
+          description: File size in bytes.
+          minimum: 0
+          example: 129241752
+        name:
+          type: string
+          description: Base name of the file.
+          example: "Sintel.mp4"
+        path:
+          type: string
+          description: Full path of the file within the torrent.
+          example: "Sintel/Sintel.mp4"
+        viewed_at:
+          type: string
+          format: date-time
+          description: When the file was last viewed.
+          example: "2024-01-15T11:45:00Z"
+          nullable: true
+
+    SystemInfo:
+      type: object
+      required:
+        - build_date
+        - commit
+        - uptime
+        - version
+      properties:
+        build_date:
+          type: string
+          description: Date when the build was created.
+          example: "2006-01-02"
+        commit:
+          type: string
+          description: Git commit hash.
+          example: "a1b2c3d"
+        uptime:
+          type: integer
+          format: int64
+          description: Application uptime in seconds.
+          example: 86400
+        version:
+          type: string
+          description: Application release version (semantic versioning).
+          example: "1.0.0"
+      example:
+        build_date: "2006-01-02"
+        commit: "a1b2c3d"
+        uptime: 86400
+        version: "1.0.0"
+
+    TSCacheRequest:
+      type: object
+      description: TorrServer cache statistics request.
+      required:
+        - hash
+      properties:
+        hash:
+          type: string
+          description: Torrent info hash.
+          pattern: "^[0-9a-fA-F]{40}$"
+          example: "08ada5a7a6183aae1e09d831df6748d566095a10"
+
+    TSCacheResponse:
+      type: object
+      description: TorrServer cache statistics response.
+      required:
+        - Capacity
+        - Pieces
+        - PiecesCount
+        - PiecesLength
+        - Readers
+      properties:
+        Capacity:
+          type: integer
+          format: int64
+          description: Total cache capacity in bytes.
+          example: 1073741824
+        Pieces:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/TSPieceInfo"
+          description: Map of piece indices to piece information.
+        PiecesCount:
+          type: integer
+          description: Total number of pieces.
+          example: 100
+        PiecesLength:
+          type: integer
+          format: int64
+          description: Standard piece length in bytes.
+          example: 1048576
+        Readers:
+          type: array
+          items:
+            $ref: "#/components/schemas/TSReaderInfo"
+          description: Active read operations on the cache.
+
+    TSPieceInfo:
+      type: object
+      description: TorrServer piece information.
+      required:
+        - Id
+        - Length
+        - Completed
+      properties:
+        Id:
+          type: integer
+          description: Piece index.
+          minimum: 0
+          example: 0
+        Length:
+          type: integer
+          format: int64
+          description: Piece size in bytes.
+          minimum: 0
+          example: 1048576
+        Completed:
+          type: boolean
+          description: Whether the piece is complete.
+          example: true
+        Priority:
+          type: integer
+          description: Piece priority (higher is more important).
+          minimum: 0
+          default: 0
+          example: 1
+
+    TSReaderInfo:
+      type: object
+      description: TorrServer reader information.
+      required:
+        - reader
+        - start
+        - end
+      properties:
+        reader:
+          type: integer
+          description: Reader identifier.
+          example: 12345
+        start:
+          type: integer
+          description: Start position in bytes.
+          minimum: 0
+          example: 0
+        end:
+          type: integer
+          description: End position in bytes.
+          minimum: 0
+          example: 1048576
+
+    TSTorrentRequest:
+      type: object
+      description: TorrServer torrent management request.
+      required:
+        - action
+      properties:
+        action:
+          type: string
+          description: Action to perform.
+          enum:
+            - "add"
+            - "drop"
+            - "get"
+            - "list"
+            - "rem"
+          example: "add"
+        hash:
+          oneOf:
+            - type: string
+              maxLength: 0
+              description: Empty value is allowed.
+            - type: string
+              pattern: "^[0-9a-fA-F]{40}$"
+              description: Torrent info hash.
+              example: "08ada5a7a6183aae1e09d831df6748d566095a10"
+        category:
+          type: string
+          description: Category for the torrent.
+          example: "Movies"
+        data:
+          type: string
+          description: Base64-encoded torrent file data.
+          example: "ZDg6YW5ub3VuY2UzNTp1ZHA6Ly90cmFja2VyLm9wZW5iaXR0b3JyZW50LmNvbTo4MC8="
+        link:
+          type: string
+          description: Magnet link or URL.
+          example: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel"
+        poster:
+          type: string
+          description: Poster image URL or data URI.
+          example: "https://example.com/poster.jpg"
+        save_to_db:
+          type: boolean
+          description: Save torrent to database.
+          default: true
+        title:
+          type: string
+          description: Display title.
+          example: "Example Movie"
+
+    TSTorrentResponse:
+      allOf:
+        - $ref: "#/components/schemas/TorrentStats"
+        - type: object
+          description: TorrServer torrent management response.
+          required:
+            - download_speed
+            - hash
+            - loaded_size
+            - name
+            - preload_size
+            - preloaded_bytes
+            - stat
+            - stat_string
+            - timestamp
+            - title
+            - torrent_size
+            - upload_speed
+          properties:
+            bit_rate:
+              type: string
+            category:
+              type: string
+            data:
+              type: string
+            download_speed:
+              type: number
+              format: double
+              description: Download speed in bytes per second.
+              minimum: 0
+              example: 1024000.5
+            duration_seconds:
+              type: number
+            file_stats:
+              type: array
+              description: Statistics for each file in the torrent.
+              items:
+                $ref: "#/components/schemas/TSTorrentFileStat"
+            hash:
+              type: string
+              description: Torrent info hash.
+              example: "08ada5a7a6183aae1e09d831df6748d566095a10"
+            loaded_size:
+              type: integer
+              format: int64
+            name:
+              type: string
+              description: Torrent name.
+              example: "Sintel"
+            poster:
+              type: string
+              description: Poster image URL or data URI.
+              example: "https://example.com/poster.jpg"
+            preload_size:
+              type: integer
+              format: int64
+            preloaded_bytes:
+              type: integer
+              format: int64
+            stat:
+              type: integer
+            stat_string:
+              type: string
+            timestamp:
+              type: integer
+              format: int64
+            title:
+              type: string
+              description: Display title.
+              example: "Sintel"
+            torrent_size:
+              type: integer
+              format: int64
+            upload_speed:
+              type: number
+
+    TSTorrentFileStat:
+      allOf:
+        - $ref: "#/components/schemas/TorrentFile"
+        - type: object
+          required:
+            - id
+          properties:
+            id:
+              type: integer
+              description: File index.
+              minimum: 0
+              example: 0
+
+    TSSettings:
+      type: object
+      description: TorrServer settings.
+      properties:
+        CacheSize:
+          type: integer
+          format: int64
+          description: Maximum memory for cache in bytes.
+          minimum: 1048576
+          example: 1073741824
+
+    TSViewedRequest:
+      type: object
+      required:
+        - action
+        - hash
+        - file_index
+      description: TorrServer view tag request.
+      properties:
+        action:
+          type: string
+          description: Action to perform.
+          enum:
+            - "set"
+            - "rem"
+            - "list"
+        hash:
+          type: string
+        file_index:
+          type: integer
+
+    TSViewedResponse:
+      type: object
+      required:
+        - hash
+        - file_index
+      description: TorrServer view tag response.
+      properties:
+        hash:
+          type: string
+        file_index:
+          type: integer

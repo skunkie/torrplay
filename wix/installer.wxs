@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 TorrPlay -->
+<!-- SPDX-License-Identifier: MIT -->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:firewall="http://wixtoolset.org/schemas/v4/wxs/firewall"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="TorrPlay"
+           Manufacturer="TorrPlay"
+           Version="$(var.Version)"
+           UpgradeCode="5e291ed3-e56f-43e2-89dd-842c462a0189"
+           Compressed="yes"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." AllowSameVersionUpgrades="yes" Schedule="afterInstallExecute" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="ProductIcon" SourceFile="winres/icon.ico"/>
+
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <WixVariable Id="WixUILicenseRtf" Value="wix/license.rtf" />
+
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="TorrPlay" />
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature">
+      <ComponentRef Id="TorrPlayServiceComponent" />
+    </Feature>
+
+    <Component Id="TorrPlayServiceComponent" Directory="INSTALLFOLDER" Guid="*">
+      <File Id="TorrPlay.exe"
+            Name="TorrPlay.exe"
+            Source="$(var.ServiceFile)"
+            KeyPath="yes" />
+
+      <File Id="LicenseFile"
+            Name="LICENSE.txt"
+            Source="$(var.LicenseFile)" />
+
+      <util:EventSource Name="TorrPlay"
+                        Log="Application"
+                        EventMessageFile="%SystemRoot%\System32\EventCreate.exe" />
+
+      <firewall:FirewallException Id="FWServiceException"
+                                  Name="TorrPlay Service"
+                                  Program="[#TorrPlay.exe]"
+                                  Scope="localSubnet" />
+
+      <ServiceInstall Id="ServiceInstaller"
+                      Type="ownProcess"
+                      Name="TorrPlay"
+                      DisplayName="TorrPlay Service"
+                      Description="Service for instant streaming of torrent media."
+                      Start="auto"
+                      Account="NT AUTHORITY\LocalService"
+                      ErrorControl="normal" />
+
+      <ServiceControl Id="StartService"
+                      Name="TorrPlay"
+                      Start="install"
+                      Wait="no" />
+
+      <ServiceControl Id="StopService"
+                      Name="TorrPlay"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+  </Package>
+</Wix>

@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+[Unit]
+Description=TorrPlay Service
+After=network.target
+
+[Service]
+Type=simple
+User=torrplay
+Group=torrplay
+ExecStart=/usr/bin/torrplay -data-dir /var/lib/torrplay
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=torrplay
+
+[Install]
+WantedBy=multi-user.target

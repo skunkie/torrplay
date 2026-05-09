@@ -1,0 +1,16 @@
+{
+  "productName": "TorrPlay",
+  "identifier": "com.github.torrplay.torrplay",
+  "app": {
+    "windows": [
+      {
+        "title": "TorrPlay"
+      }
+    ]
+  },
+  "bundle": {
+    "externalBin": [
+      "binaries/torrplay"
+    ]
+  }
+}

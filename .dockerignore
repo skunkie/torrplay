@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+.git/
+.vscode/
+
+# Ignore all build artifacts
+/bin
+**/build/
+**/android/app/libs/
+**/src-tauri/target/
+
+# Ignore client build artifacts and dependencies
+**/node_modules
+**/.next
+**/.pnpm-store
+**/out

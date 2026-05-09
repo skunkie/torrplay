@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+project_name: torrplay
+version: 2
+dist: dist
+
+builds:
+  - id: "linux-amd64"
+    goos:
+      - linux
+    goarch:
+      - amd64
+    binary: torrplay
+    main: ./dummy.go
+    hooks:
+      post:
+        - "cp release-artifacts/torrplay-linux-amd64 {{ .Path }}"
+  - id: "linux-arm64"
+    goos:
+      - linux
+    goarch:
+      - arm64
+    binary: torrplay
+    main: ./dummy.go
+    hooks:
+      post:
+        - "cp release-artifacts/torrplay-linux-arm64 {{ .Path }}"
+
+nfpms:
+  - id: packages
+    package_name: torrplay
+    homepage: https://github.com/torrplay/torrplay
+    maintainer: "TorrPlay Team"
+    description: "TorrPlay is a torrent streaming application."
+    license: MIT
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: ./.goreleaser/packaging/torrplay.service
+        dst: /lib/systemd/system/torrplay.service
+        type: config
+    scripts:
+      preinstall: ./.goreleaser/packaging/preinst.sh
+      postinstall: ./.goreleaser/packaging/postinst.sh
+      preremove: ./.goreleaser/packaging/prerm.sh
+      postremove: ./.goreleaser/packaging/postrm.sh
+
+archives:
+  - id: default

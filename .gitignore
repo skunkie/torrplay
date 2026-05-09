@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+.vscode/
+bin/
+web/static/*
+!web/static/README.md
+__debug_bin*
+*.db
+*.syso
