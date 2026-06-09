@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+---
+services:
+  torrplay:
+    image: ghcr.io/torrplay/torrplay:latest
+    container_name: torrplay
+    ports:
+      - "8090:8090"
+    volumes:
+      - ./data:/app/data
+    command: ["--data-dir", "/app/data"]
+    restart: unless-stopped

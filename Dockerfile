@@ -2,19 +2,25 @@
 #
 # SPDX-License-Identifier: MIT
 
-FROM golang:1.25-alpine
+FROM alpine:3.23
 
-ENV MODULE=github.com/torrplay/torrplay
-ENV NAME=torrplay
-ENV VERSION=1.0.0
+ARG TARGETARCH
 
-WORKDIR /build
+WORKDIR /app
 
-RUN go install github.com/tc-hib/go-winres@v0.3.3
+RUN addgroup -g 1000 -S torrplay && \
+    adduser -u 1000 -S -G torrplay torrplay && \
+    chown -R torrplay:torrplay /app
 
-COPY go.mod go.sum ./
-RUN go mod download
+COPY --chown=torrplay:torrplay --chmod=0755 \
+    "./bin/torrplay-linux-${TARGETARCH}" ./torrplay
 
-COPY . .
+USER torrplay
 
-CMD [ "./entrypoint.sh" ]
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8090/api/system/health || exit 1
+
+ENTRYPOINT ["/app/torrplay"]
+CMD []

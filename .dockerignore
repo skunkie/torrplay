@@ -5,8 +5,7 @@
 .git/
 .vscode/
 
-# Ignore all build artifacts
-/bin
+# Ignore build artifacts
 **/build/
 **/android/app/libs/
 **/src-tauri/target/

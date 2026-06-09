@@ -12,7 +12,6 @@ COPY client/package.json .
 COPY client/pnpm-lock.yaml .
 RUN pnpm install --frozen-lockfile --ignore-scripts
 
-COPY client-entrypoint.sh .
-COPY client/ .
+COPY client-entrypoint.sh client/ ./
 
-CMD [ "./client-entrypoint.sh" ]
+CMD ["./client-entrypoint.sh"]

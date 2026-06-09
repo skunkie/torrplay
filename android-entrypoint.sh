@@ -19,7 +19,7 @@ CGO_LDFLAGS="-static-libstdc++" gomobile bind \
 go mod tidy
 
 cd /build/client
-pnpm install --frozen-lockfile
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm build
 npx cap telemetry off
 npx cap sync android

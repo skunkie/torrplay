@@ -42,6 +42,6 @@ WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+COPY --exclude=./bin/ ./ ./
 
-ENTRYPOINT [ "./android-entrypoint.sh" ]
+ENTRYPOINT ["./android-entrypoint.sh"]

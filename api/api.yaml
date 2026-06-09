@@ -461,6 +461,18 @@ paths:
         "504":
           $ref: "#/components/responses/GatewayTimeout"
 
+  /api/system/health:
+    get:
+      tags:
+        - System
+      summary: Health check.
+      description: Check if the application is running and available.
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: Application is healthy.
+
   /api/system/info:
     get:
       tags:

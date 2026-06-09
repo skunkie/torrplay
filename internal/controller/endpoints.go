@@ -544,6 +544,10 @@ func (c *Controller) HeadStream(w http.ResponseWriter, r *http.Request, ih metai
 	api.HTTPError(w, "one of 'path' or 'index' is required", http.StatusBadRequest)
 }
 
+func (c *Controller) HealthCheck(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+
 func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params api.ListTorrentsParams) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
