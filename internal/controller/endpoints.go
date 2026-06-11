@@ -323,30 +323,37 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 	}
 	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
 	masterPlaylist := !(params.Name != nil && strings.HasSuffix(*params.Name, suffix))
-	m3u := "#EXTM3U\n"
+	var m3u strings.Builder
+	_, _ = m3u.WriteString("#EXTM3U\n")
 
 	for _, t := range ts {
-		var hasMedia bool
-		for _, f := range t.Files {
-			ext := strings.ToLower(path.Ext(f.Name))
-			if slices.Contains(mediaExts, ext) {
-				if !masterPlaylist {
-					m3u += fmt.Sprintf("#EXTINF:-1,%s\n", f.Path)
-					m3u += fmt.Sprintf("%s/objects/%s\n", baseURL, f.Path)
+		if masterPlaylist {
+			var hasMedia bool
+			for _, f := range t.Files {
+				ext := strings.ToLower(path.Ext(f.Name))
+				if slices.Contains(mediaExts, ext) {
+					hasMedia = true
+					break
 				}
-				hasMedia = true
-				break
 			}
-		}
-		if masterPlaylist && hasMedia {
-			m3u += fmt.Sprintf("#EXTINF:-1,%s\n", t.Name)
-			m3u += fmt.Sprintf("%s%s?name=%s%s\n", baseURL, r.URL.Path, t.Name, suffix)
+			if hasMedia {
+				_, _ = fmt.Fprintf(&m3u, "#EXTINF:-1,%s\n", t.Name)
+				_, _ = fmt.Fprintf(&m3u, "%s/api/v1/playlist?name=%s%s\n", baseURL, url.QueryEscape(t.Name), suffix)
+			}
+		} else {
+			for _, f := range t.Files {
+				ext := strings.ToLower(path.Ext(f.Name))
+				if slices.Contains(mediaExts, ext) {
+					_, _ = fmt.Fprintf(&m3u, "#EXTINF:-1,%s\n", f.Name)
+					_, _ = fmt.Fprintf(&m3u, "%s/api/v1/stream/%s?path=%s\n", baseURL, t.Hash.HexString(), url.QueryEscape(f.Name))
+				}
+			}
 		}
 	}
 
 	w.Header().Set("Content-Disposition", "attachment; filename=playlist.m3u")
 	w.Header().Set("Content-Type", "application/x-mpegURL")
-	_, _ = w.Write([]byte(m3u))
+	_, _ = w.Write([]byte(m3u.String()))
 }
 
 func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {

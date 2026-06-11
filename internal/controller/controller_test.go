@@ -263,11 +263,44 @@ func TestGetPlaylist(t *testing.T) {
 	defer cleanup()
 
 	addAllSampleTorrents(t, ctrl.router)
-	rr := doGet(t, ctrl.router, "/api/v1/playlist")
 
-	require.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "application/x-mpegURL", rr.Header().Get("Content-Type"))
-	assert.True(t, strings.HasPrefix(rr.Body.String(), "#EXTM3U"))
+	t.Run("master playlist", func(t *testing.T) {
+		rr := doGet(t, ctrl.router, "/api/v1/playlist")
+
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "application/x-mpegURL", rr.Header().Get("Content-Type"))
+		playlist := rr.Body.String()
+		assert.True(t, strings.HasPrefix(playlist, "#EXTM3U"))
+		assert.Contains(t, playlist, "#EXTINF:-1,Big Buck Bunny")
+		assert.Contains(t, playlist, "/api/v1/playlist?name=Big+Buck+Bunny.m3u")
+		assert.Contains(t, playlist, "#EXTINF:-1,Cosmos Laundromat")
+		assert.Contains(t, playlist, "/api/v1/playlist?name=Cosmos+Laundromat.m3u")
+		assert.Contains(t, playlist, "#EXTINF:-1,Sintel")
+		assert.Contains(t, playlist, "/api/v1/playlist?name=Sintel.m3u")
+	})
+
+	t.Run("torrent specific playlist", func(t *testing.T) {
+		rr := doGet(t, ctrl.router, "/api/v1/playlist?name=Sintel.m3u")
+
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Equal(t, "application/x-mpegURL", rr.Header().Get("Content-Type"))
+
+		playlist := rr.Body.String()
+		assert.True(t, strings.HasPrefix(playlist, "#EXTM3U"))
+		assert.Contains(t, playlist, "#EXTINF:-1,Sintel.mp4")
+		lines := strings.Split(playlist, "\n")
+		var streamURL string
+		for i, line := range lines {
+			if strings.Contains(line, "Sintel.mp4") && i+1 < len(lines) {
+				streamURL = lines[i+1]
+				break
+			}
+		}
+		require.NotEmpty(t, streamURL, "stream URL not found in playlist")
+		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+		expectedURLPart := fmt.Sprintf("/api/v1/stream/%s?path=", ih.HexString())
+		assert.Contains(t, streamURL, expectedURLPart)
+	})
 }
 
 func TestGetTorrentStatistics(t *testing.T) {
