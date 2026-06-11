@@ -1188,16 +1188,25 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 		tsMap[t.Hash] = t
 	}
 
+	// untrackedTorrents holds torrents that are loaded in the torrent client but have not yet been added to the database.
+	var untrackedTorrents []*api.Torrent
 	for _, to := range c.client.Torrents() {
 		if _, ok := tsMap[to.InfoHash()]; !ok {
 			select {
 			case <-to.GotInfo():
-				ts = append([]*api.Torrent{torrentToMetadata(to)}, ts...)
+				untrackedTorrents = append(untrackedTorrents, torrentToMetadata(to))
 			case <-time.After(100 * time.Millisecond):
 				continue
 			}
 		}
 	}
+
+	// Sort new torrents alphabetically by name.
+	slices.SortFunc(untrackedTorrents, func(a, b *api.Torrent) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	ts = append(untrackedTorrents, ts...)
 
 	for _, opt := range opts {
 		ts = opt(ts)
