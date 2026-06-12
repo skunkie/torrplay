@@ -1352,6 +1352,9 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	decrement := func() {
 		once.Do(func() {
 			c.metrics.DecStreamingTorrents()
+			if c.downloader != nil {
+				c.downloader.RemoveStreaming(ih)
+			}
 		})
 	}
 	defer decrement()
@@ -1362,6 +1365,9 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	}()
 
 	c.metrics.IncStreamingTorrents()
+	if c.downloader != nil {
+		c.downloader.AddStreaming(ih)
+	}
 
 	// For streaming endpoints, it is important to disable the read and write timeouts.
 	rc := http.NewResponseController(w)

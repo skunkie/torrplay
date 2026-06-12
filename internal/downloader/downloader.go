@@ -11,10 +11,12 @@ import (
 
 	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/metrics"
+	"github.com/torrplay/torrplay/internal/utils"
 )
 
 const checkInterval = 1 * time.Minute
@@ -25,11 +27,13 @@ var gotInfoTimeout = 30 * time.Second
 type Downloader struct {
 	client          *torrent.Client
 	db              database.DatabaseInterface
+	downloading     map[metainfo.Hash]struct{}
 	fileStoragePath string
 	logger          *slog.Logger
 	metrics         *metrics.Metrics
 	mu              sync.Mutex
 	pieceCompletion storage.PieceCompletion
+	streamings      map[metainfo.Hash]int
 	stop            chan struct{}
 	trackers        [][]string
 }
@@ -39,12 +43,38 @@ func New(client *torrent.Client, db database.DatabaseInterface, logger *slog.Log
 	return &Downloader{
 		client:          client,
 		db:              db,
+		downloading:     make(map[metainfo.Hash]struct{}),
 		fileStoragePath: fsp,
 		logger:          logger,
 		metrics:         m,
 		pieceCompletion: pc,
+		streamings:      make(map[metainfo.Hash]int),
 		trackers:        trackers,
 	}
+}
+
+// AddStreaming increases the count of streaming sessions for a torrent.
+func (d *Downloader) AddStreaming(hash metainfo.Hash) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.streamings[hash]++
+}
+
+// RemoveStreaming decreases the count of streaming sessions for a torrent.
+func (d *Downloader) RemoveStreaming(hash metainfo.Hash) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.streamings[hash]--
+	if d.streamings[hash] <= 0 {
+		delete(d.streamings, hash)
+	}
+}
+
+// hasStreamings returns true if there are any active streaming sessions.
+func (d *Downloader) hasStreamings() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.streamings) > 0
 }
 
 // Start starts the background downloader.
@@ -75,6 +105,20 @@ func (d *Downloader) Stop() {
 	d.logger.Info("stopping background downloader")
 	close(d.stop)
 	d.stop = nil
+
+	// Pause all torrents that this downloader was managing.
+	for hash := range d.downloading {
+		if to, ok := d.client.Torrent(hash); ok {
+			d.logger.Debug("pausing background download for torrent on stop", "hash", hash)
+			for _, f := range to.Files() {
+				f.SetPriority(torrent.PiecePriorityNone)
+			}
+		}
+	}
+
+	// Clear the state.
+	d.downloading = make(map[metainfo.Hash]struct{})
+	d.metrics.SetDownloadingTorrents(0)
 }
 
 func (d *Downloader) run() {
@@ -100,19 +144,46 @@ func (d *Downloader) run() {
 func (d *Downloader) processTorrents() {
 	d.logger.Debug("checking for torrents to download in the background")
 
-	torrents, err := d.db.GetTorrents()
+	settings, err := d.db.GetSettings()
+	if err != nil {
+		d.logger.Error("failed to get settings from db", "error", err)
+		return
+	}
+
+	downloaderEnabled := utils.Val(settings.EnableDownloader)
+	isStreaming := d.hasStreamings()
+
+	if !downloaderEnabled {
+		d.logger.Debug("background downloader is disabled, stopping all background downloads")
+	}
+	if isStreaming {
+		d.logger.Debug("streaming is active, pausing background downloader")
+	}
+
+	allTorrents, err := d.db.GetTorrents()
 	if err != nil {
 		d.logger.Error("failed to get torrents from database", "error", err)
 		return
 	}
 
-	var downloadingTorrents float64
-	for _, t := range torrents {
-		// Only process torrents with file storage.
-		if t.Storage == nil || *t.Storage != api.File {
-			continue
+	var fileTorrents []*api.Torrent
+	currentTorrents := make(map[metainfo.Hash]struct{})
+	for _, t := range allTorrents {
+		if t.Storage != nil && *t.Storage == api.File {
+			fileTorrents = append(fileTorrents, t)
+			currentTorrents[t.Hash] = struct{}{}
 		}
+	}
 
+	d.mu.Lock()
+	for hash := range d.downloading {
+		if _, ok := currentTorrents[hash]; !ok {
+			delete(d.downloading, hash)
+		}
+	}
+	d.mu.Unlock()
+
+	for _, t := range fileTorrents {
 		to, ok := d.client.Torrent(t.Hash)
 		if !ok {
 			spec, err := torrent.TorrentSpecFromMagnetUri(t.Magnet)
@@ -156,15 +227,45 @@ func (d *Downloader) processTorrents() {
 			continue
 		}
 
-		// If torrent is complete, we don't need to do anything.
+		d.mu.Lock()
+		_, isDownloading := d.downloading[t.Hash]
+		d.mu.Unlock()
+
 		if to.BytesCompleted() == to.Length() {
-			d.logger.Debug("torrent is already complete", "hash", t.Hash)
+			if isDownloading {
+				// If it was downloading, remove it from our tracking.
+				d.mu.Lock()
+				delete(d.downloading, t.Hash)
+				d.mu.Unlock()
+			}
 			continue
 		}
 
-		downloadingTorrents++
-		d.logger.Debug("starting background download for torrent", "hash", t.Hash)
-		to.DownloadAll()
+		shouldDownload := downloaderEnabled && !isStreaming
+
+		if shouldDownload {
+			if !isDownloading {
+				d.logger.Debug("starting background download for torrent", "hash", t.Hash)
+				to.DownloadAll()
+				d.mu.Lock()
+				d.downloading[t.Hash] = struct{}{}
+				d.mu.Unlock()
+			}
+		} else { // should pause
+			if isDownloading {
+				d.logger.Debug("pausing background download for torrent", "hash", t.Hash)
+				for _, f := range to.Files() {
+					f.SetPriority(torrent.PiecePriorityNone)
+				}
+				d.mu.Lock()
+				delete(d.downloading, t.Hash)
+				d.mu.Unlock()
+			}
+		}
 	}
-	d.metrics.SetDownloadingTorrents(downloadingTorrents)
+
+	d.mu.Lock()
+	downloadingCount := float64(len(d.downloading))
+	d.mu.Unlock()
+	d.metrics.SetDownloadingTorrents(downloadingCount)
 }
