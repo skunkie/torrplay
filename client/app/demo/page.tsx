@@ -86,7 +86,7 @@ const demoTorrentsData: Torrent[] = [
     createdAt: '2026-01-01T00:00:00.000000+00:00',
     totalSize: 220864086,
     pieceCount: 843,
-    pieceSize: 262000,
+    pieceSize: 262144,
     storage: 'memory',
     files: [
       { name: 'Cosmos Laundromat.en.srt', path: 'Cosmos Laundromat/Cosmos Laundromat.en.srt', length: 3945 },
@@ -148,12 +148,12 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     totalPeers: 20,
     completedSize: 129302391,
     inMemory: 0,
-    inMemorySize: 129302391,
+    inMemorySize: 0,
     memoryStats: memoryStats,
     memoryUsagePercentage: 0,
     pieces: Array.from({ length: 987 }, (_, i) => ({
       complete: i < 987,
-      inMemory: i < 987,
+      inMemory: false,
       index: i,
       size: 131072
     })),
@@ -183,12 +183,12 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     totalPeers: 35,
     completedSize: 276445467,
     inMemory: 0,
-    inMemorySize: 276445467,
+    inMemorySize: 0,
     memoryStats: memoryStats,
     memoryUsagePercentage: 0,
     pieces: Array.from({ length: 1055 }, (_, i) => ({
       complete: i < 1055,
-      inMemory: i < 1055,
+      inMemory: false,
       index: i,
       size: 262144
     })),
@@ -197,7 +197,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
   },
   'c9e15763f722f23e98a29decdfae341b98d53056': {
     activePeers: 30,
-    bytesHashed: 101600000,
+    bytesHashed: 220864086,
     bytesRead: 110000000,
     bytesReadData: 105000000,
     bytesReadUsefulData: 102000000,
@@ -225,14 +225,14 @@ const demoTorrentStats: Record<string, TorrentStats> = {
       complete: i < 387,
       inMemory: i < 387,
       index: i,
-      size: 262000
+      size: 262144
     })),
     totalPieces: 843,
     totalSize: 220864086
   },
   '209c8226b299b308beaf2b9cd3fb49212dbd13ec': {
     activePeers: 10,
-    bytesHashed: 572951958,
+    bytesHashed: 1525451,
     bytesRead: 1666873,
     bytesReadData: 1640139,
     bytesReadUsefulData: 1525451,
@@ -262,7 +262,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     piecesDirtiedGood: 3,
     totalPeers: 129,
     totalPieces: 1090,
-    totalSize: 1525451
+    totalSize: 571426507
   },
 };
 
