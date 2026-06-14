@@ -41,8 +41,8 @@ export function TorrentStatsDialogLayout({
 }: TorrentStatsDialogLayoutProps) {
   if (!torrent) return null;
 
-  const completionPercentage = (stats && stats.totalSize > 0)
-    ? (stats.completedSize / stats.totalSize) * 100
+  const completionPercentage = (stats && torrent.totalSize > 0)
+    ? (stats.completedSize / torrent.totalSize) * 100
     : 0;
 
   return (
@@ -82,20 +82,26 @@ export function TorrentStatsDialogLayout({
             </div>
           </div>
 
-          {stats && (
-            <>
-              <div className='space-y-3'>
-                <h4 className='text-sm font-medium'>Overview</h4>
-                <div className='grid grid-cols-2 sm:grid-cols-3 gap-4'>
-                  <StatGridItem label='Total Size'
-                    value={formatBytes(stats.totalSize)} />
+          <div className='space-y-3'>
+            <h4 className='text-sm font-medium'>Overview</h4>
+            <div className='grid grid-cols-2 sm:grid-cols-3 gap-4'>
+              <StatGridItem label='Total Size'
+                value={formatBytes(torrent.totalSize)} />
+              <StatGridItem label='Files'
+                value={torrent.files.length} />
+              {stats && (
+                <>
                   <StatGridItem label='Completed'
                     value={formatBytes(stats.completedSize)} />
                   <StatGridItem label='In Memory'
                     value={formatBytes(stats.inMemorySize)} />
-                </div>
-              </div>
+                </>
+              )}
+            </div>
+          </div>
 
+          {stats && (
+            <>
               <div className='space-y-3'>
                 <h4 className='text-sm font-medium'>Completion Progress</h4>
                 <div className='space-y-2'>
