@@ -58,12 +58,14 @@
     @apply border-border;
   }
 
-  body {
-    @apply bg-background text-foreground;
+  html {
+    /* Default font size: 16px */
+    @apply text-base;
   }
 
-  html {
-    @apply text-base; /* Default font size: 16px */
+  body {
+    @apply bg-background text-foreground;
+    overflow-y: scroll;
   }
 
   /* Increase base font size for larger screens */
@@ -102,18 +104,23 @@
   [data-sonner-toast] {
     @apply bg-card text-card-foreground border-border rounded-lg;
   }
+
   [data-sonner-toast] [data-description] {
     @apply text-muted-foreground;
   }
+
   [data-sonner-toast][data-type='success'] [data-icon] {
     @apply text-primary;
   }
+
   [data-sonner-toast][data-type='error'] [data-icon] {
     @apply text-destructive;
   }
+
   [data-sonner-toast] [data-button] {
     @apply bg-primary text-primary-foreground;
   }
+
   [data-sonner-toast] [data-cancel] {
     @apply bg-muted text-muted-foreground;
   }
@@ -131,7 +138,7 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--primary)); 
+  background: hsl(var(--primary));
   border-radius: 10px;
 }
 
