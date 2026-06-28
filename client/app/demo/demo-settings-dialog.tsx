@@ -4,31 +4,56 @@
 
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { toast } from 'sonner';
 
 import { SettingsDialogLayout } from '@/components/settings-dialog-layout';
 import { useAuth } from '@/lib/auth-context';
-import { Auth } from '@/lib/types/api';
+import { Auth, TorrentClient } from '@/lib/types/api';
 
 interface DemoSettingsDialogProps {
   open: boolean,
   onOpenChange: (open: boolean) => void
 }
 
+const defaultSettings = {
+  auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
+  enableDlna: false,
+  enableDownloader: false,
+  fileStoragePath: '',
+  friendlyName: 'TorrPlay',
+  maxMemory: 512,
+  torrentClient: {
+    disableDht: false,
+    disableIpv6: true,
+    disablePex: false,
+    disableTcp: false,
+    disableUtp: false,
+    downloadRateLimit: 0,
+    establishedConnsPerTorrent: 50,
+    preferHeaderObfuscation: false,
+    seed: false,
+    torrentPeersHighWater: 500,
+    uploadRateLimit: 3145728,
+  },
+};
+
+let demoDefaultsApplied = false;
+
 export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogProps) {
   const { settings, updateSettings } = useAuth();
 
+  useEffect(() => {
+    if (open && !demoDefaultsApplied) {
+      updateSettings(defaultSettings);
+      demoDefaultsApplied = true;
+    }
+  }, [open, updateSettings]);
+
   const handleReset = () => {
     // Resetting to initial demo values.
-    updateSettings({
-      auth: { enabled: false, type: 'basic', username: '', password: '' },
-      enableDlna: false,
-      enableDownloader: false,
-      fileStoragePath: '',
-      friendlyName: 'TorrPlay',
-      maxMemory: 512,
-    });
+    updateSettings(defaultSettings);
+    demoDefaultsApplied = true;
     toast.success('Settings reset', { description: 'Demo mode - settings not actually saved' });
   };
 
@@ -39,6 +64,12 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
 
   const handleAuthSettingsChange = (value: Auth | null) => {
     updateSettings({ auth: value || { enabled: false, type: 'basic' } });
+  };
+
+  const handleTorrentClientSettingsChange = (value: TorrentClient | null) => {
+    if (value) {
+      updateSettings({ torrentClient: value });
+    }
   };
 
   if (!settings) {
@@ -67,6 +98,8 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setFileStoragePath={value => updateSettings({ fileStoragePath: value })}
       authSettings={settings.auth}
       setAuthSettings={handleAuthSettingsChange}
+      torrentClientSettings={settings.torrentClient}
+      setTorrentClientSettings={handleTorrentClientSettingsChange}
       apiUrl={'http://localhost:8090'}
       setApiUrl={() => {}}
       isApiUrlCustom={false}

@@ -31,7 +31,8 @@ interface Settings {
   enableDownloader: boolean,
   fileStoragePath: string,
   friendlyName: string,
-  maxMemory: number
+  maxMemory: number,
+  torrentClient: TorrentClient
 }
 
 interface SystemInfo {
@@ -67,6 +68,20 @@ interface Torrent {
   title?: string,
   totalSize: number,
   updatedAt?: string
+}
+
+interface TorrentClient {
+  disableDht?: boolean,
+  disableIpv6?: boolean,
+  disablePex?: boolean,
+  disableTcp?: boolean,
+  disableUtp?: boolean,
+  downloadRateLimit?: number,
+  establishedConnsPerTorrent?: number,
+  preferHeaderObfuscation?: boolean,
+  seed?: boolean,
+  torrentPeersHighWater?: number,
+  uploadRateLimit?: number
 }
 
 interface TorrentFile {
@@ -147,6 +162,7 @@ export type {
   Torrent,
   TorrentAdd,
   TorrentAddWithFile,
+  TorrentClient,
   TorrentFile,
   TorrentsResponse,
   TorrentStats,

@@ -47,8 +47,12 @@ func (m *mockDB) GetSettings() (*api.Settings, error) {
 		HTTPServerPort:      utils.Ptr(8080),
 		LogLevel:            utils.Ptr(slog.LevelInfo),
 		MaxMemory:           utils.Ptr(int64(1024 * 1024 * 1024)),
-		DisableIpv6:         utils.Ptr(false),
 		ReadaheadPercentage: utils.Ptr(20),
+		TorrentClient: &api.TorrentClient{
+			DisableIPv6:                utils.Ptr(false),
+			EstablishedConnsPerTorrent: utils.Ptr(50),
+			TorrentPeersHighWater:      utils.Ptr(100),
+		},
 	}, nil
 }
 

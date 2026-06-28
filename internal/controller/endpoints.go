@@ -677,6 +677,62 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if reqSettings.TorrentClient != nil {
+		var needsReplace bool
+		torrentClientCopy := api.TorrentClient{}
+		if newSettings.TorrentClient != nil {
+			torrentClientCopy = *newSettings.TorrentClient
+		}
+		if reqSettings.TorrentClient.DisableDHT != nil {
+			needsReplace = true
+			torrentClientCopy.DisableDHT = reqSettings.TorrentClient.DisableDHT
+		}
+		if reqSettings.TorrentClient.DisableIPv6 != nil {
+			needsReplace = true
+			torrentClientCopy.DisableIPv6 = reqSettings.TorrentClient.DisableIPv6
+		}
+		if reqSettings.TorrentClient.DisablePEX != nil {
+			needsReplace = true
+			torrentClientCopy.DisablePEX = reqSettings.TorrentClient.DisablePEX
+		}
+		if reqSettings.TorrentClient.DisableTCP != nil {
+			needsReplace = true
+			torrentClientCopy.DisableTCP = reqSettings.TorrentClient.DisableTCP
+		}
+		if reqSettings.TorrentClient.DisableUTP != nil {
+			needsReplace = true
+			torrentClientCopy.DisableUTP = reqSettings.TorrentClient.DisableUTP
+		}
+		if reqSettings.TorrentClient.DownloadRateLimit != nil {
+			needsReplace = true
+			torrentClientCopy.DownloadRateLimit = reqSettings.TorrentClient.DownloadRateLimit
+		}
+		if reqSettings.TorrentClient.EstablishedConnsPerTorrent != nil {
+			needsReplace = true
+			torrentClientCopy.EstablishedConnsPerTorrent = reqSettings.TorrentClient.EstablishedConnsPerTorrent
+		}
+		if reqSettings.TorrentClient.PreferHeaderObfuscation != nil {
+			needsReplace = true
+			torrentClientCopy.PreferHeaderObfuscation = reqSettings.TorrentClient.PreferHeaderObfuscation
+		}
+		if reqSettings.TorrentClient.Seed != nil {
+			needsReplace = true
+			torrentClientCopy.Seed = reqSettings.TorrentClient.Seed
+		}
+		if reqSettings.TorrentClient.TorrentPeersHighWater != nil {
+			needsReplace = true
+			torrentClientCopy.TorrentPeersHighWater = reqSettings.TorrentClient.TorrentPeersHighWater
+		}
+		if reqSettings.TorrentClient.UploadRateLimit != nil {
+			needsReplace = true
+			torrentClientCopy.UploadRateLimit = reqSettings.TorrentClient.UploadRateLimit
+		}
+		if needsReplace {
+			saveSettings = true
+			newSettings.TorrentClient = &torrentClientCopy
+		}
+	}
+
 	if reqSettings.LogLevel != nil {
 		newSettings.LogLevel = reqSettings.LogLevel
 	}
@@ -688,9 +744,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if reqSettings.MaxMemory != nil {
 		newSettings.MaxMemory = reqSettings.MaxMemory
-	}
-	if reqSettings.DisableIpv6 != nil {
-		newSettings.DisableIpv6 = reqSettings.DisableIpv6
 	}
 	if reqSettings.EnableDlna != nil {
 		newSettings.EnableDlna = reqSettings.EnableDlna
@@ -743,7 +796,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		reconfigureTorrentClient = true
 		saveSettings = true
 	}
-	if utils.Differ(oldSettings.DisableIpv6, newSettings.DisableIpv6) {
+	if utils.Differ(oldSettings.TorrentClient, newSettings.TorrentClient) {
 		reconfigureTorrentClient = true
 		saveSettings = true
 	}

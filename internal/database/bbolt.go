@@ -37,7 +37,6 @@ var (
 	defaultSettings = internalSettings{
 		Settings: api.Settings{
 			Auth:                &api.Auth{Enabled: utils.Ptr(false)},
-			DisableIpv6:         utils.Ptr(false),
 			EnableDlna:          utils.Ptr(false),
 			EnableDownloader:    utils.Ptr(false),
 			FileStoragePath:     utils.Ptr(""),
@@ -48,6 +47,19 @@ var (
 			LogStoreSize:        utils.Ptr(100),
 			MaxMemory:           utils.Ptr(int64(64 * 1024 * 1024)),
 			ReadaheadPercentage: utils.Ptr(90),
+			TorrentClient: &api.TorrentClient{
+				DisableDHT:                 utils.Ptr(false),
+				DisableIPv6:                utils.Ptr(true),
+				DisablePEX:                 utils.Ptr(false),
+				DisableTCP:                 utils.Ptr(false),
+				DisableUTP:                 utils.Ptr(false),
+				DownloadRateLimit:          utils.Ptr(0),
+				EstablishedConnsPerTorrent: utils.Ptr(50),
+				PreferHeaderObfuscation:    utils.Ptr(false),
+				Seed:                       utils.Ptr(false),
+				TorrentPeersHighWater:      utils.Ptr(500),
+				UploadRateLimit:            utils.Ptr(0),
+			},
 		},
 	}
 )
@@ -265,10 +277,6 @@ func (b *BBoltDB) GetSettings() (*api.Settings, error) {
 			needsUpdate = true
 			s.Settings.Auth = defaultSettings.Auth
 		}
-		if s.Settings.DisableIpv6 == nil {
-			needsUpdate = true
-			s.Settings.DisableIpv6 = defaultSettings.Settings.DisableIpv6
-		}
 		if s.Settings.EnableDlna == nil {
 			needsUpdate = true
 			s.Settings.EnableDlna = defaultSettings.Settings.EnableDlna
@@ -308,6 +316,55 @@ func (b *BBoltDB) GetSettings() (*api.Settings, error) {
 		if s.Settings.ReadaheadPercentage == nil {
 			needsUpdate = true
 			s.Settings.ReadaheadPercentage = defaultSettings.Settings.ReadaheadPercentage
+		}
+		if s.Settings.TorrentClient == nil {
+			needsUpdate = true
+			s.Settings.TorrentClient = defaultSettings.Settings.TorrentClient
+		} else {
+			if s.Settings.TorrentClient.DisableDHT == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.DisableDHT = defaultSettings.Settings.TorrentClient.DisableDHT
+			}
+			if s.Settings.TorrentClient.DisableIPv6 == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.DisableIPv6 = defaultSettings.Settings.TorrentClient.DisableIPv6
+			}
+			if s.Settings.TorrentClient.DisablePEX == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.DisablePEX = defaultSettings.Settings.TorrentClient.DisablePEX
+			}
+			if s.Settings.TorrentClient.DisableTCP == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.DisableTCP = defaultSettings.Settings.TorrentClient.DisableTCP
+			}
+			if s.Settings.TorrentClient.DisableUTP == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.DisableUTP = defaultSettings.Settings.TorrentClient.DisableUTP
+			}
+			if s.Settings.TorrentClient.DownloadRateLimit == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.DownloadRateLimit = defaultSettings.Settings.TorrentClient.DownloadRateLimit
+			}
+			if s.Settings.TorrentClient.EstablishedConnsPerTorrent == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.EstablishedConnsPerTorrent = defaultSettings.Settings.TorrentClient.EstablishedConnsPerTorrent
+			}
+			if s.Settings.TorrentClient.PreferHeaderObfuscation == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.PreferHeaderObfuscation = defaultSettings.Settings.TorrentClient.PreferHeaderObfuscation
+			}
+			if s.Settings.TorrentClient.Seed == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.Seed = defaultSettings.Settings.TorrentClient.Seed
+			}
+			if s.Settings.TorrentClient.TorrentPeersHighWater == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.TorrentPeersHighWater = defaultSettings.Settings.TorrentClient.TorrentPeersHighWater
+			}
+			if s.Settings.TorrentClient.UploadRateLimit == nil {
+				needsUpdate = true
+				s.Settings.TorrentClient.UploadRateLimit = defaultSettings.Settings.TorrentClient.UploadRateLimit
+			}
 		}
 
 		if needsUpdate {

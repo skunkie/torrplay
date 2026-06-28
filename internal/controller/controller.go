@@ -44,6 +44,7 @@ import (
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/web"
+	"golang.org/x/time/rate"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -616,9 +617,24 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	}
 
 	clientConfig := torrent.NewDefaultClientConfig()
-	clientConfig.DisableIPv6 = *settings.DisableIpv6
+	if settings.TorrentClient != nil {
+		clientConfig.NoDHT = utils.Val(settings.TorrentClient.DisableDHT)
+		clientConfig.DisableIPv6 = utils.Val(settings.TorrentClient.DisableIPv6)
+		clientConfig.DisablePEX = utils.Val(settings.TorrentClient.DisablePEX)
+		clientConfig.DisableTCP = utils.Val(settings.TorrentClient.DisableTCP)
+		clientConfig.DisableUTP = utils.Val(settings.TorrentClient.DisableUTP)
+		if limit := utils.Val(settings.TorrentClient.DownloadRateLimit); limit > 0 {
+			clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(limit), 0)
+		}
+		clientConfig.EstablishedConnsPerTorrent = utils.Val(settings.TorrentClient.EstablishedConnsPerTorrent)
+		clientConfig.HeaderObfuscationPolicy.RequirePreferred = utils.Val(settings.TorrentClient.PreferHeaderObfuscation)
+		clientConfig.Seed = utils.Val(settings.TorrentClient.Seed)
+		clientConfig.TorrentPeersHighWater = utils.Val(settings.TorrentClient.TorrentPeersHighWater)
+		if limit := utils.Val(settings.TorrentClient.UploadRateLimit); limit > 0 {
+			clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(limit), 0)
+		}
+	}
 	clientConfig.ExtendedHandshakeClientVersion = "qBittorrent/5.1.4"
-	clientConfig.HeaderObfuscationPolicy.RequirePreferred = true
 	clientConfig.ListenPort = 0
 	clientConfig.Slogger = c.configureLogger(clientLevel)
 

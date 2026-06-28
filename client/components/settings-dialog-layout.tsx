@@ -5,6 +5,7 @@
 import { Capacitor } from '@capacitor/core';
 import { isTauri } from '@tauri-apps/api/core';
 import { AlertTriangle, Loader2 } from 'lucide-react';
+import React, { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -21,7 +22,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { formatBytes } from '@/lib/format-utils';
-import { Auth, Settings } from '@/lib/types/api';
+import { Auth, Settings, TorrentClient } from '@/lib/types/api';
 
 interface SettingsDialogLayoutProps {
   open: boolean,
@@ -45,6 +46,8 @@ interface SettingsDialogLayoutProps {
   setFileStoragePath: (value: string) => void,
   authSettings: Auth | null,
   setAuthSettings: (value: Auth | null) => void,
+  torrentClientSettings: TorrentClient | null,
+  setTorrentClientSettings: (value: TorrentClient | null) => void,
 
   apiUrl: string,
   setApiUrl: (value: string) => void,
@@ -77,6 +80,8 @@ export function SettingsDialogLayout({
   setFileStoragePath,
   authSettings,
   setAuthSettings,
+  torrentClientSettings,
+  setTorrentClientSettings,
   apiUrl,
   setApiUrl,
   isApiUrlCustom,
@@ -89,6 +94,27 @@ export function SettingsDialogLayout({
   const IS_TAURI = isTauri();
   const isLoadingSettings = open && !settings && !error;
   const canSaveServerSettings = settings != null;
+  const [rateLimitUnit, setRateLimitUnit] = useState('MiB/s');
+
+  const convertRateLimit = (value: number, toUnit: string) => {
+    if (toUnit === 'KiB/s') {
+      return value / 1024;
+    }
+    if (toUnit === 'MiB/s') {
+      return value / 1024 / 1024;
+    }
+    return value;
+  };
+
+  const getRateLimitInBytes = (value: number) => {
+    if (rateLimitUnit === 'KiB/s') {
+      return value * 1024;
+    }
+    if (rateLimitUnit === 'MiB/s') {
+      return value * 1024 * 1024;
+    }
+    return value;
+  };
 
   return (
     <Dialog open={open}
@@ -286,6 +312,126 @@ export function SettingsDialogLayout({
                     checked={downloaderEnabled}
                     onCheckedChange={setDownloaderEnabled}
                     disabled={!fileStoragePath}
+                  />
+                </div>
+              </div>
+
+              <div className='space-y-4'>
+                <h3 className='text-lg font-medium text-foreground'>Torrent Client</h3>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='disable-dht'>Disable DHT</Label>
+                  <Switch
+                    id='disable-dht'
+                    checked={torrentClientSettings?.disableDht ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableDht: checked } as TorrentClient)}
+                  />
+                </div>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='disable-ipv6'>Disable IPv6</Label>
+                  <Switch
+                    id='disable-ipv6'
+                    checked={torrentClientSettings?.disableIpv6 ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableIpv6: checked } as TorrentClient)}
+                  />
+                </div>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='disable-pex'>Disable PEX</Label>
+                  <Switch
+                    id='disable-pex'
+                    checked={torrentClientSettings?.disablePex ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disablePex: checked } as TorrentClient)}
+                  />
+                </div>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='disable-tcp'>Disable TCP</Label>
+                  <Switch
+                    id='disable-tcp'
+                    checked={torrentClientSettings?.disableTcp ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableTcp: checked } as TorrentClient)}
+                  />
+                </div>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='disable-utp'>Disable uTP</Label>
+                  <Switch
+                    id='disable-utp'
+                    checked={torrentClientSettings?.disableUtp ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableUtp: checked } as TorrentClient)}
+                  />
+                </div>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='seed'>Enable Seeding</Label>
+                  <Switch
+                    id='seed'
+                    checked={torrentClientSettings?.seed ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, seed: checked } as TorrentClient)}
+                  />
+                </div>
+                <div className='flex items-center justify-between'>
+                  <Label htmlFor='prefer-header-obfuscation'>Prefer Header Obfuscation</Label>
+                  <Switch
+                    id='prefer-header-obfuscation'
+                    checked={torrentClientSettings?.preferHeaderObfuscation ?? false}
+                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, preferHeaderObfuscation: checked } as TorrentClient)}
+                  />
+                </div>
+
+                <div className='space-y-2'>
+                  <div className='flex items-center justify-between'>
+                    <Label>Rate Limit Unit</Label>
+                    <Select value={rateLimitUnit}
+                      onValueChange={setRateLimitUnit}>
+                      <SelectTrigger className='w-[120px]'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value='bytes/s'>bytes/s</SelectItem>
+                        <SelectItem value='KiB/s'>KiB/s</SelectItem>
+                        <SelectItem value='MiB/s'>MiB/s</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                <div className='space-y-2'>
+                  <Label htmlFor='download-rate-limit'>Download Rate Limit ({rateLimitUnit})</Label>
+                  <Input
+                    id='download-rate-limit'
+                    type='number'
+                    value={convertRateLimit(torrentClientSettings?.downloadRateLimit ?? 0, rateLimitUnit)}
+                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, downloadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                  />
+                  <p className='text-sm text-muted-foreground'>
+                    0 means unlimited.
+                  </p>
+                </div>
+                <div className='space-y-2'>
+                  <Label htmlFor='upload-rate-limit'>Upload Rate Limit ({rateLimitUnit})</Label>
+                  <Input
+                    id='upload-rate-limit'
+                    type='number'
+                    value={convertRateLimit(torrentClientSettings?.uploadRateLimit ?? 0, rateLimitUnit)}
+                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, uploadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                  />
+                  <p className='text-sm text-muted-foreground'>
+                    0 means unlimited.
+                  </p>
+                </div>
+                <div className='space-y-2'>
+                  <Label htmlFor='established-conns-per-torrent'>Connections Per Torrent</Label>
+                  <Input
+                    id='established-conns-per-torrent'
+                    type='number'
+                    value={torrentClientSettings?.establishedConnsPerTorrent ?? 50}
+                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, establishedConnsPerTorrent: parseInt(e.target.value) } as TorrentClient)}
+                  />
+                </div>
+                <div className='space-y-2'>
+                  <Label htmlFor='torrent-peers-high-water'>Peers High Water Mark</Label>
+                  <Input
+                    id='torrent-peers-high-water'
+                    type='number'
+                    value={torrentClientSettings?.torrentPeersHighWater ?? 500}
+                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, torrentPeersHighWater: parseInt(e.target.value) } as TorrentClient)}
                   />
                 </div>
               </div>

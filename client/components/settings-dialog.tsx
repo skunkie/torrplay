@@ -12,7 +12,7 @@ import useSWR from 'swr';
 import { getSettings } from '@/lib/api/settings';
 import { getApiBaseUrl } from '@/lib/api-client';
 import { useAuth } from '@/lib/auth-context';
-import { Auth, Settings } from '@/lib/types/api';
+import { Auth, Settings, TorrentClient } from '@/lib/types/api';
 
 import { SettingsDialogLayout } from './settings-dialog-layout';
 
@@ -47,6 +47,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [maxMemory, setMaxMemory] = useState(512);
   const [fileStoragePath, setFileStoragePath] = useState('');
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
+  const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
 
   // State for API URL.
   const [apiUrl, setApiUrl] = useState('');
@@ -85,6 +86,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setFileStoragePath(settings.fileStoragePath || '');
       setAuthSettings(settings.auth);
+      setTorrentClientSettings(settings.torrentClient);
     }
   }, [settings, open, IS_TAURI]);
 
@@ -192,6 +194,27 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         }
       }
 
+      if (torrentClientSettings) {
+        const originalTorrentClientSettings = settings.torrentClient;
+        const torrentClientChanges: Partial<TorrentClient> = {};
+
+        if (torrentClientSettings.disableDht !== originalTorrentClientSettings.disableDht) torrentClientChanges.disableDht = torrentClientSettings.disableDht;
+        if (torrentClientSettings.disableIpv6 !== originalTorrentClientSettings.disableIpv6) torrentClientChanges.disableIpv6 = torrentClientSettings.disableIpv6;
+        if (torrentClientSettings.disablePex !== originalTorrentClientSettings.disablePex) torrentClientChanges.disablePex = torrentClientSettings.disablePex;
+        if (torrentClientSettings.disableTcp !== originalTorrentClientSettings.disableTcp) torrentClientChanges.disableTcp = torrentClientSettings.disableTcp;
+        if (torrentClientSettings.disableUtp !== originalTorrentClientSettings.disableUtp) torrentClientChanges.disableUtp = torrentClientSettings.disableUtp;
+        if (torrentClientSettings.downloadRateLimit !== originalTorrentClientSettings.downloadRateLimit) torrentClientChanges.downloadRateLimit = torrentClientSettings.downloadRateLimit;
+        if (torrentClientSettings.establishedConnsPerTorrent !== originalTorrentClientSettings.establishedConnsPerTorrent) torrentClientChanges.establishedConnsPerTorrent = torrentClientSettings.establishedConnsPerTorrent;
+        if (torrentClientSettings.preferHeaderObfuscation !== originalTorrentClientSettings.preferHeaderObfuscation) torrentClientChanges.preferHeaderObfuscation = torrentClientSettings.preferHeaderObfuscation;
+        if (torrentClientSettings.seed !== originalTorrentClientSettings.seed) torrentClientChanges.seed = torrentClientSettings.seed;
+        if (torrentClientSettings.torrentPeersHighWater !== originalTorrentClientSettings.torrentPeersHighWater) torrentClientChanges.torrentPeersHighWater = torrentClientSettings.torrentPeersHighWater;
+        if (torrentClientSettings.uploadRateLimit !== originalTorrentClientSettings.uploadRateLimit) torrentClientChanges.uploadRateLimit = torrentClientSettings.uploadRateLimit;
+
+        if (Object.keys(torrentClientChanges).length > 0) {
+          settingsToUpdate.torrentClient = torrentClientChanges as TorrentClient;
+        }
+      }
+
       if (Object.keys(settingsToUpdate).length > 0) {
         await updateSettings(settingsToUpdate);
       }
@@ -226,6 +249,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setFriendlyName(settings.friendlyName || 'TorrPlay DLNA');
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setAuthSettings(settings.auth);
+      setTorrentClientSettings(settings.torrentClient);
     }
   };
 
@@ -260,6 +284,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setFileStoragePath={setFileStoragePath}
       authSettings={authSettings}
       setAuthSettings={setAuthSettings}
+      torrentClientSettings={torrentClientSettings}
+      setTorrentClientSettings={setTorrentClientSettings}
       apiUrl={apiUrl}
       setApiUrl={setApiUrl}
       isApiUrlCustom={isApiUrlCustom}

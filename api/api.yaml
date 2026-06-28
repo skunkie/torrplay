@@ -1267,6 +1267,64 @@ components:
           description: The lifetime in seconds of the access token.
           example: 3600
 
+    TorrentClient:
+      type: object
+      description: Torrent client configuration.
+      properties:
+        disable_dht:
+          type: boolean
+          description: Disable DHT (Distributed Hash Table).
+          x-go-name: disableDHT
+          example: false
+        disable_ipv6:
+          type: boolean
+          description: Disable IPv6.
+          x-go-name: disableIPv6
+          example: true
+        disable_pex:
+          type: boolean
+          description: Disable PEX (Peer Exchange).
+          x-go-name: disablePEX
+          example: false
+        disable_tcp:
+          type: boolean
+          description: Disable TCP connections.
+          x-go-name: disableTCP
+          example: false
+        disable_utp:
+          type: boolean
+          description: Disable uTP (Micro Transport Protocol).
+          x-go-name: disableUTP
+          example: false
+        download_rate_limit:
+          type: integer
+          description: Download rate limit in bytes per second. 0 means unlimited.
+          minimum: 0
+          example: 0
+        established_conns_per_torrent:
+          type: integer
+          description: The maximum number of established connections per torrent.
+          minimum: 10
+          example: 50
+        prefer_header_obfuscation:
+          type: boolean
+          description: Request that outgoing connections' headers be obfuscated.
+          example: false
+        seed:
+          type: boolean
+          description: Whether to seed after downloading.
+          example: false
+        torrent_peers_high_water:
+          type: integer
+          description: The high water mark for the number of peers per torrent.
+          minimum: 60
+          example: 500
+        upload_rate_limit:
+          type: integer
+          description: Upload rate limit in bytes per second. 0 means unlimited.
+          minimum: 0
+          example: 3145728
+
     TorrentStats:
       type: object
       description: Statistics about torrent activity and performance.
@@ -1459,10 +1517,8 @@ components:
       properties:
         auth:
           $ref: "#/components/schemas/Auth"
-        disable_ipv6:
-          type: boolean
-          description: Disable IPv6 for torrent client.
-          example: false
+        torrent_client:
+          $ref: "#/components/schemas/TorrentClient"
         enable_dlna:
           type: boolean
           description: Enable DLNA media server functionality.
