@@ -408,6 +408,7 @@ jobs:
           STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELEASES_URL: ${{ vars.RELEASES_URL }}
         run: |
           mkdir -p ./out
           cd ./android
@@ -427,7 +428,8 @@ jobs:
             -Pandroid.injected.signing.store.file=${{ runner.temp }}/keystore.jks \
             -Pandroid.injected.signing.store.password=$STORE_PASSWORD \
             -Pandroid.injected.signing.key.alias=$KEY_ALIAS \
-            -Pandroid.injected.signing.key.password=$KEY_PASSWORD
+            -Pandroid.injected.signing.key.password=$KEY_PASSWORD \
+            -PgithubReleasesUrl=$RELEASES_URL
 
           for apk in ./app/build/outputs/apk/release/*.apk; do
             arch=$(basename "$apk" | sed -E 's/.*-(armeabi-v7a|arm64-v8a|x86|x86_64|universal)-.*/\1/')

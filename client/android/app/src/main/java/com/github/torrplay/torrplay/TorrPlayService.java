@@ -10,16 +10,14 @@ import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.net.ConnectivityManager;
-import android.net.LinkAddress;
-import android.net.Network;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 import android.util.Log;
+
 import androidx.core.app.NotificationCompat;
-import java.util.List;
+
 import torrplay.App;
 import torrplay.Torrplay;
 

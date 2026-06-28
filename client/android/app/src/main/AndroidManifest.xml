@@ -11,7 +11,7 @@ SPDX-License-Identifier: MIT
     <supports-screens
         android:largeScreens="true"
         android:xlargeScreens="true"
-        android:anyDensity="true"/>
+        android:anyDensity="true" />
 
     <uses-feature
         android:name="android.software.leanback"
@@ -75,8 +75,8 @@ SPDX-License-Identifier: MIT
             android:enabled="true"
             android:exported="true">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="com.github.torrplay.torrplay.ACTION_RESTART_SERVICE" />
             </intent-filter>
         </receiver>
@@ -94,6 +94,7 @@ SPDX-License-Identifier: MIT
     <uses-permission android:name="android.permission.QUICKBOOT_POWERON" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
