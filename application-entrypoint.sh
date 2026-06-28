@@ -8,6 +8,9 @@ set -e
 
 mkdir -p /build/bin
 
+yq e -i ".info.version = \"${VERSION}\"" /build/api/api.yaml
+go generate ./...
+
 cd /build/cmd/${NAME}
 
 for osarch in linux-amd64 linux-arm linux-arm64 darwin-arm64 windows-amd64 windows-arm64; do

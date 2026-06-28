@@ -8,6 +8,9 @@ set -e
 
 mkdir -p /build/bin
 
+yq e -i ".info.version = \"${VERSION}\"" /build/api/api.yaml
+go generate ./...
+
 go get golang.org/x/mobile/bind
 CGO_LDFLAGS="-static-libstdc++" gomobile bind \
     -target=android \

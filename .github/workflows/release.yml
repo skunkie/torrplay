@@ -57,6 +57,13 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25"
+      - name: Update API spec and regenerate code
+        run: |
+          VERSION="${GITHUB_REF_NAME:1}"
+          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && sudo chmod +x /usr/local/bin/yq
+          yq e -i ".info.version = \"$VERSION\"" api/api.yaml
+          go generate ./...
+        shell: bash
       - name: Build Android Library
         run: |
           mkdir -p ./out
@@ -112,6 +119,13 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: "1.25"
+      - name: Update API spec and regenerate code
+        run: |
+          VERSION="${GITHUB_REF_NAME:1}"
+          sudo wget -q https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq && sudo chmod +x /usr/local/bin/yq
+          yq e -i ".info.version = \"$VERSION\"" api/api.yaml
+          go generate ./...
+        shell: bash
       - name: Install go-winres
         run: go install github.com/tc-hib/go-winres@v0.3.3
         shell: bash

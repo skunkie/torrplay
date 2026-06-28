@@ -37,6 +37,10 @@ RUN corepack prepare pnpm@latest --activate && corepack enable
 # Install gomobile
 RUN go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init
 
+# Install yq
+RUN curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq \
+    && chmod +x /usr/local/bin/yq
+
 WORKDIR /build
 
 COPY go.mod go.sum ./
