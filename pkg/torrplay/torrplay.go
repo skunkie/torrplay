@@ -74,7 +74,7 @@ func (a *App) Start() {
 	a.ctrl.Start()
 }
 
-// Stop gracefully shuts down the Torrplay service.
+// Stop gracefully shuts down the TorrPlay service.
 func (a *App) Stop() {
 	if a != nil && a.ctrl != nil {
 		a.ctrl.Shutdown()
