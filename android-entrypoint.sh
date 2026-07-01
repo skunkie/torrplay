@@ -11,7 +11,6 @@ mkdir -p /build/bin
 yq e -i ".info.version = \"${VERSION}\"" /build/api/api.yaml
 go generate ./...
 
-go get golang.org/x/mobile/bind
 CGO_LDFLAGS="-static-libstdc++" gomobile bind \
     -target=android \
     -androidapi 24 \
@@ -19,7 +18,6 @@ CGO_LDFLAGS="-static-libstdc++" gomobile bind \
     -trimpath \
     -o /build/bin/torrplay.aar \
     /build/pkg/torrplay
-go mod tidy
 
 cd /build/client
 pnpm install --frozen-lockfile --ignore-scripts

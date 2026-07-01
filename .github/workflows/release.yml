@@ -73,7 +73,6 @@ jobs:
           MODULE=github.com/torrplay/torrplay
           LDFLAGS="-X '${MODULE}/internal/buildinfo.BuildDate=${BUILD_DATE}' -X '${MODULE}/internal/buildinfo.Commit=${COMMIT}' -X '${MODULE}/internal/buildinfo.Version=${VERSION}'"
           go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init
-          go get golang.org/x/mobile/bind
           CGO_LDFLAGS="-static-libstdc++" gomobile bind \
             -target=android \
             -androidapi 24 \
