@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { Ban, BarChart3, LogOut, RefreshCw, Search, Settings } from 'lucide-react';
+import { Ban, BarChart3, Info, LogOut, RefreshCw, Search, Settings } from 'lucide-react';
 import Link from 'next/link';
 import { forwardRef } from 'react';
 
@@ -18,8 +18,9 @@ import { AuthContextType } from '@/lib/auth-context';
 
 interface HeaderLayoutProps {
   homeHref: string,
-  onSettingsClick: () => void,
   onMetricsClick: () => void,
+  onSettingsClick: () => void,
+  onSystemInfoClick: () => void,
   onTitleSearch: (query: string) => void,
   liveUpdatesPaused: boolean,
   handlePauseClick: () => void,
@@ -33,8 +34,9 @@ interface HeaderLayoutProps {
 export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
   {
     homeHref,
-    onSettingsClick,
     onMetricsClick,
+    onSettingsClick,
+    onSystemInfoClick,
     onTitleSearch,
     liveUpdatesPaused,
     handlePauseClick,
@@ -107,6 +109,15 @@ export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
             >
               <BarChart3 className='size-6' />
               <span className='sr-only'>Metrics</span>
+            </Button>
+            <Button
+              variant='ghost'
+              size='icon'
+              onClick={onSystemInfoClick}
+              className='text-muted-foreground hover:text-foreground'
+            >
+              <Info className='size-6' />
+              <span className='sr-only'>System Info</span>
             </Button>
             <Button
               variant='ghost'

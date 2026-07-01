@@ -1767,11 +1767,20 @@ components:
     SystemInfo:
       type: object
       required:
+        - addresses
         - build_date
         - commit
         - uptime
         - version
       properties:
+        addresses:
+          type: array
+          description: List of listening addresses.
+          items:
+            type: string
+          example:
+            - "http://127.0.0.1:8090"
+            - "http://192.168.1.100:8090"
         build_date:
           type: string
           description: Date when the build was created.
@@ -1790,6 +1799,9 @@ components:
           description: Application release version (semantic versioning).
           example: "1.0.0"
       example:
+        addresses:
+          - "http://127.0.0.1:8090"
+          - "http://192.168.1.100:8090"
         build_date: "2006-01-02"
         commit: "a1b2c3d"
         uptime: 86400

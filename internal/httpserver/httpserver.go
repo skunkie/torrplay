@@ -55,6 +55,50 @@ func (s *Server) connStateHandler(c net.Conn, cs http.ConnState) {
 	}
 }
 
+// Addrs returns the listening addresses of the server.
+func (s *Server) Addrs() []string {
+	s.mu.Lock()
+	addr := s.addr
+	s.mu.Unlock()
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		s.logger.Warn("could not parse server address", "addr", addr, "error", err)
+		return []string{addr}
+	}
+
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		return []string{addr}
+	}
+
+	ifacesAddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		s.logger.Warn("could not get network interfaces addresses", "error", err)
+		return []string{addr}
+	}
+
+	var addrs []string
+	for _, a := range ifacesAddrs {
+		if ipnet, ok := a.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			// If listening on 0.0.0.0, only add IPv4 addresses.
+			if host == "0.0.0.0" {
+				if ipnet.IP.To4() != nil {
+					addrs = append(addrs, net.JoinHostPort(ipnet.IP.String(), port))
+				}
+			} else {
+				// If listening on :: (or empty), add both IPv4 and IPv6.
+				addrs = append(addrs, net.JoinHostPort(ipnet.IP.String(), port))
+			}
+		}
+	}
+	addrs = append(addrs, net.JoinHostPort("127.0.0.1", port))
+	if host != "0.0.0.0" {
+		addrs = append(addrs, net.JoinHostPort("::1", port))
+	}
+
+	return addrs
+}
+
 // Run starts the HTTP server and blocks until it's stopped.
 func (s *Server) Run() error {
 	s.mu.Lock()

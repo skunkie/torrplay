@@ -23,6 +23,7 @@ import { LoginForm } from '@/components/login-form';
 import { MetricsDialog } from '@/components/metrics-dialog';
 import { PageContainer } from '@/components/page-container';
 import { SettingsDialog } from '@/components/settings-dialog';
+import { SystemInfoDialog } from '@/components/system-info-dialog';
 import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
 import { TorrentStatsDialog } from '@/components/torrent-stats-dialog';
@@ -555,8 +556,9 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
       <Header
         homeHref={homeHref}
         ref={headerRef}
-        onSettingsClick={() => updateModal('settings')}
         onMetricsClick={() => updateModal('metrics')}
+        onSettingsClick={() => updateModal('settings')}
+        onSystemInfoClick={() => updateModal('system-info')}
         onTitleSearch={handleTitleFilterChange}
       />
       <PageContainer>
@@ -597,9 +599,11 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         )}
       </PageContainer>
 
+      <MetricsDialog open={modal === 'metrics'}
+        onOpenChange={() => updateModal(null)} />
       <SettingsDialog open={modal === 'settings'}
         onOpenChange={() => updateModal(null)} />
-      <MetricsDialog open={modal === 'metrics'}
+      <SystemInfoDialog open={modal === 'system-info'}
         onOpenChange={() => updateModal(null)} />
       <TorrentStatsDialog
         torrent={selectedTorrent}

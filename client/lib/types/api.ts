@@ -36,6 +36,7 @@ interface Settings {
 }
 
 interface SystemInfo {
+  addresses: string[],
   buildDate: string,
   commit: string,
   uptime: number,

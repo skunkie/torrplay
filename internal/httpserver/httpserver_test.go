@@ -301,3 +301,56 @@ func TestConnStateHandling(t *testing.T) {
 	assert.Equal(t, 0, len(s.activeConns), "should have no active connections after shutdown")
 	s.connMu.RUnlock()
 }
+
+func TestServer_Addrs(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	router := chi.NewRouter()
+
+	testCases := []struct {
+		name        string
+		addr        string
+		contains    []string
+		notcontains []string
+	}{
+		{
+			name:        "Listen on 0.0.0.0",
+			addr:        "0.0.0.0:8080",
+			contains:    []string{"127.0.0.1:8080"},
+			notcontains: []string{"[::1]:8080"},
+		},
+		{
+			name:     "Listen on [::]",
+			addr:     "[::]:8081",
+			contains: []string{"127.0.0.1:8081", "[::1]:8081"},
+		},
+		{
+			name:     "Listen on empty host",
+			addr:     ":8084",
+			contains: []string{"127.0.0.1:8084", "[::1]:8084"},
+		},
+		{
+			name:     "Listen on localhost",
+			addr:     "localhost:8082",
+			contains: []string{"localhost:8082"},
+		},
+		{
+			name:     "Listen on specific ip",
+			addr:     "127.0.0.1:8083",
+			contains: []string{"127.0.0.1:8083"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer(router, tc.addr, logger)
+			addrs := s.Addrs()
+
+			for _, wantAddr := range tc.contains {
+				assert.Contains(t, addrs, wantAddr)
+			}
+			for _, wantAddr := range tc.notcontains {
+				assert.NotContains(t, addrs, wantAddr)
+			}
+		})
+	}
+}

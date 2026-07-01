@@ -15,16 +15,18 @@ import { HeaderLayout } from './header-layout';
 
 interface HeaderProps {
   homeHref: string,
-  onSettingsClick: () => void,
   onMetricsClick: () => void,
+  onSettingsClick: () => void,
+  onSystemInfoClick: () => void,
   onTitleSearch: (query: string) => void
 }
 
 export const Header = forwardRef<HTMLDivElement, HeaderProps>((
   {
     homeHref,
-    onSettingsClick,
     onMetricsClick,
+    onSettingsClick,
+    onSystemInfoClick,
     onTitleSearch,
   }, ref) => {
   const { liveUpdatesPaused, setLiveUpdatesPaused } = useLiveUpdates();
@@ -68,8 +70,9 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
     <HeaderLayout
       homeHref={homeHref}
       ref={ref}
-      onSettingsClick={onSettingsClick}
       onMetricsClick={onMetricsClick}
+      onSettingsClick={onSettingsClick}
+      onSystemInfoClick={onSystemInfoClick}
       onTitleSearch={onTitleSearch}
       liveUpdatesPaused={liveUpdatesPaused}
       handlePauseClick={handlePauseClick}

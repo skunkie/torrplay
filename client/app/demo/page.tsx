@@ -20,6 +20,7 @@ import { DemoDeleteTorrentDialog } from './demo-delete-torrent-dialog';
 import { DemoEditTorrentDialog } from './demo-edit-torrent-dialog';
 import { DemoMetricsDialog } from './demo-metrics-dialog';
 import { DemoSettingsDialog } from './demo-settings-dialog';
+import { DemoSystemInfoDialog } from './demo-system-info-dialog';
 import { DemoTorrentPlayerDialog } from './demo-torrent-player-dialog';
 import { DemoTorrentStatsDialog } from './demo-torrent-stats-dialog';
 
@@ -425,12 +426,16 @@ function DemoContent() {
     });
   };
 
+  const handleMetricsClick = () => {
+    updateModal('metrics');
+  };
+
   const handleSettingsClick = () => {
     updateModal('settings');
   };
 
-  const handleMetricsClick = () => {
-    updateModal('metrics');
+  const handleSystemInfoClick = () => {
+    updateModal('system-info');
   };
 
   const handleDeleteClick = async () => {
@@ -460,8 +465,9 @@ function DemoContent() {
     <>
       <HeaderLayout
         homeHref='/demo'
-        onSettingsClick={handleSettingsClick}
         onMetricsClick={handleMetricsClick}
+        onSettingsClick={handleSettingsClick}
+        onSystemInfoClick={handleSystemInfoClick}
         onTitleSearch={handleTitleFilterChange}
         liveUpdatesPaused={liveUpdatesPaused}
         handlePauseClick={handlePauseClick}
@@ -514,12 +520,16 @@ function DemoContent() {
         )}
       </PageContainer>
 
+      <DemoMetricsDialog
+        open={modal === 'metrics'}
+        onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
+      />
       <DemoSettingsDialog
         open={modal === 'settings'}
         onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
       />
-      <DemoMetricsDialog
-        open={modal === 'metrics'}
+      <DemoSystemInfoDialog
+        open={modal === 'system-info'}
         onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
       />
       <DemoEditTorrentDialog

@@ -394,6 +394,7 @@ func (c *Controller) GetStream(w http.ResponseWriter, r *http.Request, ih metain
 func (c *Controller) GetSystemInfo(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(api.SystemInfo{
+		Addresses: c.httpServer.Addrs(),
 		BuildDate: buildinfo.BuildDate,
 		Commit:    buildinfo.Commit,
 		Uptime:    int64(time.Since(c.startedAt).Seconds()),
