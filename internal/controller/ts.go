@@ -99,7 +99,7 @@ func (c *Controller) TSSettings(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, params api.TSStreamParams) {
+func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFileName, params api.TSStreamParams) {
 	var (
 		ih        metainfo.Hash
 		magnetStr string
@@ -586,10 +586,11 @@ func tSCorrectionMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// Correct query params and path.
+		// Correct path and query params.
 		if strings.HasPrefix(r.URL.Path, "/stream") {
-			if r.URL.Path != "/stream" {
-				r.URL.Path = "/stream"
+			unescaped, err := url.PathUnescape(r.URL.Path)
+			if err == nil {
+				r.URL.Path = unescaped
 			}
 			q := r.URL.Query()
 			for _, param := range []string{"play", "preload", "stat"} {
