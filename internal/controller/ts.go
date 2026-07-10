@@ -272,12 +272,8 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 	case api.TSTorrentRequestActionRem:
 		c.mu.Lock()
 		defer c.mu.Unlock()
-		if err := c.db.DeleteTorrent(ih); err != nil {
-			st := http.StatusInternalServerError
-			if errors.Is(err, database.ErrTorrentNotFound) {
-				st = http.StatusNotFound
-			}
-			api.HTTPError(w, err.Error(), st)
+		if err := c.deleteTorrentLocked(ih); err != nil {
+			api.HandleError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
