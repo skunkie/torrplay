@@ -63,13 +63,18 @@ var gotInfoTimeout = 30 * time.Second
 
 var _ api.ServerInterface = (*Controller)(nil)
 
+type torrentInfo struct {
+	lastUsedAt  time.Time
+	storageType api.TorrentStorage
+}
+
 // torrentTracker tracks loaded torrents and drops those that have been inactive for a specified time-to-live (TTL).
 // This prevents the system from being overloaded with unused torrents and automatically frees up their associated memory.
 type torrentTracker struct {
 	cleanupDone   chan struct{}
 	cleanupTicker *time.Ticker
 	mu            sync.RWMutex
-	torrents      map[metainfo.Hash]time.Time
+	torrents      map[metainfo.Hash]torrentInfo
 	ttl           time.Duration
 }
 
@@ -127,7 +132,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
 			cleanupDone: make(chan struct{}),
-			torrents:    make(map[metainfo.Hash]time.Time),
+			torrents:    make(map[metainfo.Hash]torrentInfo),
 			ttl:         torrentTrackerTTL,
 		},
 	}
@@ -569,8 +574,8 @@ func (c *Controller) cleanupExpiredTorrents() {
 	c.logger.Debug("cleanup expired torrents", "total", len(c.torrentTracker.torrents))
 	now := time.Now()
 
-	for ih, lastUsedAt := range c.torrentTracker.torrents {
-		sub := now.Sub(lastUsedAt)
+	for ih, info := range c.torrentTracker.torrents {
+		sub := now.Sub(info.lastUsedAt)
 		if sub > c.torrentTracker.ttl {
 			c.logger.Debug("mark torrent as expired", "hash", ih, "age", sub)
 			delete(c.torrentTracker.torrents, ih)

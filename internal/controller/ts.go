@@ -117,6 +117,11 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 		magnetStr = magnetURIfromHash(ih)
 	}
 
+	if utils.Val(params.Play) {
+		c.TSPlay(w, r, ih, *params.Index)
+		return
+	}
+
 	to, err := c.addTorrentByMagnet(magnetStr, api.Memory)
 	if err != nil {
 		api.HandleError(w, err)
@@ -130,11 +135,6 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 			return
 		}
 		to.DownloadPieces(0, 2)
-		return
-	}
-
-	if utils.Val(params.Play) {
-		c.TSPlay(w, r, ih, *params.Index)
 		return
 	}
 

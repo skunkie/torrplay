@@ -1290,6 +1290,27 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 		return nil, fmt.Errorf("failed to parse magnet URI: %w", err)
 	}
 
+	c.torrentTracker.mu.RLock()
+	info, ok := c.torrentTracker.torrents[spec.InfoHash]
+	c.torrentTracker.mu.RUnlock()
+
+	if ok && info.storageType == storageType {
+		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+			c.torrentTracker.mu.Lock()
+			info.lastUsedAt = time.Now()
+			c.torrentTracker.torrents[spec.InfoHash] = info
+			c.torrentTracker.mu.Unlock()
+			return to, nil
+		}
+	}
+
+	if ok && info.storageType != storageType {
+		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+			to.Drop()
+			<-to.Closed()
+		}
+	}
+
 	if len(c.trackers) > 0 {
 		spec.Trackers = c.trackers
 	}
@@ -1319,7 +1340,10 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 	}
 
 	c.torrentTracker.mu.Lock()
-	c.torrentTracker.torrents[to.InfoHash()] = time.Now()
+	c.torrentTracker.torrents[to.InfoHash()] = torrentInfo{
+		lastUsedAt:  time.Now(),
+		storageType: storageType,
+	}
 	c.torrentTracker.mu.Unlock()
 
 	return to, nil
