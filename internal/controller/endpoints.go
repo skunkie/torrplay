@@ -1031,6 +1031,9 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 	if to == nil {
 		return nil, errors.New("cannot build stats from a nil torrent")
 	}
+	if to.Info() == nil {
+		return nil, errors.New("torrent info not available")
+	}
 
 	t, err := c.db.GetTorrent(to.InfoHash())
 	isFileStorage := err == nil && utils.Val(t.Storage) == api.File

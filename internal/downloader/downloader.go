@@ -109,6 +109,10 @@ func (d *Downloader) Stop() {
 	// Pause all torrents that this downloader was managing.
 	for hash := range d.downloading {
 		if to, ok := d.client.Torrent(hash); ok {
+			if to.Info() == nil {
+				d.logger.Warn("torrent in downloader has no info on stop", "hash", hash)
+				continue
+			}
 			d.logger.Debug("pausing background download for torrent on stop", "hash", hash)
 			for _, f := range to.Files() {
 				f.SetPriority(torrent.PiecePriorityNone)
