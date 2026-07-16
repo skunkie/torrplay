@@ -11,18 +11,23 @@ import {
   MediaPlayer,
   type MediaPlayerInstance,
   MediaProvider,
+  MuteButton,
   PlayButton,
   Time,
   TimeSlider,
   type VideoSrc,
+  VolumeSlider,
 } from '@vidstack/react';
 import {
   FullscreenExitIcon,
   FullscreenIcon,
+  MuteIcon,
   PauseIcon,
   PlayIcon,
   SeekBackward10Icon,
-  SeekForward10Icon
+  SeekForward10Icon,
+  VolumeHighIcon,
+  VolumeLowIcon
 } from '@vidstack/react/icons';
 import { X } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -104,6 +109,17 @@ const DemoVideoPlayer: React.FC<DemoVideoPlayerProps> = ({ options, onExit }) =>
           <div className='w-full flex justify-between text-sm px-2 items-center'>
             <Time type='current' />
             <div className='flex items-center gap-x-2'>
+              <MuteButton className='flex h-10 w-10 items-center justify-center rounded-full text-white ring-white/50 transition-all hover:bg-white/10 focus:ring-4'>
+                <MuteIcon className='w-7 h-7 hidden group-data-[muted]:block' />
+                <VolumeLowIcon className='w-7 h-7 hidden group-data-[volume-low]:block' />
+                <VolumeHighIcon className='w-7 h-7 group-data-[muted]:hidden group-data-[volume-low]:hidden' />
+              </MuteButton>
+              <VolumeSlider.Root className='group relative mx-2 inline-flex h-10 w-24 max-w-[80px] cursor-pointer select-none items-center outline-none'>
+                <VolumeSlider.Track className='relative ring-sky-400 z-0 h-2.5 w-full rounded-sm bg-white/20 group-data-[focus]:ring-[3px]'>
+                  <VolumeSlider.TrackFill className='bg-white/70 absolute h-full w-[var(--slider-fill)] rounded-sm will-change-[width]' />
+                </VolumeSlider.Track>
+                <VolumeSlider.Thumb className='absolute left-[var(--slider-fill)] z-20 h-5 w-5 -translate-x-1/2 rounded-full border border-primary bg-white shadow-sm ring-white/40 will-change-[left] group-data-[active]:ring-4' />
+              </VolumeSlider.Root>
               <Time type='duration' />
               <Controls.Group className='flex items-center'>
                 <button
