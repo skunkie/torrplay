@@ -4,24 +4,21 @@
 
 'use client';
 
-import { Activity, Database, HardDrive } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, Cloud, Database, HardDrive } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatBytes } from '@/lib/format-utils';
+import { MemoryStats, SystemMetrics } from '@/lib/types/api';
 
 interface MetricsDialogLayoutProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
-  memoryStats: {
-    usedMemory: number,
-    maxMemory: number,
-    activeTorrents: number,
-    totalPieces: number
-  }
+  memoryStats: MemoryStats,
+  systemMetrics: SystemMetrics
 }
 
-export function MetricsDialogLayout({ open, onOpenChange, memoryStats }: MetricsDialogLayoutProps) {
+export function MetricsDialogLayout({ open, onOpenChange, memoryStats, systemMetrics }: MetricsDialogLayoutProps) {
   return (
     <Dialog open={open}
       onOpenChange={onOpenChange}>
@@ -31,7 +28,7 @@ export function MetricsDialogLayout({ open, onOpenChange, memoryStats }: Metrics
         </DialogHeader>
 
         <div className='space-y-4 py-4 overflow-y-auto flex-1'>
-          <div className='grid gap-3 sm:grid-cols-2 lg:grid-cols-3'>
+          <div className='grid gap-3 sm:grid-cols-2'>
             <Card className='p-4'>
               <div className='flex items-center gap-3'>
                 <div className='p-2 rounded-lg bg-primary/10 flex-shrink-0'>
@@ -55,11 +52,26 @@ export function MetricsDialogLayout({ open, onOpenChange, memoryStats }: Metrics
                   <Database className='h-5 w-5 text-accent' />
                 </div>
                 <div className='flex-1 min-w-0'>
-                  <p className='text-xs text-muted-foreground'>Active Torrents</p>
+                  <p className='text-xs text-muted-foreground'>Streaming Torrents</p>
                   <p className='text-lg font-semibold text-foreground'>
                     {memoryStats.activeTorrents || 0}
                   </p>
-                  <p className='text-xs text-muted-foreground'>currently streaming</p>
+                  <p className='text-xs text-muted-foreground'>in memory</p>
+                </div>
+              </div>
+            </Card>
+
+            <Card className='p-4'>
+              <div className='flex items-center gap-3'>
+                <div className='p-2 rounded-lg bg-chart-2/10 flex-shrink-0'>
+                  <Cloud className='h-5 w-5 text-chart-2' />
+                </div>
+                <div className='flex-1 min-w-0'>
+                  <p className='text-xs text-muted-foreground'>Loaded Torrents</p>
+                  <p className='text-lg font-semibold text-foreground'>
+                    {systemMetrics.activeTorrents || 0}
+                  </p>
+                  <p className='text-xs text-muted-foreground'>in client</p>
                 </div>
               </div>
             </Card>
@@ -75,6 +87,36 @@ export function MetricsDialogLayout({ open, onOpenChange, memoryStats }: Metrics
                     {(memoryStats.totalPieces || 0).toLocaleString()}
                   </p>
                   <p className='text-xs text-muted-foreground'>cached pieces</p>
+                </div>
+              </div>
+            </Card>
+
+            <Card className='p-4'>
+              <div className='flex items-center gap-3'>
+                <div className='p-2 rounded-lg bg-chart-4/10 flex-shrink-0'>
+                  <ArrowDown className='h-5 w-5 text-chart-4' />
+                </div>
+                <div className='flex-1 min-w-0'>
+                  <p className='text-xs text-muted-foreground'>Download Speed</p>
+                  <p className='text-lg font-semibold text-foreground'>
+                    {formatBytes(systemMetrics.downloadSpeed || 0)}/s
+                  </p>
+                  <p className='text-xs text-muted-foreground'>from active torrents</p>
+                </div>
+              </div>
+            </Card>
+
+            <Card className='p-4'>
+              <div className='flex items-center gap-3'>
+                <div className='p-2 rounded-lg bg-chart-5/10 flex-shrink-0'>
+                  <ArrowUp className='h-5 w-5 text-chart-5' />
+                </div>
+                <div className='flex-1 min-w-0'>
+                  <p className='text-xs text-muted-foreground'>Upload Speed</p>
+                  <p className='text-lg font-semibold text-foreground'>
+                    {formatBytes(systemMetrics.uploadSpeed || 0)}/s
+                  </p>
+                  <p className='text-xs text-muted-foreground'>to active torrents</p>
                 </div>
               </div>
             </Card>

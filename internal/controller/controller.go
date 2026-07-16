@@ -89,9 +89,13 @@ type Controller struct {
 	httpClient          *httpclient.Client
 	httpServer          *httpserver.Server
 	images              images.ServiceInterface
+	lastMetricsTime     time.Time
+	lastTotalDownload   int64
+	lastTotalUpload     int64
 	logFile             io.Closer
 	logger              *slog.Logger
 	metrics             *metrics.Metrics
+	metricsMu           sync.RWMutex
 	mu                  sync.RWMutex
 	port                int
 	pieceCompletion     piececompletion.DeletablePieceCompletion

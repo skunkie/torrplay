@@ -519,6 +519,25 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/system/metrics:
+    get:
+      tags:
+        - System
+      summary: Get system metrics.
+      description: Returns real-time system metrics like torrent activity and network speeds.
+      operationId: getSystemMetrics
+      responses:
+        "200":
+          description: System metrics retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemMetrics"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   # qBittorrent Compatibility Endpoints
   /api/v2/torrents/add:
     post:
@@ -1814,6 +1833,28 @@ components:
         commit: "a1b2c3d"
         uptime: 86400
         version: "1.0.0"
+
+    SystemMetrics:
+      type: object
+      required:
+        - active_torrents
+        - download_speed
+        - upload_speed
+      properties:
+        active_torrents:
+          type: integer
+          description: "Total number of torrents loaded in the torrent client."
+          example: 10
+        download_speed:
+          type: integer
+          format: int64
+          description: "Global download speed in bytes per second."
+          example: 1234567
+        upload_speed:
+          type: integer
+          format: int64
+          description: "Global upload speed in bytes per second."
+          example: 123456
 
     TSCacheRequest:
       type: object

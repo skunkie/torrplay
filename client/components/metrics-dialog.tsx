@@ -10,6 +10,7 @@ import useSWR from 'swr';
 
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { getMemoryStats } from '@/lib/api/stats';
+import { getSystemMetrics } from '@/lib/api/system';
 
 import { MetricsDialogLayout } from './metrics-dialog-layout';
 
@@ -23,9 +24,13 @@ export function MetricsDialog({ open, onOpenChange }: MetricsDialogProps) {
     refreshInterval: 1000,
   });
 
+  const { data: systemMetrics } = useSWR(open ? '/api/system/metrics' : null, () => getSystemMetrics(), {
+    refreshInterval: 1000,
+  });
+
   if (!open) return null;
 
-  if (!memoryStats) {
+  if (!memoryStats || !systemMetrics) {
     return (
       <Dialog open={open}
         onOpenChange={onOpenChange}>
@@ -43,5 +48,6 @@ export function MetricsDialog({ open, onOpenChange }: MetricsDialogProps) {
 
   return <MetricsDialogLayout open={open}
     onOpenChange={onOpenChange}
-    memoryStats={memoryStats} />;
+    memoryStats={memoryStats}
+    systemMetrics={systemMetrics} />;
 }

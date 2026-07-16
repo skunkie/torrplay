@@ -43,6 +43,12 @@ interface SystemInfo {
   version: string
 }
 
+interface SystemMetrics {
+  activeTorrents: number,
+  downloadSpeed: number,
+  uploadSpeed: number
+}
+
 interface TokenRequest {
   grantType: 'password',
   username: string,
@@ -158,6 +164,7 @@ export type {
   PieceInfo,
   Settings,
   SystemInfo,
+  SystemMetrics,
   TokenRequest,
   TokenResponse,
   Torrent,
