@@ -174,7 +174,10 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.logger.Info(fmt.Sprintf("initializing TorrPlay with data directory: %s", c.dataDir))
 
-	trackers, err := c.fetchTrackers()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	trackers, err := utils.FetchTrackers(ctx, c.httpClient)
 	if err != nil {
 		c.logger.Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
 	}
@@ -700,41 +703,4 @@ func (c *Controller) configureLogger(level slog.Level) *slog.Logger {
 	storeHandler := logging.NewStoreHandler(handler, logging.DefaultStore)
 
 	return slog.New(storeHandler)
-}
-
-func (c *Controller) fetchTrackers() ([][]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	url := "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt"
-
-	resp, err := c.httpClient.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP request failed with status: %s", resp.Status)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
-	}
-
-	// Convert to string and and split by lines.
-	content := string(body)
-	lines := strings.Split(content, "\n")
-
-	// Filter out empty lines and create a slice.
-	var trackers []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			trackers = append(trackers, line)
-		}
-	}
-
-	return [][]string{trackers}, nil
 }

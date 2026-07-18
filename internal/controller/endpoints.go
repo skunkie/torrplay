@@ -1318,9 +1318,7 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 		}
 	}
 
-	if len(c.trackers) > 0 {
-		spec.Trackers = c.trackers
-	}
+	utils.AddTrackersToSpec(spec, c.trackers)
 
 	if storageType == api.File && c.settings.FileStoragePath != nil && *c.settings.FileStoragePath != "" {
 		fileStoragePath := *c.settings.FileStoragePath
