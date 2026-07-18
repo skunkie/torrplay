@@ -33,7 +33,7 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 				continue
 			}
 
-			to, err := c.addTorrentByMagnet(magnet, api.File)
+			to, err := c.addTorrentByMagnet(magnet)
 			if err != nil {
 				api.HandleError(w, err)
 				return
@@ -100,7 +100,7 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 				}
 				magnetStr := magnet.String()
 
-				to, err := c.addTorrentByMagnet(magnetStr, api.File)
+				to, err := c.addTorrentByMagnet(magnetStr)
 				if err != nil {
 					api.HandleError(w, err)
 					return

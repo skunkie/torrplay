@@ -187,7 +187,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	to, err := c.addTorrentByMagnet(*req.Magnet, utils.Val(req.Storage))
+	to, err := c.addTorrentByMagnet(*req.Magnet)
 	if err != nil {
 		api.HandleError(w, err)
 		return
@@ -978,6 +978,10 @@ func (c *Controller) UpdateTorrent(w http.ResponseWriter, r *http.Request, ih me
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// addTorrentByHash adds a torrent to the client by its info hash.
+// It first checks if the torrent already exists in the database and reuses
+// the stored storage type to ensure consistency. If the torrent is not in
+// the database, it defaults to memory storage.
 func (c *Controller) addTorrentByHash(ih metainfo.Hash) (*torrent.Torrent, error) {
 	if ih.IsZero() {
 		return nil, fmt.Errorf("invalid hash %s", ih.HexString())
@@ -994,13 +998,26 @@ func (c *Controller) addTorrentByHash(ih metainfo.Hash) (*torrent.Torrent, error
 	return c.loadTorrent(t.Magnet, utils.Val(t.Storage))
 }
 
-func (c *Controller) addTorrentByMagnet(uri string, storageType api.TorrentStorage) (*torrent.Torrent, error) {
+// addTorrentByMagnet adds a torrent to the client by its magnet URI.
+// It first checks if the torrent already exists in the database and reuses
+// the stored storage type to ensure consistency. If the torrent is not in
+// the database, it defaults to memory storage.
+func (c *Controller) addTorrentByMagnet(uri string) (*torrent.Torrent, error) {
 	magnetV2, err := metainfo.ParseMagnetV2Uri(uri)
 	if err != nil || magnetV2.InfoHash.Value.IsZero() {
 		return nil, api.NewError(fmt.Sprintf("invalid magnet URI: %v", err), http.StatusBadRequest)
 	}
 
-	return c.loadTorrent(uri, storageType)
+	ih := magnetV2.InfoHash.Value
+	t, err := c.db.GetTorrent(ih)
+	if err != nil {
+		if !errors.Is(err, database.ErrTorrentNotFound) {
+			return nil, err
+		}
+		return c.loadTorrent(uri, api.Memory)
+	}
+
+	return c.loadTorrent(uri, utils.Val(t.Storage))
 }
 
 func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {

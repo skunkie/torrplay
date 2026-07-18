@@ -122,7 +122,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 		return
 	}
 
-	to, err := c.addTorrentByMagnet(magnetStr, api.Memory)
+	to, err := c.addTorrentByMagnet(magnetStr)
 	if err != nil {
 		api.HandleError(w, err)
 		return
@@ -226,7 +226,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case api.TSTorrentRequestActionAdd, api.TSTorrentRequestActionGet:
-		to, err := c.addTorrentByMagnet(*magnet, api.Memory)
+		to, err := c.addTorrentByMagnet(*magnet)
 		if err != nil {
 			api.HandleError(w, err)
 			return
@@ -324,7 +324,7 @@ func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	to, err := c.addTorrentByMagnet(magnetV2.String(), api.Memory)
+	to, err := c.addTorrentByMagnet(magnetV2.String())
 	if err != nil {
 		api.HandleError(w, err)
 		return
