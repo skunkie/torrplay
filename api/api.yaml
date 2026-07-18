@@ -783,7 +783,7 @@ paths:
         content:
           multipart/form-data:
             schema:
-              $ref: "#/components/schemas/TorrentAddFile"
+              $ref: "#/components/schemas/TSTorrentAddFile"
       responses:
         "201":
           description: Torrent added successfully.
@@ -1720,6 +1720,8 @@ components:
           type: string
           description: URL or data URI to poster image.
           example: "https://example.com/poster.jpg"
+        storage:
+          $ref: "#/components/schemas/TorrentStorage"
 
     TorrentFileUpdate:
       type: object
@@ -1955,6 +1957,31 @@ components:
           description: End position in bytes.
           minimum: 0
           example: 1048576
+
+    TSTorrentAddFile:
+      type: object
+      required:
+        - file
+      properties:
+        file:
+          type: string
+          format: binary
+          description: Torrent file.
+          example: "(binary torrent file)"
+        category:
+          type: string
+          description: Category for organizing torrents.
+          example: "Movies"
+        title:
+          type: string
+          description: Display title for the torrent.
+          minLength: 1
+          maxLength: 1024
+          example: "Sintel"
+        poster:
+          type: string
+          description: URL or data URI to poster image.
+          example: "https://example.com/poster.jpg"
 
     TSTorrentRequest:
       type: object
