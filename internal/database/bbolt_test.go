@@ -35,7 +35,7 @@ func TestBBoltDB(t *testing.T) {
 				Name: "Sintel",
 			}
 
-			err := db.CreateTorrent(torrent)
+			err := db.CreateTorrent(FromAPITorrent(torrent))
 			require.NoError(t, err)
 
 			retrieved, err := db.GetTorrent(torrent.Hash)
@@ -43,7 +43,7 @@ func TestBBoltDB(t *testing.T) {
 			assert.Equal(t, torrent.Name, retrieved.Name)
 
 			// Try to create the same torrent again.
-			err = db.CreateTorrent(torrent)
+			err = db.CreateTorrent(FromAPITorrent(torrent))
 			assert.ErrorIs(t, err, ErrTorrentExists)
 		})
 
@@ -74,19 +74,22 @@ func TestBBoltDB(t *testing.T) {
 
 	t.Run("Settings", func(t *testing.T) {
 		t.Run("Get and Update", func(t *testing.T) {
-			settings, err := db.GetSettings()
+			dbSettings, err := db.GetSettings()
 			require.NoError(t, err)
-			assert.NotNil(t, settings)
+			assert.NotNil(t, dbSettings)
 
+			apiSettings := ToAPISettings(dbSettings)
 			newPort := 9091
-			settings.HTTPServerPort = &newPort
+			apiSettings.HTTPServerPort = &newPort
 
-			err = db.UpdateSettings(settings)
+			err = db.UpdateSettings(FromAPISettings(apiSettings))
 			require.NoError(t, err)
 
-			updated, err := db.GetSettings()
+			updatedDbSettings, err := db.GetSettings()
 			require.NoError(t, err)
-			assert.Equal(t, newPort, *updated.HTTPServerPort)
+
+			updatedApiSettings := ToAPISettings(updatedDbSettings)
+			assert.Equal(t, newPort, *updatedApiSettings.HTTPServerPort)
 		})
 	})
 

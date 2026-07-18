@@ -476,11 +476,12 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 
 	t, err := c.db.GetTorrent(ih)
 	if err == nil {
-		if t.Poster != nil {
-			t.Poster = c.buildPosterUrl(r, *t.Poster)
+		apiT := database.ToAPITorrent(t)
+		if apiT.Poster != nil {
+			apiT.Poster = c.buildPosterUrl(r, *apiT.Poster)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(t); err != nil {
+		if err := json.NewEncoder(w).Encode(apiT); err != nil {
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		}
 		return
@@ -630,12 +631,13 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var reconfigureDLNA, reconfigureLogger, reconfigureTorrentClient, restartHTTPServer, saveSettings bool
 
 	c.mu.Lock()
-	oldSettings, err := c.db.GetSettings()
+	dbOldSettings, err := c.db.GetSettings()
 	if err != nil {
 		c.mu.Unlock()
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	oldSettings := database.ToAPISettings(dbOldSettings)
 	newSettings := *oldSettings
 
 	c.mu.Unlock()
@@ -868,7 +870,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		c.mu.Lock()
 		c.settings = &newSettings
 		c.mu.Unlock()
-		err = c.db.UpdateSettings(&newSettings)
+		err = c.db.UpdateSettings(database.FromAPISettings(&newSettings))
 		if err != nil {
 			api.HTTPError(w, fmt.Sprintf("failed to update settings, %v", err), http.StatusInternalServerError)
 			return
@@ -1126,7 +1128,7 @@ func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.Torren
 		t.Title = req.Title
 	}
 
-	if err := c.db.CreateTorrent(t); err != nil {
+	if err := c.db.CreateTorrent(database.FromAPITorrent(t)); err != nil {
 		if errors.Is(err, database.ErrTorrentExists) {
 			return nil, api.NewError(err.Error(), http.StatusConflict)
 		}
@@ -1242,10 +1244,12 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, url string) {
 }
 
 func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) ([]*api.Torrent, error) {
-	ts, err := c.db.GetTorrents()
+	dbTs, err := c.db.GetTorrents()
 	if err != nil {
 		return nil, api.NewError(err.Error(), http.StatusInternalServerError)
 	}
+
+	ts := database.ToAPITorrents(dbTs)
 
 	tsMap := make(map[metainfo.Hash]*api.Torrent, len(ts))
 	for _, t := range ts {

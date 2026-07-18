@@ -61,7 +61,7 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 
 	// Disable auth.
 	ctrl.settings.Auth.Enabled = utils.Ptr(false)
-	err = ctrl.db.UpdateSettings(ctrl.settings)
+	err = ctrl.db.UpdateSettings(database.FromAPISettings(ctrl.settings))
 	require.NoError(t, err)
 
 	for _, opt := range opts {

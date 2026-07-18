@@ -6,19 +6,18 @@ package database
 
 import (
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/torrplay/torrplay/internal/api"
 )
 
 type DatabaseInterface interface {
-	CreateTorrent(*api.Torrent) error
-	GetTorrents() ([]*api.Torrent, error)
-	GetTorrent(metainfo.Hash) (*api.Torrent, error)
-	UpdateTorrent(*api.Torrent) error
+	CreateTorrent(*Torrent) error
+	GetTorrents() ([]*Torrent, error)
+	GetTorrent(metainfo.Hash) (*Torrent, error)
+	UpdateTorrent(*Torrent) error
 	DeleteTorrent(metainfo.Hash) error
 	IsPosterUsed(string) (bool, error)
 
-	GetSettings() (*api.Settings, error)
-	UpdateSettings(*api.Settings) error
+	GetSettings() (*Settings, error)
+	UpdateSettings(*Settings) error
 
 	GetDLNAUDN() (string, error)
 	GetJWTSecret() (string, error)

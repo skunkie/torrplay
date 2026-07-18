@@ -150,7 +150,7 @@ func (cd *ContentDirectory) BrowseChildren(ctx context.Context, parentID upnpav.
 		return nil, err
 	}
 
-	var torrentsByParentID []*api.Torrent
+	var torrentsByParentID []*database.Torrent
 	switch parentID {
 	case allTorrentsContainerID:
 		torrentsByParentID = torrents
@@ -271,7 +271,7 @@ func (cd *ContentDirectory) browseRoot(_ context.Context) (*upnpav.DIDLLite, err
 		return nil, err
 	}
 
-	var all []*api.Torrent
+	var all []*database.Torrent
 	for _, torrent := range torrents {
 		if hasMediaFiles(torrent.Files) {
 			all = append(all, torrent)
@@ -326,7 +326,7 @@ func (cd *ContentDirectory) browseTorrents(_ context.Context, id upnpav.ObjectID
 	switch id {
 	case allTorrentsContainerID:
 		title = allTorrentsContainer
-		var all []*api.Torrent
+		var all []*database.Torrent
 		for _, torrent := range torrents {
 			if hasMediaFiles(torrent.Files) {
 				all = append(all, torrent)
@@ -355,7 +355,7 @@ func (cd *ContentDirectory) browseTorrents(_ context.Context, id upnpav.ObjectID
 	}, nil
 }
 
-func (cd *ContentDirectory) buildTorrentsDIDL(_ context.Context, parentID upnpav.ObjectID, torrents []*api.Torrent) (*upnpav.DIDLLite, error) {
+func (cd *ContentDirectory) buildTorrentsDIDL(_ context.Context, parentID upnpav.ObjectID, torrents []*database.Torrent) (*upnpav.DIDLLite, error) {
 	didl := &upnpav.DIDLLite{}
 	for _, torrent := range torrents {
 		if !hasMediaFiles(torrent.Files) {
@@ -494,8 +494,8 @@ func (cd *ContentDirectory) iconURI(filepath string) (*url.URL, error) {
 	return &iconURL, nil
 }
 
-func getRecentlyAddedTorrents(allTorrents []*api.Torrent) []*api.Torrent {
-	torrents := make([]*api.Torrent, len(allTorrents))
+func getRecentlyAddedTorrents(allTorrents []*database.Torrent) []*database.Torrent {
+	torrents := make([]*database.Torrent, len(allTorrents))
 	copy(torrents, allTorrents)
 
 	sort.Slice(torrents, func(i, j int) bool {
@@ -509,9 +509,9 @@ func getRecentlyAddedTorrents(allTorrents []*api.Torrent) []*api.Torrent {
 	return torrents
 }
 
-func getRecentlyViewedTorrents(allTorrents []*api.Torrent) []*api.Torrent {
+func getRecentlyViewedTorrents(allTorrents []*database.Torrent) []*database.Torrent {
 	type viewedTorrent struct {
-		torrent  *api.Torrent
+		torrent  *database.Torrent
 		viewedAt time.Time
 	}
 
@@ -537,7 +537,7 @@ func getRecentlyViewedTorrents(allTorrents []*api.Torrent) []*api.Torrent {
 		viewedTorrents = viewedTorrents[:recentlyItemsCount]
 	}
 
-	result := make([]*api.Torrent, len(viewedTorrents))
+	result := make([]*database.Torrent, len(viewedTorrents))
 	for i, wt := range viewedTorrents {
 		result[i] = wt.torrent
 	}

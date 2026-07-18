@@ -30,15 +30,15 @@ import (
 type MockDB struct {
 	database.DatabaseInterface
 	err      error
-	settings *api.Settings
-	torrents []*api.Torrent
+	settings *database.Settings
+	torrents []*database.Torrent
 }
 
-func (m *MockDB) GetSettings() (*api.Settings, error) {
+func (m *MockDB) GetSettings() (*database.Settings, error) {
 	return m.settings, m.err
 }
 
-func (m *MockDB) GetTorrents() ([]*api.Torrent, error) {
+func (m *MockDB) GetTorrents() ([]*database.Torrent, error) {
 	return m.torrents, m.err
 }
 
@@ -73,10 +73,12 @@ func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 	storageType := api.File
-	testApiTorrent := &api.Torrent{
-		Hash:    testHash,
-		Magnet:  testMetaInfo.Magnet(nil, nil).String(),
-		Storage: &storageType,
+	testApiTorrent := &database.Torrent{
+		Torrent: api.Torrent{
+			Hash:    testHash,
+			Magnet:  testMetaInfo.Magnet(nil, nil).String(),
+			Storage: &storageType,
+		},
 	}
 
 	td := t.TempDir()
@@ -85,8 +87,8 @@ func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &api.Settings{EnableDownloader: utils.Ptr(true)},
-		torrents: []*api.Torrent{testApiTorrent},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
+		torrents: []*database.Torrent{testApiTorrent},
 	}
 	m := metrics.New()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -123,7 +125,7 @@ func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents), "DownloadingTorrents metric should remain 0")
 
 	// Now, let's simulate the torrent completing by having the DB return no torrents.
-	db.torrents = []*api.Torrent{}
+	db.torrents = []*database.Torrent{}
 	downloader.processTorrents()
 	require.Eventually(t, func() bool {
 		return testutil.ToFloat64(m.DownloadingTorrents) == 0
@@ -190,7 +192,7 @@ func TestDownloader_Stop(t *testing.T) {
 	defer client.Close()
 
 	db := &MockDB{
-		settings: &api.Settings{EnableDownloader: utils.Ptr(true)},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
 	}
 	downloader := New(client, db, logger, m, pc, td, nil)
 	downloader.downloading[testHash] = struct{}{}
@@ -213,10 +215,12 @@ func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
 	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 	storageType := api.File
-	testApiTorrent := &api.Torrent{
-		Hash:    testHash,
-		Magnet:  testMetaInfo.Magnet(nil, nil).String(),
-		Storage: &storageType,
+	testApiTorrent := &database.Torrent{
+		Torrent: api.Torrent{
+			Hash:    testHash,
+			Magnet:  testMetaInfo.Magnet(nil, nil).String(),
+			Storage: &storageType,
+		},
 	}
 
 	td := t.TempDir()
@@ -225,8 +229,8 @@ func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &api.Settings{EnableDownloader: utils.Ptr(false)},
-		torrents: []*api.Torrent{testApiTorrent},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(false)}},
+		torrents: []*database.Torrent{testApiTorrent},
 	}
 	m := metrics.New()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -262,10 +266,12 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 	storageType := api.File
-	testApiTorrent := &api.Torrent{
-		Hash:    testHash,
-		Magnet:  testMetaInfo.Magnet(nil, nil).String(),
-		Storage: &storageType,
+	testApiTorrent := &database.Torrent{
+		Torrent: api.Torrent{
+			Hash:    testHash,
+			Magnet:  testMetaInfo.Magnet(nil, nil).String(),
+			Storage: &storageType,
+		},
 	}
 
 	td := t.TempDir()
@@ -274,8 +280,8 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &api.Settings{EnableDownloader: utils.Ptr(true)},
-		torrents: []*api.Torrent{testApiTorrent},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
+		torrents: []*database.Torrent{testApiTorrent},
 	}
 	m := metrics.New()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

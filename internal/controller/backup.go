@@ -22,14 +22,14 @@ func (c *Controller) BackupTorrents(w http.ResponseWriter, r *http.Request) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	ts, err := c.db.GetTorrents()
+	dbTs, err := c.db.GetTorrents()
 	if err != nil {
 		api.HandleError(w, err)
 		return
 	}
 
 	postersData := make(map[string][]byte)
-	for _, t := range ts {
+	for _, t := range dbTs {
 		if t.Poster != nil {
 			p, err := c.images.Get(*t.Poster)
 			if err != nil {
@@ -42,7 +42,7 @@ func (c *Controller) BackupTorrents(w http.ResponseWriter, r *http.Request) {
 
 	backupData := backup{
 		Posters:  postersData,
-		Torrents: ts,
+		Torrents: database.ToAPITorrents(dbTs),
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -90,9 +90,9 @@ func (c *Controller) RestoreTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, t := range backupData.Torrents {
-		if err := c.db.CreateTorrent(t); err != nil {
+		if err := c.db.CreateTorrent(database.FromAPITorrent(t)); err != nil {
 			if err == database.ErrTorrentExists {
-				if err := c.db.UpdateTorrent(t); err != nil {
+				if err := c.db.UpdateTorrent(database.FromAPITorrent(t)); err != nil {
 					c.logger.Error("failed to update torrent on restore", "err", err, "hash", t.Hash.HexString())
 				}
 			} else {

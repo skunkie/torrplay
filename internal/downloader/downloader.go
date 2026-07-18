@@ -170,7 +170,7 @@ func (d *Downloader) processTorrents() {
 		return
 	}
 
-	var fileTorrents []*api.Torrent
+	var fileTorrents []*database.Torrent
 	currentTorrents := make(map[metainfo.Hash]struct{})
 	for _, t := range allTorrents {
 		if t.Storage != nil && *t.Storage == api.File {

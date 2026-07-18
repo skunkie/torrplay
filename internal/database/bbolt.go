@@ -34,7 +34,7 @@ var (
 	errBucketNotFound   = errors.New("bucket not found")
 	errSettingsNotFound = errors.New("settings not found")
 
-	defaultSettings = internalSettings{
+	defaultSettings = Settings{
 		Settings: api.Settings{
 			Auth:                &api.Auth{Enabled: utils.Ptr(false)},
 			EnableDlna:          utils.Ptr(false),
@@ -68,12 +68,6 @@ type BBoltDB struct {
 	db *bbolt.DB
 }
 
-type internalSettings struct {
-	api.Settings
-	DLNAUDN   string `json:"dlna_udn,omitempty"`
-	JWTSecret string `json:"jwt_secret,omitempty"`
-}
-
 func NewBBoltDB(path string) (*BBoltDB, error) {
 	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
@@ -100,7 +94,7 @@ func (b *BBoltDB) Close() error {
 	return b.db.Close()
 }
 
-func (b *BBoltDB) CreateTorrent(t *api.Torrent) error {
+func (b *BBoltDB) CreateTorrent(t *Torrent) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
 		if bucket == nil {
@@ -124,8 +118,8 @@ func (b *BBoltDB) CreateTorrent(t *api.Torrent) error {
 	})
 }
 
-func (b *BBoltDB) GetTorrents() ([]*api.Torrent, error) {
-	var ts []*api.Torrent
+func (b *BBoltDB) GetTorrents() ([]*Torrent, error) {
+	var ts []*Torrent
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
@@ -134,7 +128,7 @@ func (b *BBoltDB) GetTorrents() ([]*api.Torrent, error) {
 		}
 
 		return bucket.ForEach(func(_, v []byte) error {
-			var t api.Torrent
+			var t Torrent
 			if err := json.Unmarshal(v, &t); err != nil {
 				return fmt.Errorf("failed to unmarshal torrent: %w", err)
 			}
@@ -143,7 +137,7 @@ func (b *BBoltDB) GetTorrents() ([]*api.Torrent, error) {
 		})
 	})
 
-	slices.SortFunc(ts, func(a, b *api.Torrent) int {
+	slices.SortFunc(ts, func(a, b *Torrent) int {
 		timeA := utils.Val(a.CreatedAt)
 		if a.UpdatedAt != nil {
 			timeA = *a.UpdatedAt
@@ -165,8 +159,8 @@ func (b *BBoltDB) GetTorrents() ([]*api.Torrent, error) {
 	return ts, err
 }
 
-func (b *BBoltDB) GetTorrent(ih metainfo.Hash) (*api.Torrent, error) {
-	var t api.Torrent
+func (b *BBoltDB) GetTorrent(ih metainfo.Hash) (*Torrent, error) {
+	var t Torrent
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
@@ -211,7 +205,7 @@ func (b *BBoltDB) IsPosterUsed(posterID string) (bool, error) {
 	return count > 0, nil
 }
 
-func (b *BBoltDB) UpdateTorrent(t *api.Torrent) error {
+func (b *BBoltDB) UpdateTorrent(t *Torrent) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
 		if bucket == nil {
@@ -237,8 +231,8 @@ func (b *BBoltDB) DeleteTorrent(ih metainfo.Hash) error {
 	})
 }
 
-func (b *BBoltDB) getInternalSettings(tx *bbolt.Tx) (*internalSettings, error) {
-	var s internalSettings
+func (b *BBoltDB) getSettings(tx *bbolt.Tx) (*Settings, error) {
+	var s Settings
 
 	bucket := tx.Bucket([]byte(settingsBucket))
 	if bucket == nil {
@@ -256,13 +250,13 @@ func (b *BBoltDB) getInternalSettings(tx *bbolt.Tx) (*internalSettings, error) {
 	return &s, nil
 }
 
-func (b *BBoltDB) GetSettings() (*api.Settings, error) {
-	var s *internalSettings
+func (b *BBoltDB) GetSettings() (*Settings, error) {
+	var s *Settings
 	var needsUpdate bool
 
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		var err error
-		s, err = b.getInternalSettings(tx)
+		s, err = b.getSettings(tx)
 		if err != nil {
 			if errors.Is(err, errSettingsNotFound) {
 				s = &defaultSettings
@@ -378,28 +372,33 @@ func (b *BBoltDB) GetSettings() (*api.Settings, error) {
 		return nil, err
 	}
 
-	return &s.Settings, nil
+	return s, nil
 }
 
-func (b *BBoltDB) UpdateSettings(s *api.Settings) error {
+func (b *BBoltDB) UpdateSettings(s *Settings) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
-		return b.updateSettings(tx, s)
+		return b.updateSettings(tx, &s.Settings)
 	})
 }
 
+// updateSettings updates the settings in the database.
+// This function must be called within a database transaction.
+// It performs a partial update by first reading the existing settings
+// and then overwriting the api.Settings part with the new values.
+// This preserves database-specific fields like DLNAUDN and JWTSecret.
 func (b *BBoltDB) updateSettings(tx *bbolt.Tx, s *api.Settings) error {
 	bucket := tx.Bucket([]byte(settingsBucket))
 	if bucket == nil {
 		return errBucketNotFound
 	}
 
-	is, err := b.getInternalSettings(tx)
+	is, err := b.getSettings(tx)
 	if err != nil && !errors.Is(err, errSettingsNotFound) {
 		return err
 	}
 
 	if is == nil {
-		is = &internalSettings{}
+		is = &Settings{}
 	}
 
 	is.Settings = *s
@@ -415,17 +414,17 @@ func (b *BBoltDB) updateSettings(tx *bbolt.Tx, s *api.Settings) error {
 func (b *BBoltDB) GetDLNAUDN() (string, error) {
 	var udn string
 	err := b.db.Update(func(tx *bbolt.Tx) error {
-		is, err := b.getInternalSettings(tx)
+		s, err := b.getSettings(tx)
 		if err != nil && !errors.Is(err, errSettingsNotFound) {
 			return err
 		}
 
-		if is == nil {
-			is = &defaultSettings
+		if s == nil {
+			s = &defaultSettings
 		}
 
-		if is.DLNAUDN != "" {
-			udn = is.DLNAUDN
+		if s.DLNAUDN != "" {
+			udn = s.DLNAUDN
 			return nil
 		}
 
@@ -434,9 +433,9 @@ func (b *BBoltDB) GetDLNAUDN() (string, error) {
 			return err
 		}
 		udn = "uuid:" + newUDN.String()
-		is.DLNAUDN = udn
+		s.DLNAUDN = udn
 
-		encoded, err := json.Marshal(is)
+		encoded, err := json.Marshal(s)
 		if err != nil {
 			return fmt.Errorf("failed to marshal settings: %w", err)
 		}
@@ -449,17 +448,17 @@ func (b *BBoltDB) GetDLNAUDN() (string, error) {
 func (b *BBoltDB) GetJWTSecret() (string, error) {
 	var secret string
 	err := b.db.Update(func(tx *bbolt.Tx) error {
-		is, err := b.getInternalSettings(tx)
+		s, err := b.getSettings(tx)
 		if err != nil && !errors.Is(err, errSettingsNotFound) {
 			return err
 		}
 
-		if is == nil {
-			is = &defaultSettings
+		if s == nil {
+			s = &defaultSettings
 		}
 
-		if is.JWTSecret != "" {
-			secret = is.JWTSecret
+		if s.JWTSecret != "" {
+			secret = s.JWTSecret
 			return nil
 		}
 
@@ -468,9 +467,9 @@ func (b *BBoltDB) GetJWTSecret() (string, error) {
 			return err
 		}
 		secret = newSecret
-		is.JWTSecret = newSecret
+		s.JWTSecret = newSecret
 
-		encoded, err := json.Marshal(is)
+		encoded, err := json.Marshal(s)
 		if err != nil {
 			return fmt.Errorf("failed to marshal settings: %w", err)
 		}

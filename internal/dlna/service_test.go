@@ -40,18 +40,20 @@ type mockDB struct {
 }
 
 // GetSettings returns mock settings for the test environment.
-func (m *mockDB) GetSettings() (*api.Settings, error) {
-	return &api.Settings{
-		EnableDlna:          utils.Ptr(true),
-		FriendlyName:        utils.Ptr("test-server"),
-		HTTPServerPort:      utils.Ptr(8080),
-		LogLevel:            utils.Ptr(slog.LevelInfo),
-		MaxMemory:           utils.Ptr(int64(1024 * 1024 * 1024)),
-		ReadaheadPercentage: utils.Ptr(20),
-		TorrentClient: &api.TorrentClient{
-			DisableIPv6:                utils.Ptr(false),
-			EstablishedConnsPerTorrent: utils.Ptr(50),
-			TorrentPeersHighWater:      utils.Ptr(100),
+func (m *mockDB) GetSettings() (*database.Settings, error) {
+	return &database.Settings{
+		Settings: api.Settings{
+			EnableDlna:          utils.Ptr(true),
+			FriendlyName:        utils.Ptr("test-server"),
+			HTTPServerPort:      utils.Ptr(8080),
+			LogLevel:            utils.Ptr(slog.LevelInfo),
+			MaxMemory:           utils.Ptr(int64(1024 * 1024 * 1024)),
+			ReadaheadPercentage: utils.Ptr(20),
+			TorrentClient: &api.TorrentClient{
+				DisableIPv6:                utils.Ptr(false),
+				EstablishedConnsPerTorrent: utils.Ptr(50),
+				TorrentPeersHighWater:      utils.Ptr(100),
+			},
 		},
 	}, nil
 }
@@ -60,12 +62,12 @@ func (m *mockDB) GetDLNAUDN() (string, error) {
 	return "uuid:12345678-1234-5678-1234-567812345678", nil
 }
 
-func (m *mockDB) GetTorrents() ([]*api.Torrent, error) {
-	return testTorrents, nil
+func (m *mockDB) GetTorrents() ([]*database.Torrent, error) {
+	return database.FromAPITorrents(testTorrents), nil
 }
 
-func (m *mockDB) GetTorrent(ih metainfo.Hash) (*api.Torrent, error) {
-	return testTorrents[0], nil
+func (m *mockDB) GetTorrent(ih metainfo.Hash) (*database.Torrent, error) {
+	return database.FromAPITorrent(testTorrents[0]), nil
 }
 
 func TestNewService(t *testing.T) {

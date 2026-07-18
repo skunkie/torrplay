@@ -29,12 +29,14 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 	dbClient, err := database.NewBBoltDB(dbPath)
 	require.NoError(t, err)
 
-	settings, err := dbClient.GetSettings()
+	dbSettings, err := dbClient.GetSettings()
 	require.NoError(t, err)
 
+	apiSettings := database.ToAPISettings(dbSettings)
+
 	if updateSettings != nil {
-		updateSettings(settings)
-		err = dbClient.UpdateSettings(settings)
+		updateSettings(apiSettings)
+		err = dbClient.UpdateSettings(database.FromAPISettings(apiSettings))
 		require.NoError(t, err)
 	}
 

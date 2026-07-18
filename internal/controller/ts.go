@@ -256,10 +256,15 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		t, err := c.db.GetTorrent(to.InfoHash())
+		var t *api.Torrent
+		dbT, err := c.db.GetTorrent(to.InfoHash())
 		if err != nil {
 			t = torrentToMetadata(to)
-		} else if t.Poster != nil {
+		} else {
+			t = database.ToAPITorrent(dbT)
+		}
+
+		if t.Poster != nil {
 			t.Poster = c.buildPosterUrl(r, *t.Poster)
 		}
 

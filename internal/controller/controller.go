@@ -114,11 +114,12 @@ type Controller struct {
 }
 
 func NewController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, images images.ServiceInterface, metrics *metrics.Metrics) (*Controller, error) {
-	settings, err := dbClient.GetSettings()
+	dbSettings, err := dbClient.GetSettings()
 	if err != nil {
 		return nil, err
 	}
 
+	settings := database.ToAPISettings(dbSettings)
 	logging.DefaultStore.Resize(utils.Val(settings.LogStoreSize))
 
 	c := &Controller{
