@@ -588,13 +588,11 @@ func (c *Controller) cleanupExpiredTorrents() {
 			c.logger.Debug("mark torrent as expired", "hash", ih, "age", sub)
 			delete(c.torrentTracker.torrents, ih)
 			if to, ok := c.client.Torrent(ih); ok {
-				if to.Stats().ActivePeers == 0 {
-					go func() {
-						to.Drop()
-						<-to.Closed()
-						c.logger.Debug("dropped torrent", "hash", ih, "age", sub)
-					}()
-				}
+				go func() {
+					to.Drop()
+					<-to.Closed()
+					c.logger.Debug("dropped torrent", "hash", ih, "age", sub)
+				}()
 			}
 		}
 	}
