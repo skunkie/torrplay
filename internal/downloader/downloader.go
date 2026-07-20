@@ -196,6 +196,10 @@ func (d *Downloader) processTorrents() {
 				continue
 			}
 
+			if len(t.InfoBytes) > 0 {
+				spec.InfoBytes = t.InfoBytes
+			}
+
 			if len(d.trackers) > 0 {
 				spec.Trackers = d.trackers
 			}

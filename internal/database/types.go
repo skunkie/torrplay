@@ -9,9 +9,10 @@ import (
 )
 
 // Torrent represents a torrent in the database.
-// It embeds the api.Torrent struct.
+// It embeds the api.Torrent struct and adds an InfoBytes field.
 type Torrent struct {
 	api.Torrent
+	InfoBytes []byte `json:"info_bytes,omitempty"`
 }
 
 // Settings represents the application settings in the database.

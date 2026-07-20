@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -36,6 +37,8 @@ var samples = map[metainfo.Hash]string{
 	metainfo.NewHashFromHex("c9e15763f722f23e98a29decdfae341b98d53056"): "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Cosmos+Laundromat&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fcosmos-laundromat.torrent",
 	metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10"): "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fsintel.torrent",
 }
+
+const sintelTorrentFile = "testdata/sintel.torrent"
 
 type testControllerOpt func(*Controller)
 
@@ -82,6 +85,36 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 	return ctrl, cleanup
 }
 
+func createMultipartForm(t *testing.T, filePath string, fields map[string]string, fileFieldName ...string) (*bytes.Buffer, *multipart.Writer) {
+	t.Helper()
+
+	fieldName := "file"
+	if len(fileFieldName) > 0 {
+		fieldName = fileFieldName[0]
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	file, err := os.Open(filePath)
+	require.NoError(t, err)
+	defer file.Close()
+
+	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+	require.NoError(t, err)
+
+	_, err = io.Copy(part, file)
+	require.NoError(t, err)
+
+	for key, val := range fields {
+		err = writer.WriteField(key, val)
+		require.NoError(t, err)
+	}
+
+	writer.Close()
+	return &body, writer
+}
+
 func doGet(t *testing.T, router http.Handler, url string) *httptest.ResponseRecorder {
 	response := testutil.NewRequest().Get(url).WithAcceptJson().GoWithHTTPHandler(t, router)
 	return response.Recorder
@@ -102,22 +135,9 @@ func TestAddTorrentFromFile(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	sintelTorrentPath := "testdata/sintel.torrent"
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	body, writer := createMultipartForm(t, sintelTorrentFile, nil)
 
-	file, err := os.Open(sintelTorrentPath)
-	require.NoError(t, err)
-	defer file.Close()
-
-	part, err := writer.CreateFormFile("file", "sintel.torrent")
-	require.NoError(t, err)
-
-	_, err = io.Copy(part, file)
-	require.NoError(t, err)
-	writer.Close()
-
-	req, err := http.NewRequest("POST", "/api/v1/torrents", &body)
+	req, err := http.NewRequest("POST", "/api/v1/torrents", body)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -354,21 +374,9 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	body, writer := createMultipartForm(t, sintelTorrentFile, nil, "torrents")
 
-	file, err := os.Open("testdata/sintel.torrent")
-	require.NoError(t, err)
-	defer file.Close()
-
-	part, err := writer.CreateFormFile("torrents", "sintel.torrent")
-	require.NoError(t, err)
-
-	_, err = io.Copy(part, file)
-	require.NoError(t, err)
-	writer.Close()
-
-	req, err := http.NewRequest("POST", "/api/v2/torrents/add", &body)
+	req, err := http.NewRequest("POST", "/api/v2/torrents/add", body)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -900,29 +908,12 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	sintelTorrentPath := "testdata/sintel.torrent"
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
+	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{"poster": posterURL})
 
-	file, err := os.Open(sintelTorrentPath)
-	require.NoError(t, err)
-	defer file.Close()
-
-	part, err := writer.CreateFormFile("file", "sintel.torrent")
-	require.NoError(t, err)
-
-	_, err = io.Copy(part, file)
-	require.NoError(t, err)
-
-	err = writer.WriteField("poster", posterURL)
-	require.NoError(t, err)
-
-	writer.Close()
-
-	req, err := http.NewRequest("POST", "/torrent/upload", &body)
+	req, err := http.NewRequest("POST", "/torrent/upload", body)
 	require.NoError(t, err)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
@@ -1041,4 +1032,67 @@ func TestUpdateTorrentStorage(t *testing.T) {
 	var updatedTorrent api.Torrent
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&updatedTorrent))
 	assert.Equal(t, api.Memory, *updatedTorrent.Storage)
+}
+
+func TestController_TorrentInfoBytes(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = utils.Ptr(tmpDir)
+		err := c.db.UpdateSettings(database.FromAPISettings(c.settings))
+		require.NoError(t, err)
+	})
+	defer cleanup()
+
+	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{
+		"storage": string(api.File),
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	ctrl.router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code, "Response body: %s", w.Body.String())
+
+	var resp api.Torrent
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+
+	dbTorrent, err := ctrl.db.GetTorrent(resp.Hash)
+	require.NoError(t, err)
+	assert.NotEmpty(t, dbTorrent.InfoBytes, "InfoBytes should be saved for new torrent with file storage")
+
+	err = ctrl.db.DeleteTorrent(resp.Hash)
+	require.NoError(t, err)
+
+	body, writer = createMultipartForm(t, sintelTorrentFile, map[string]string{
+		"storage": string(api.Memory),
+	})
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w = httptest.NewRecorder()
+
+	ctrl.router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	err = json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+
+	dbTorrent, err = ctrl.db.GetTorrent(resp.Hash)
+	require.NoError(t, err)
+	assert.Empty(t, dbTorrent.InfoBytes, "InfoBytes should not be saved for new torrent with memory storage")
+
+	updateReqBody := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+
+	rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", resp.Hash.HexString())).WithJsonBody(updateReqBody).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	time.Sleep(100 * time.Millisecond)
+
+	updatedDbTorrent, err := ctrl.db.GetTorrent(resp.Hash)
+	require.NoError(t, err)
+	assert.NotEmpty(t, updatedDbTorrent.InfoBytes, "InfoBytes should be saved after updating torrent to file storage")
 }

@@ -1128,6 +1128,10 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 	return resp, nil
 }
 
+// createTorrentInDBLocked creates a torrent in the database.
+// It is crucial that this function is called only after the torrent's info
+// has been successfully retrieved, for instance, by waiting on the to.GotInfo() channel.
+// This ensures that the metadata, especially for file-based torrents, is complete.
 func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.TorrentAdd) (*api.Torrent, error) {
 	if _, err := c.db.GetTorrent(to.InfoHash()); err == nil {
 		return nil, api.NewError(database.ErrTorrentExists.Error(), http.StatusConflict)
@@ -1145,7 +1149,13 @@ func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.Torren
 		t.Title = req.Title
 	}
 
-	if err := c.db.CreateTorrent(database.FromAPITorrent(t)); err != nil {
+	dbTorrent := database.FromAPITorrent(t)
+	if utils.Val(t.Storage) == api.File {
+		meta := to.Metainfo()
+		dbTorrent.InfoBytes = meta.InfoBytes
+	}
+
+	if err := c.db.CreateTorrent(dbTorrent); err != nil {
 		if errors.Is(err, database.ErrTorrentExists) {
 			return nil, api.NewError(err.Error(), http.StatusConflict)
 		}
@@ -1312,6 +1322,10 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 	spec, err := torrent.TorrentSpecFromMagnetUri(uri)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse magnet URI: %w", err)
+	}
+
+	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 {
+		spec.InfoBytes = t.InfoBytes
 	}
 
 	c.torrentTracker.mu.RLock()
@@ -1535,6 +1549,22 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 		needsUpdate = true
 		needsDrop = true
 		t.Storage = req.Storage
+
+		if utils.Val(t.Storage) == api.File {
+			to, err := c.loadTorrent(t.Magnet, api.File)
+			if err != nil {
+				return api.NewError(err.Error(), http.StatusInternalServerError)
+			}
+			select {
+			case <-to.GotInfo():
+				meta := to.Metainfo()
+				t.InfoBytes = meta.InfoBytes
+			case <-time.After(gotInfoTimeout):
+				return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+			}
+		} else {
+			t.InfoBytes = nil
+		}
 	}
 
 	if utils.Differ(t.Title, req.Title) {
