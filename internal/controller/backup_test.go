@@ -49,8 +49,7 @@ func TestBackupAndRestore(t *testing.T) {
 	require.NoError(t, err)
 	writer.Close()
 
-	req, err := http.NewRequest("POST", "/api/v1/torrents/restore", &body)
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/restore", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr = httptest.NewRecorder()
@@ -80,8 +79,7 @@ func TestRestoreInvalidBackup(t *testing.T) {
 	require.NoError(t, err)
 	writer.Close()
 
-	req, err := http.NewRequest("POST", "/api/v1/torrents/restore", &body)
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/restore", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr := httptest.NewRecorder()
@@ -131,8 +129,7 @@ func TestBackupAndRestoreWithPosters(t *testing.T) {
 	require.NoError(t, err)
 	writer.Close()
 
-	restoreReq, err := http.NewRequest("POST", "/api/v1/torrents/restore", &body)
-	require.NoError(t, err)
+	restoreReq := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/restore", &body)
 	restoreReq.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr = httptest.NewRecorder()

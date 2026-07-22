@@ -137,8 +137,7 @@ func TestAddTorrentFromFile(t *testing.T) {
 
 	body, writer := createMultipartForm(t, sintelTorrentFile, nil)
 
-	req, err := http.NewRequest("POST", "/api/v1/torrents", body)
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr := httptest.NewRecorder()
@@ -159,8 +158,7 @@ func TestAddInvalidTorrent(t *testing.T) {
 	body, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
 	require.NoError(t, err)
 
-	req, err := http.NewRequest("POST", "/api/v1/torrents", bytes.NewBuffer(body))
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	rr := httptest.NewRecorder()
@@ -180,8 +178,7 @@ func TestAddNonExistentTorrent(t *testing.T) {
 	body, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
 	require.NoError(t, err)
 
-	req, err := http.NewRequest("POST", "/api/v1/torrents", bytes.NewBuffer(body))
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	rr := httptest.NewRecorder()
@@ -359,8 +356,7 @@ func TestQBittorrentAddTorrentFromURL(t *testing.T) {
 	require.NoError(t, err)
 	writer.Close()
 
-	req, err := http.NewRequest("POST", "/api/v2/torrents/add", &body)
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/torrents/add", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr := httptest.NewRecorder()
@@ -376,8 +372,7 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 
 	body, writer := createMultipartForm(t, sintelTorrentFile, nil, "torrents")
 
-	req, err := http.NewRequest("POST", "/api/v2/torrents/add", body)
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v2/torrents/add", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr := httptest.NewRecorder()
@@ -442,7 +437,7 @@ func TestDeleteTorrentWhileStreamingConcurrently(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ih)
-		req, _ := http.NewRequest("GET", streamURL, nil)
+		req, _ := http.NewRequest(http.MethodGet, streamURL, nil)
 		req.Header.Set("Range", "bytes=0-")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -459,7 +454,7 @@ func TestDeleteTorrentWhileStreamingConcurrently(t *testing.T) {
 	time.Sleep(5 * time.Second)
 
 	deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ih)
-	req, _ := http.NewRequest("DELETE", deleteURL, nil)
+	req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -493,7 +488,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ihSintel)
-		req, _ := http.NewRequest("GET", streamURL, nil)
+		req, _ := http.NewRequest(http.MethodGet, streamURL, nil)
 		req.Header.Set("Range", "bytes=0-")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -510,7 +505,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ihBunny)
-		req, _ := http.NewRequest("DELETE", deleteURL, nil)
+		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -520,7 +515,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ihCosmos)
-		req, _ := http.NewRequest("DELETE", deleteURL, nil)
+		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -913,8 +908,7 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 
 	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{"poster": posterURL})
 
-	req, err := http.NewRequest("POST", "/torrent/upload", body)
-	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/torrent/upload", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	rr := httptest.NewRecorder()
@@ -923,7 +917,7 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var result map[string]interface{}
-	err = json.NewDecoder(rr.Body).Decode(&result)
+	err := json.NewDecoder(rr.Body).Decode(&result)
 	require.NoError(t, err)
 	assert.Equal(t, ih.HexString(), result["hash"])
 

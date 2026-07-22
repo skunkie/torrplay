@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -189,8 +190,7 @@ func TestNewAuthenticator(t *testing.T) {
 
 			authenticator := controller.NewAuthenticator()
 
-			req, err := http.NewRequest("GET", tc.requestPath, nil)
-			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
 
 			if tc.username != "" && tc.password != "" {
 				req.SetBasicAuth(tc.username, tc.password)
@@ -217,7 +217,7 @@ func TestNewAuthenticator(t *testing.T) {
 				SecurityScheme:     &openapi3.SecurityScheme{},
 			}
 
-			err = authenticator(context.Background(), input)
+			err := authenticator(context.Background(), input)
 
 			if tc.expectedError != "" {
 				assert.Error(t, err)

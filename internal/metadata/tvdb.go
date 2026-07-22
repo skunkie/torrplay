@@ -86,7 +86,7 @@ func (c *TVDBClient) Search(name string, year int, searchType string, language s
 }
 
 func (c *TVDBClient) httpGet(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +103,7 @@ func (c *TVDBClient) httpGet(url string) ([]byte, error) {
 }
 
 func (c *TVDBClient) httpPost(url string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(body))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, err
 	}

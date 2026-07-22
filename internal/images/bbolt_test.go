@@ -45,14 +45,14 @@ func TestService_DownloadAndSaveData(t *testing.T) {
 	assert.NotEqual(t, *id, *id2)
 
 	// Test getting the images.
-	req := httptest.NewRequest("GET", "/"+*id, nil)
+	req := httptest.NewRequest(http.MethodGet, "/"+*id, nil)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
 
-	req = httptest.NewRequest("GET", "/"+*id2, nil)
+	req = httptest.NewRequest(http.MethodGet, "/"+*id2, nil)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 

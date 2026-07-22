@@ -161,7 +161,7 @@ func TestService_ServeHTTP(t *testing.T) {
 		t.Fatalf("service.Start() returned an error: %v", err)
 	}
 
-	req := httptest.NewRequest("GET", "/upnp/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/upnp/", nil)
 	rw := httptest.NewRecorder()
 
 	service.ServeHTTP(rw, req)
