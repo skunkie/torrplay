@@ -40,9 +40,23 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if t, err := c.db.GetTorrent(ih); err != nil {
+		if !errors.Is(err, database.ErrTorrentNotFound) {
+			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if *t.Storage == api.File {
+		api.HTTPError(w, "torrent uses file storage", http.StatusBadRequest)
+		return
+	}
+
 	info, err := c.storageClient.GetTorrentMemoryStats(ih)
-	if err != nil || info.TotalPieces == 0 {
-		api.HTTPError(w, "torrent is not loaded", http.StatusBadRequest)
+	if err != nil {
+		api.HTTPError(w, "torrent memory stats unavailable", http.StatusBadRequest)
+		return
+	}
+	if info.TotalPieces == 0 || len(info.Pieces) == 0 {
+		api.HTTPError(w, "torrent has no pieces cached yet", http.StatusBadRequest)
 		return
 	}
 	resp := api.TSCacheResponse{
@@ -50,21 +64,21 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
 		PiecesCount:  info.TotalPieces,
 		PiecesLength: info.Pieces[0].Size,
+		Readers: []api.TSReaderInfo{
+			{
+				Reader: info.Pieces[0].Index,
+				Start:  info.Pieces[0].Index,
+				End:    info.Pieces[len(info.Pieces)-1].Index,
+			},
+		},
 	}
 
 	for _, piece := range info.Pieces {
-		resp.Pieces[fmt.Sprint(rune(piece.Index))] = api.TSPieceInfo{
+		resp.Pieces[fmt.Sprint(piece.Index)] = api.TSPieceInfo{
 			Completed: piece.Complete,
 			ID:        piece.Index,
 			Length:    piece.Size,
 		}
-	}
-	resp.Readers = []api.TSReaderInfo{
-		{
-			Reader: info.Pieces[0].Index,
-			Start:  info.Pieces[0].Index,
-			End:    info.Pieces[len(info.Pieces)-1].Index,
-		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
