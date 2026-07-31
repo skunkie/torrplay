@@ -32,7 +32,8 @@ interface Settings {
   fileStoragePath: string,
   friendlyName: string,
   maxMemory: number,
-  torrentClient: TorrentClient
+  torrentClient: TorrentClient,
+  torrentTrackers: string[]
 }
 
 interface SystemInfo {

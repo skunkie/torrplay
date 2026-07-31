@@ -36,6 +36,10 @@ const defaultSettings = {
     torrentPeersHighWater: 500,
     uploadRateLimit: 3145728,
   },
+  torrentTrackers: [
+    'udp://explodie.org:6969',
+    'udp://tracker.leechers-paradise.org:6969,udp://tracker.opentrackr.org:1337',
+  ],
 };
 
 let demoDefaultsApplied = false;
@@ -100,6 +104,8 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setAuthSettings={handleAuthSettingsChange}
       torrentClientSettings={settings.torrentClient}
       setTorrentClientSettings={handleTorrentClientSettingsChange}
+      torrentTrackers={settings.torrentTrackers}
+      setTorrentTrackers={value => updateSettings({ torrentTrackers: value })}
       apiUrl={'http://localhost:8090'}
       setApiUrl={() => {}}
       isApiUrlCustom={false}

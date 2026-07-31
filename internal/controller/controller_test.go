@@ -899,6 +899,111 @@ func TestUpdateSettings(t *testing.T) {
 	assert.Equal(t, *newSettings.HTTPServerPort, *updatedSettings.HTTPServerPort)
 }
 
+func TestUpdateSettingsWithTrackers(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	trackers := ctrl.trackers
+
+	newTrackers := []string{"udp://tracker.opentrackr.org:1337", "udp://explodie.org:6969"}
+	newSettings := api.Settings{
+		TorrentTrackers: &newTrackers,
+	}
+
+	rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(newSettings).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	require.Eventually(t, func() bool {
+		ctrl.mu.RLock()
+		defer ctrl.mu.RUnlock()
+
+		return len(ctrl.trackers) > len(trackers)
+	}, 5*time.Second, 100*time.Millisecond, "trackers should be updated")
+
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var updatedSettings api.Settings
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &updatedSettings))
+	assert.Equal(t, newTrackers, *updatedSettings.TorrentTrackers)
+}
+
+func TestUpdateSettingsWithTrackersValidation(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	testCases := []struct {
+		name          string
+		trackers      []string
+		expectedCode  int
+		expectedError string
+	}{
+		{
+			name:         "valid single tracker",
+			trackers:     []string{"udp://tracker.opentrackr.org:1337/announce"},
+			expectedCode: http.StatusNoContent,
+		},
+		{
+			name:         "valid multiple trackers",
+			trackers:     []string{"udp://tracker.opentrackr.org:1337/announce", "wss://tracker.openwebtorrent.com"},
+			expectedCode: http.StatusNoContent,
+		},
+		{
+			name:         "valid multiple trackers in one tier",
+			trackers:     []string{"udp://tracker.opentrackr.org:1337/announce,wss://tracker.openwebtorrent.com"},
+			expectedCode: http.StatusNoContent,
+		},
+		{
+			name:         "valid ipv6",
+			trackers:     []string{"https://[::1]:8080/announce"},
+			expectedCode: http.StatusNoContent,
+		},
+		{
+			name:          "invalid protocol",
+			trackers:      []string{"zzz://tracker.opentrackr.org:1337/announce"},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid torrent tracker format",
+		},
+		{
+			name:          "invalid multiple trackers in one tier",
+			trackers:      []string{"udp://tracker.opentrackr.org:1337/announce,zzz://tracker.opentrackr.org:1337/announce"},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid torrent tracker format",
+		},
+		{
+			name:          "leading comma",
+			trackers:      []string{",udp://tracker.opentrackr.org:1337/announce"},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid torrent tracker format",
+		},
+		{
+			name:          "trailing comma",
+			trackers:      []string{"udp://tracker.opentrackr.org:1337/announce,"},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid torrent tracker format",
+		},
+		{
+			name:          "double comma",
+			trackers:      []string{"udp://tracker.opentrackr.org:1337/announce,,wss://tracker.openwebtorrent.com"},
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid torrent tracker format",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			newSettings := api.Settings{
+				TorrentTrackers: &tc.trackers,
+			}
+			rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(newSettings).GoWithHTTPHandler(t, ctrl.router).Recorder
+			assert.Equal(t, tc.expectedCode, rr.Code)
+			if tc.expectedError != "" {
+				assert.Contains(t, rr.Body.String(), tc.expectedError)
+			}
+		})
+	}
+}
+
 func TestTSTorrentUploadWithPoster(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

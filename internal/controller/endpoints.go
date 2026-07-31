@@ -35,7 +35,6 @@ import (
 	"github.com/torrplay/torrplay/internal/buildinfo"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/dlna"
-	"github.com/torrplay/torrplay/internal/downloader"
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/piececompletion"
@@ -766,6 +765,9 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reqSettings.ReadaheadPercentage != nil {
 		newSettings.ReadaheadPercentage = reqSettings.ReadaheadPercentage
 	}
+	if reqSettings.TorrentTrackers != nil {
+		newSettings.TorrentTrackers = reqSettings.TorrentTrackers
+	}
 
 	// Perform validation on the merged settings.
 	if newSettings.Auth != nil && utils.Val(newSettings.Auth.Enabled) {
@@ -865,6 +867,10 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if utils.Differ(oldSettings.ReadaheadPercentage, newSettings.ReadaheadPercentage) {
 		saveSettings = true
 	}
+	if !slices.Equal(utils.Val(oldSettings.TorrentTrackers), utils.Val(newSettings.TorrentTrackers)) {
+		reconfigureTorrentClient = true
+		saveSettings = true
+	}
 
 	if saveSettings {
 		c.mu.Lock()
@@ -894,15 +900,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			api.HTTPError(w, fmt.Sprintf("failed to reconfigure torrent client, %v", err), http.StatusInternalServerError)
 			return
 		}
-		c.mu.Lock()
-		if c.downloader != nil {
-			c.downloader.Stop()
-		}
-		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(newSettings.FileStoragePath), c.trackers)
-		if *c.settings.EnableDownloader && *c.settings.FileStoragePath != "" {
-			c.downloader.Start()
-		}
-		c.mu.Unlock()
 	} else if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
 		c.mu.Lock()
 		if *c.settings.EnableDownloader && *c.settings.FileStoragePath != "" {

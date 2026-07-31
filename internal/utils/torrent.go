@@ -16,6 +16,8 @@ import (
 )
 
 // AddTrackersToSpec adds default trackers to a torrent spec.
+// defaultTrackers is expected to already be organized into tiers
+// (e.g. by FetchTrackers), and is appended as-is, tier by tier.
 func AddTrackersToSpec(spec *torrent.TorrentSpec, defaultTrackers [][]string) {
 	if len(defaultTrackers) == 0 {
 		return
@@ -29,17 +31,21 @@ func AddTrackersToSpec(spec *torrent.TorrentSpec, defaultTrackers [][]string) {
 	}
 
 	for _, tier := range defaultTrackers {
+		var newTier []string
 		for _, t := range tier {
 			if !allTrackers[strings.ToLower(t)] {
-				// Add the new tracker to its own tier.
-				spec.Trackers = append(spec.Trackers, []string{t})
+				newTier = append(newTier, t)
 				allTrackers[strings.ToLower(t)] = true
 			}
+		}
+		if len(newTier) > 0 {
+			spec.Trackers = append(spec.Trackers, newTier)
 		}
 	}
 }
 
-// FetchTrackers fetches a list of trackers from a remote source.
+// FetchTrackers fetches a list of trackers from a remote source,
+// returning each tracker in its own tier.
 func FetchTrackers(ctx context.Context, client *httpclient.Client) ([][]string, error) {
 	url := "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best_ip.txt"
 
@@ -58,18 +64,18 @@ func FetchTrackers(ctx context.Context, client *httpclient.Client) ([][]string, 
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Convert to string and and split by lines.
+	// Convert to string and split by lines.
 	content := string(body)
 	lines := strings.Split(content, "\n")
 
-	// Filter out empty lines and create a slice.
-	var trackers []string
+	// Filter out empty lines, put each tracker in its own tier.
+	var tiers [][]string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" && !strings.HasPrefix(line, "#") {
-			trackers = append(trackers, line)
+			tiers = append(tiers, []string{line})
 		}
 	}
 
-	return [][]string{trackers}, nil
+	return tiers, nil
 }

@@ -21,6 +21,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
+import { Textarea } from '@/components/ui/textarea';
 import { formatBytes } from '@/lib/format-utils';
 import { Auth, Settings, TorrentClient } from '@/lib/types/api';
 
@@ -48,6 +49,8 @@ interface SettingsDialogLayoutProps {
   setAuthSettings: (value: Auth | null) => void,
   torrentClientSettings: TorrentClient | null,
   setTorrentClientSettings: (value: TorrentClient | null) => void,
+  torrentTrackers: string[],
+  setTorrentTrackers: (value: string[]) => void,
 
   apiUrl: string,
   setApiUrl: (value: string) => void,
@@ -82,6 +85,8 @@ export function SettingsDialogLayout({
   setAuthSettings,
   torrentClientSettings,
   setTorrentClientSettings,
+  torrentTrackers,
+  setTorrentTrackers,
   apiUrl,
   setApiUrl,
   isApiUrlCustom,
@@ -318,6 +323,18 @@ export function SettingsDialogLayout({
 
               <div className='space-y-4'>
                 <h3 className='text-lg font-medium text-foreground'>Torrent Client</h3>
+                <div className='space-y-2'>
+                  <Label htmlFor='torrent-trackers'>Torrent Trackers</Label>
+                  <Textarea
+                    id='torrent-trackers'
+                    value={(torrentTrackers || []).join('\n')}
+                    onChange={e => setTorrentTrackers(e.target.value.split('\n').filter(t => t !== ''))}
+                    rows={5}
+                  />
+                  <p className='text-sm text-muted-foreground'>
+                    One tracker tier per line. To include multiple trackers in the same tier, separate them with commas.
+                  </p>
+                </div>
                 <div className='flex items-center justify-between'>
                   <Label htmlFor='disable-dht'>Disable DHT</Label>
                   <Switch

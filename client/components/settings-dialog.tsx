@@ -48,6 +48,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [fileStoragePath, setFileStoragePath] = useState('');
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
+  const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
 
   // State for API URL.
   const [apiUrl, setApiUrl] = useState('');
@@ -87,6 +88,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setFileStoragePath(settings.fileStoragePath || '');
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
+      setTorrentTrackers(settings.torrentTrackers || []);
     }
   }, [settings, open, IS_TAURI]);
 
@@ -177,6 +179,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       if (fileStoragePath !== settings.fileStoragePath) settingsToUpdate.fileStoragePath = fileStoragePath;
       if (friendlyName !== settings.friendlyName) settingsToUpdate.friendlyName = friendlyName;
       if (maxMemory * 1024 * 1024 !== settings.maxMemory) settingsToUpdate.maxMemory = maxMemory * 1024 * 1024;
+      if (JSON.stringify(torrentTrackers) !== JSON.stringify(settings.torrentTrackers)) settingsToUpdate.torrentTrackers = torrentTrackers;
 
       if (authSettings) {
         const originalAuth = settings.auth;
@@ -250,6 +253,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
+      setTorrentTrackers(settings.torrentTrackers || []);
     }
   };
 
@@ -286,6 +290,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setAuthSettings={setAuthSettings}
       torrentClientSettings={torrentClientSettings}
       setTorrentClientSettings={setTorrentClientSettings}
+      torrentTrackers={torrentTrackers}
+      setTorrentTrackers={setTorrentTrackers}
       apiUrl={apiUrl}
       setApiUrl={setApiUrl}
       isApiUrlCustom={isApiUrlCustom}

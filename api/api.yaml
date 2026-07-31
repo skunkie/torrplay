@@ -1603,6 +1603,19 @@ components:
           minimum: 50
           maximum: 100
           example: 90
+        torrent_trackers:
+          type: array
+          description: |
+            Torrent trackers used by the torrent client. Each array item is
+            one tracker tier; to include multiple trackers in the same tier,
+            separate them with commas within a single item.
+          items:
+            type: string
+            pattern: '^((udp|wss?|https?)://(\[[0-9a-fA-F:]+\]|[^,:/\s]+)(:[0-9]+)?(/[^,\s]+)?)(,\s*((udp|wss?|https?)://(\[[0-9a-fA-F:]+\]|[^,:/\s]+)(:[0-9]+)?(/[^,\s]+)?))*$'
+            x-torrplay-validation-key: "torrent_trackers"
+          example:
+            - "udp://explodie.org:6969"
+            - "udp://tracker.leechers-paradise.org:6969,udp://tracker.opentrackr.org:1337"
 
     Torrent:
       allOf:

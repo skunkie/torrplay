@@ -60,6 +60,7 @@ var (
 				TorrentPeersHighWater:      utils.Ptr(500),
 				UploadRateLimit:            utils.Ptr(0),
 			},
+			TorrentTrackers: utils.Ptr([]string{}),
 		},
 	}
 )
@@ -359,6 +360,10 @@ func (b *BBoltDB) GetSettings() (*Settings, error) {
 				needsUpdate = true
 				s.Settings.TorrentClient.UploadRateLimit = defaultSettings.Settings.TorrentClient.UploadRateLimit
 			}
+		}
+		if s.Settings.TorrentTrackers == nil {
+			needsUpdate = true
+			s.Settings.TorrentTrackers = defaultSettings.Settings.TorrentTrackers
 		}
 
 		if needsUpdate {

@@ -174,6 +174,11 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.logger.Info(fmt.Sprintf("initializing TorrPlay with data directory: %s", c.dataDir))
 
+	if settings.TorrentTrackers != nil && len(*settings.TorrentTrackers) > 0 {
+		for _, tracker := range *settings.TorrentTrackers {
+			c.trackers = append(c.trackers, strings.Split(tracker, ","))
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -181,7 +186,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 	if err != nil {
 		c.logger.Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
 	}
-	c.trackers = trackers
+	c.trackers = append(c.trackers, trackers...)
 
 	err = c.configureTorrentClient(slog.LevelError)
 	if err != nil {
@@ -615,7 +620,24 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	oldStorageClient := c.storageClient
 	settings := c.settings
 	logger := c.logger
+	isReconfiguring := c.downloader != nil
 	c.mu.RUnlock()
+
+	var newTrackers [][]string
+	if isReconfiguring {
+		if settings.TorrentTrackers != nil && len(*settings.TorrentTrackers) > 0 {
+			for _, tracker := range *settings.TorrentTrackers {
+				newTrackers = append(newTrackers, strings.Split(tracker, ","))
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		fetchedTrackers, err := utils.FetchTrackers(ctx, c.httpClient)
+		if err != nil {
+			logger.Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
+		}
+		newTrackers = append(newTrackers, fetchedTrackers...)
+		cancel()
+	}
 
 	if oldClient != nil {
 		_ = oldClient.Close()
@@ -660,6 +682,14 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	c.mu.Lock()
 	c.client = client
 	c.storageClient = storageClient
+	if isReconfiguring {
+		c.downloader.Stop()
+		c.trackers = newTrackers
+		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(c.settings.FileStoragePath), c.trackers)
+		if utils.Val(settings.EnableDownloader) {
+			c.downloader.Start()
+		}
+	}
 	c.mu.Unlock()
 
 	return nil

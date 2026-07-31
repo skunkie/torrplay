@@ -23,6 +23,15 @@ import (
 func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseWriter, _ *http.Request, opts nethttpmiddleware.ErrorHandlerOpts) {
 	switch e := err.(type) {
 	case *openapi3filter.RequestError:
+		var schemaError *openapi3.SchemaError
+		if errors.As(e.Err, &schemaError) {
+			if ext, ok := schemaError.Schema.Extensions["x-torrplay-validation-key"]; ok {
+				if ext == "torrent_trackers" {
+					api.HTTPError(w, "invalid torrent tracker format", http.StatusBadRequest)
+					return
+				}
+			}
+		}
 		message, _ := getInnerErrorMessage(e.Err)
 		api.HTTPError(w, message, opts.StatusCode)
 		return
