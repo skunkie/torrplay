@@ -121,6 +121,12 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 
 	if strings.HasPrefix(params.Link, "magnet") {
 		magnetStr = params.Link
+		m, err := metainfo.ParseMagnetV2Uri(magnetStr)
+		if err != nil {
+			api.HTTPError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ih = m.InfoHash.Value
 	} else {
 		var err error
 		ih, err = utils.HashFromHexString(params.Link)
@@ -129,6 +135,11 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 			return
 		}
 		magnetStr = magnetURIfromHash(ih)
+	}
+
+	if ih.IsZero() {
+		api.HTTPError(w, fmt.Sprintf("invalid hash %s", ih.HexString()), http.StatusBadRequest)
+		return
 	}
 
 	if utils.Val(params.Play) {
@@ -148,6 +159,12 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 		case <-time.After(gotInfoTimeout):
 			return
 		}
+
+		// If torrent is already fully downloaded, no need to download pieces.
+		if to.BytesCompleted() == to.Length() {
+			return
+		}
+
 		to.DownloadPieces(0, 2)
 		return
 	}
@@ -257,6 +274,12 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 		defer c.mu.Unlock()
 
 		if req.Action == api.TSTorrentRequestActionAdd && utils.Val(req.SaveToDB) {
+			defer func() {
+				to.Drop()
+				<-to.Closed()
+				c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+			}()
+
 			addTorrentReq := api.TorrentAdd{
 				Category: req.Category,
 				Magnet:   magnet,
