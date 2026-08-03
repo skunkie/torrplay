@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
 name: Bug Report
 description: File a bug report to help us improve.
 title: "[Bug]: "
