@@ -51,6 +51,10 @@ interface SettingsDialogLayoutProps {
   setTorrentClientSettings: (value: TorrentClient | null) => void,
   torrentTrackers: string[],
   setTorrentTrackers: (value: string[]) => void,
+  logLevel: string,
+  setLogLevel: (value: string) => void,
+  logFormat: 'json' | 'text',
+  setLogFormat: (value: 'json' | 'text') => void,
 
   apiUrl: string,
   setApiUrl: (value: string) => void,
@@ -87,6 +91,10 @@ export function SettingsDialogLayout({
   setTorrentClientSettings,
   torrentTrackers,
   setTorrentTrackers,
+  logLevel,
+  setLogLevel,
+  logFormat,
+  setLogFormat,
   apiUrl,
   setApiUrl,
   isApiUrlCustom,
@@ -490,6 +498,48 @@ export function SettingsDialogLayout({
                       </p>
                     </div>
                   )}
+                </div>
+              </div>
+
+              <div className='space-y-4'>
+                <h3 className='text-lg font-medium text-foreground'>Logging</h3>
+                <div className='space-y-2'>
+                  <Label htmlFor='log-level'>Log Level</Label>
+                  <Select
+                    value={logLevel}
+                    onValueChange={setLogLevel}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='DEBUG'>DEBUG</SelectItem>
+                      <SelectItem value='INFO'>INFO</SelectItem>
+                      <SelectItem value='WARN'>WARN</SelectItem>
+                      <SelectItem value='ERROR'>ERROR</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className='text-sm text-muted-foreground'>
+                    Minimum log level for application logging.
+                  </p>
+                </div>
+                <div className='space-y-2'>
+                  <Label htmlFor='log-format'>Log Format</Label>
+                  <Select
+                    value={logFormat}
+                    onValueChange={setLogFormat}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value='text'>Text</SelectItem>
+                      <SelectItem value='json'>JSON</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className='text-sm text-muted-foreground'>
+                    Format for application log output.
+                  </p>
                 </div>
               </div>
             </div>

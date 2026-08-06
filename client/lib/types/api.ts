@@ -31,6 +31,8 @@ interface Settings {
   enableDownloader: boolean,
   fileStoragePath: string,
   friendlyName: string,
+  logLevel?: string,
+  logFormat?: 'json' | 'text',
   maxMemory: number,
   torrentClient: TorrentClient,
   torrentTrackers: string[]

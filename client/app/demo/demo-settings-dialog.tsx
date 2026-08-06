@@ -22,6 +22,8 @@ const defaultSettings = {
   enableDownloader: false,
   fileStoragePath: '',
   friendlyName: 'TorrPlay',
+  logLevel: 'INFO',
+  logFormat: 'text' as const,
   maxMemory: 512,
   torrentClient: {
     disableDht: false,
@@ -106,6 +108,10 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setTorrentClientSettings={handleTorrentClientSettingsChange}
       torrentTrackers={settings.torrentTrackers}
       setTorrentTrackers={value => updateSettings({ torrentTrackers: value })}
+      logLevel={settings.logLevel || 'INFO'}
+      setLogLevel={value => updateSettings({ logLevel: value })}
+      logFormat={settings.logFormat || 'text'}
+      setLogFormat={value => updateSettings({ logFormat: value as 'json' | 'text' })}
       apiUrl={'http://localhost:8090'}
       setApiUrl={() => {}}
       isApiUrlCustom={false}

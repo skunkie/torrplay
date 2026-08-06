@@ -49,6 +49,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
+  const [logLevel, setLogLevel] = useState<string>('INFO');
+  const [logFormat, setLogFormat] = useState<'json' | 'text'>('text');
 
   // State for API URL.
   const [apiUrl, setApiUrl] = useState('');
@@ -89,6 +91,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
+      setLogLevel(settings.logLevel || 'INFO');
+      setLogFormat(settings.logFormat || 'text');
     }
   }, [settings, open, IS_TAURI]);
 
@@ -180,6 +184,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       if (friendlyName !== settings.friendlyName) settingsToUpdate.friendlyName = friendlyName;
       if (maxMemory * 1024 * 1024 !== settings.maxMemory) settingsToUpdate.maxMemory = maxMemory * 1024 * 1024;
       if (JSON.stringify(torrentTrackers) !== JSON.stringify(settings.torrentTrackers)) settingsToUpdate.torrentTrackers = torrentTrackers;
+      if (logLevel !== settings.logLevel) settingsToUpdate.logLevel = logLevel;
+      if (logFormat !== settings.logFormat) settingsToUpdate.logFormat = logFormat;
 
       if (authSettings) {
         const originalAuth = settings.auth;
@@ -254,6 +260,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
+      setLogLevel(settings.logLevel || 'INFO');
+      setLogFormat(settings.logFormat || 'text');
     }
   };
 
@@ -292,6 +300,10 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setTorrentClientSettings={setTorrentClientSettings}
       torrentTrackers={torrentTrackers}
       setTorrentTrackers={setTorrentTrackers}
+      logLevel={logLevel}
+      setLogLevel={setLogLevel}
+      logFormat={logFormat}
+      setLogFormat={setLogFormat}
       apiUrl={apiUrl}
       setApiUrl={setApiUrl}
       isApiUrlCustom={isApiUrlCustom}
