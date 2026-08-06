@@ -142,7 +142,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 		},
 	}
 
-	c.logger = c.configureLogger(*settings.LogLevel)
+	c.logger = c.configureLogger(*settings.LogLevel, settings)
 
 	var pc piececompletion.DeletablePieceCompletion
 	if fsp := utils.Val(settings.FileStoragePath); fsp != "" {
@@ -669,7 +669,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	}
 	clientConfig.ExtendedHandshakeClientVersion = "qBittorrent/5.1.4"
 	clientConfig.ListenPort = 0
-	clientConfig.Slogger = c.configureLogger(clientLevel)
+	clientConfig.Slogger = c.configureLogger(clientLevel, settings)
 
 	storageClient := memstorage.NewClient(*settings.MaxMemory, logger)
 	clientConfig.DefaultStorage = storageClient
@@ -685,7 +685,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	if isReconfiguring {
 		c.downloader.Stop()
 		c.trackers = newTrackers
-		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(c.settings.FileStoragePath), c.trackers)
+		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(settings.FileStoragePath), c.trackers)
 		if utils.Val(settings.EnableDownloader) {
 			c.downloader.Start()
 		}
@@ -695,7 +695,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	return nil
 }
 
-func (c *Controller) configureLogger(level slog.Level) *slog.Logger {
+func (c *Controller) configureLogger(level slog.Level, settings *api.Settings) *slog.Logger {
 	var writer io.Writer = os.Stdout
 
 	if _, isService := os.LookupEnv("TORRPLAY_RUNNING_AS_SERVICE"); isService {
@@ -722,7 +722,7 @@ func (c *Controller) configureLogger(level slog.Level) *slog.Logger {
 		}
 	}
 
-	if *c.settings.LogFormat == api.JSON {
+	if *settings.LogFormat == api.JSON {
 		handler = slog.NewJSONHandler(writer, slogOpts)
 	} else {
 		handler = slog.NewTextHandler(writer, slogOpts)

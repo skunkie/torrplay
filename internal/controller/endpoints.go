@@ -887,7 +887,9 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reconfigureLogger {
 		reconfigureTorrentClient = true
 		restartHTTPServer = true
-		newLogger := c.configureLogger(*c.settings.LogLevel)
+		c.mu.RLock()
+		newLogger := c.configureLogger(*c.settings.LogLevel, c.settings)
+		c.mu.RUnlock()
 		c.mu.Lock()
 		c.logger = newLogger
 		c.mu.Unlock()
