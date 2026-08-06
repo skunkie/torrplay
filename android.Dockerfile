@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-FROM golang:1.25-trixie
+FROM golang:1.26-trixie
 
 ARG LDFLAGS
 

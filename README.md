@@ -190,7 +190,7 @@ This allows you to access the API without credentials to reset your settings. On
 
 ### Prerequisites
 
-*   Go (version 1.25 or later)
+*   Go (version 1.26 or later)
 *   Make (for building the web client)
 
 ### Installation

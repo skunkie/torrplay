@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-FROM golang:1.25-alpine
+FROM golang:1.26-alpine
 
 ENV MODULE=github.com/torrplay/torrplay
 ENV NAME=torrplay
