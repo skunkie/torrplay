@@ -144,7 +144,7 @@ function useAuthStore(isDemo = false) {
       localStorage.removeItem('basic_auth');
     }
 
-    await fetchSettings();
+    fetchSettings();
   };
 
   const isAuthenticated = !isLoading && (
