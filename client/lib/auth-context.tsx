@@ -11,6 +11,8 @@ import { getSettings, updateSettings as apiUpdateSettings } from '@/lib/api/sett
 import { HttpError } from '@/lib/api-client';
 import { Auth, Settings } from '@/lib/types/api';
 
+import { demoDefaultSettings } from './demo-settings';
+
 export type AuthContextType = {
   auth: Auth | null,
   settings: Settings | null,
@@ -21,7 +23,7 @@ export type AuthContextType = {
   updateSettings: (newSettings: Partial<Settings>) => Promise<void>
 };
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 function useAuthStore(isDemo = false) {
   const [auth, setAuth] = useState<Auth | null>(null);
@@ -55,14 +57,7 @@ function useAuthStore(isDemo = false) {
 
   useEffect(() => {
     if (isDemo) {
-      const demoSettings = {
-        auth: { enabled: false, type: 'basic' },
-        enableDlna: false,
-        enableDownloader: false,
-        fileStoragePath: '',
-        friendlyName: 'TorrPlay',
-        maxMemory: 512,
-      } as Settings;
+      const demoSettings = demoDefaultSettings;
       setSettings(demoSettings);
       setAuth(demoSettings.auth);
       setIsLoading(false);

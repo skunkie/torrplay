@@ -34,6 +34,7 @@ interface SettingsDialogLayoutProps {
   onSave: () => void,
   onReset: () => void,
   onResetTorrentHandlerChoice: () => void,
+  onResetToDefaults: () => void,
 
   dlnaEnabled: boolean,
   setDlnaEnabled: (value: boolean) => void,
@@ -75,6 +76,7 @@ export function SettingsDialogLayout({
   onSave,
   onReset,
   onResetTorrentHandlerChoice,
+  onResetToDefaults,
   dlnaEnabled,
   setDlnaEnabled,
   downloaderEnabled,
@@ -242,7 +244,7 @@ export function SettingsDialogLayout({
                         value={authSettings.type}
                         onValueChange={value => setAuthSettings({ ...authSettings, type: value } as Auth)}
                       >
-                        <SelectTrigger>
+                        <SelectTrigger id='auth-type'>
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -509,7 +511,7 @@ export function SettingsDialogLayout({
                     value={logLevel}
                     onValueChange={setLogLevel}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id='log-level'>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -529,7 +531,7 @@ export function SettingsDialogLayout({
                     value={logFormat}
                     onValueChange={setLogFormat}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id='log-format'>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -546,23 +548,33 @@ export function SettingsDialogLayout({
           )}
         </div>
 
-        <DialogFooter>
+        <DialogFooter className='flex-col gap-2 sm:flex-row'>
           <Button variant='outline'
-            onClick={onReset}
-            disabled={saving}>
-            Reset
+            onClick={onResetToDefaults}
+            disabled={saving}
+            className='w-full sm:w-auto'>
+            Reset to Defaults
           </Button>
-          <Button onClick={onSave}
-            disabled={saving || (!isApiUrlChangePending && !canSaveServerSettings)}>
-            {saving ? (
-              <>
-                <Loader2 className='h-4 w-4 mr-2 animate-spin' />
-                Saving...
-              </>
-            ) : (
-              'Save Changes'
-            )}
-          </Button>
+          <div className='flex gap-2 w-full sm:w-auto sm:ml-auto'>
+            <Button variant='outline'
+              onClick={onReset}
+              disabled={saving}
+              className='flex-1 sm:flex-auto'>
+              Reset
+            </Button>
+            <Button onClick={onSave}
+              disabled={saving || (!isApiUrlChangePending && !canSaveServerSettings)}
+              className='flex-1 sm:flex-auto'>
+              {saving ? (
+                <>
+                  <Loader2 className='h-4 w-4 mr-2 animate-spin' />
+                  Saving...
+                </>
+              ) : (
+                'Save Changes'
+              )}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

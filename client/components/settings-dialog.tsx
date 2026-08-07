@@ -265,6 +265,41 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
   };
 
+  const handleResetToDefaults = () => {
+    setApiUrl(initialApiUrl);
+    setIsApiUrlCustom(initialIsApiUrlCustom);
+
+    if (IS_TAURI) {
+      const externalPlayer = localStorage.getItem('external_player') || '';
+      setExternalPlayer(externalPlayer);
+    }
+
+    setDlnaEnabled(false);
+    setDownloaderEnabled(false);
+    setFileStoragePath('');
+    setFriendlyName('TorrPlay');
+    setMaxMemory(64);
+    setAuthSettings({ enabled: false, type: 'basic', username: '', password: '' });
+    setTorrentClientSettings({
+      disableDht: false,
+      disableIpv6: true,
+      disablePex: false,
+      disableTcp: false,
+      disableUtp: false,
+      downloadRateLimit: 0,
+      establishedConnsPerTorrent: 50,
+      preferHeaderObfuscation: false,
+      seed: false,
+      torrentPeersHighWater: 500,
+      uploadRateLimit: 0,
+    });
+    setTorrentTrackers([]);
+    setLogLevel('INFO');
+    setLogFormat('text');
+
+    toast.success('Settings reset to defaults');
+  };
+
   const handleResetTorrentHandlerChoice = () => {
     localStorage.removeItem('torrent_handler_choice');
     toast.success('Torrent handler choice reset');
@@ -283,6 +318,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       saving={saving}
       onSave={handleSave}
       onReset={handleReset}
+      onResetToDefaults={handleResetToDefaults}
       onResetTorrentHandlerChoice={handleResetTorrentHandlerChoice}
       dlnaEnabled={dlnaEnabled}
       setDlnaEnabled={setDlnaEnabled}
