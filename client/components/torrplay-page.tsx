@@ -6,7 +6,6 @@
 
 import { App, URLOpenListenerEvent } from '@capacitor/app';
 import { Filesystem } from '@capacitor/filesystem';
-import { ScreenOrientation } from '@capacitor/screen-orientation';
 import dynamic from 'next/dynamic';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import parseTorrent from 'parse-torrent';
@@ -354,22 +353,6 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     (window as CustomWindow).handleTorrentFileBase64 = handleBase64;
     return () => {
       delete (window as CustomWindow).handleTorrentFileBase64;
-    };
-  }, []);
-
-  useEffect(() => {
-    const handleOrientation = (info: { type: string }) => {
-      console.log('Screen orientation changed:', info.type);
-    };
-
-    const listenerPromise = ScreenOrientation.addListener('screenOrientationChange', handleOrientation);
-
-    ScreenOrientation.orientation().then(info => {
-      console.log('Initial screen orientation:', info.type);
-    });
-
-    return () => {
-      listenerPromise.then(listener => listener.remove());
     };
   }, []);
 
