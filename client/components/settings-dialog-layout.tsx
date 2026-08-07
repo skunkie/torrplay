@@ -290,7 +290,7 @@ export function SettingsDialogLayout({
                     <Label htmlFor='friendly-name'>Friendly Name</Label>
                     <Input
                       id='friendly-name'
-                      placeholder='TorrPlay DLNA'
+                      placeholder='TorrPlay'
                       value={friendlyName}
                       onChange={e => setFriendlyName(e.target.value)}
                       maxLength={64}

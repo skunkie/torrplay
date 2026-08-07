@@ -91,7 +91,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     if (settings) {
       setDlnaEnabled(settings.enableDlna ?? false);
       setDownloaderEnabled(settings.enableDownloader ?? false);
-      setFriendlyName(settings.friendlyName || 'TorrPlay DLNA');
+      setFriendlyName(settings.friendlyName || 'TorrPlay');
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setFileStoragePath(settings.fileStoragePath || '');
       setAuthSettings(settings.auth);
@@ -255,7 +255,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setDlnaEnabled(settings.enableDlna ?? false);
       setDownloaderEnabled(settings.enableDownloader ?? false);
       setFileStoragePath(settings.fileStoragePath || '');
-      setFriendlyName(settings.friendlyName || 'TorrPlay DLNA');
+      setFriendlyName(settings.friendlyName || 'TorrPlay');
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
