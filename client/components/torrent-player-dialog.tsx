@@ -4,7 +4,7 @@
 
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 
 import { getTorrentStreamUrl } from '@/lib/api/torrents';
 import { type Torrent, type TorrentFile } from '@/lib/types/api';
@@ -18,27 +18,32 @@ interface TorrentPlayerDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlayerDialogProps) => {
-  const [videoFiles, setVideoFiles] = useState<TorrentFile[]>([]);
-  const [selectedFile, setSelectedFile] = useState<TorrentFile | null>(null);
+function computeVideoFiles(torrent: Torrent | null): { videoFiles: TorrentFile[], selectedFile: TorrentFile | null } {
+  if (!torrent) return { videoFiles: [], selectedFile: null };
+  const files = getVideoFiles(torrent.files);
+  return { videoFiles: files, selectedFile: getInitialVideoFile(files) };
+}
 
-  useEffect(() => {
-    if (open && torrent) {
-      const files = getVideoFiles(torrent.files);
-      setVideoFiles(files);
-      setSelectedFile(getInitialVideoFile(files));
-    } else {
-      setVideoFiles([]);
-      setSelectedFile(null);
-    }
-  }, [open, torrent]);
+export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlayerDialogProps) => {
+  const [userSelectedFile, setUserSelectedFile] = useState<TorrentFile | null>(null);
+  const prevOpenRef = useRef(open);
+
+  if (open && !prevOpenRef.current) {
+    setUserSelectedFile(null);
+  }
+  prevOpenRef.current = open;
+
+  const computed = computeVideoFiles(torrent);
+
+  const videoFiles = open ? computed.videoFiles : [];
+  const selectedFile = open ? (userSelectedFile ?? computed.selectedFile) : null;
 
   const handleExit = useCallback(() => {
     if (videoFiles.length > 1) {
-      setSelectedFile(null);
+      setUserSelectedFile(null);
     } else {
       onOpenChange(false);
-      setSelectedFile(null);
+      setUserSelectedFile(null);
     }
   }, [onOpenChange, videoFiles.length]);
 
@@ -64,7 +69,7 @@ export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlay
       onOpenChange={onOpenChange}
       videoFiles={videoFiles}
       selectedFile={selectedFile}
-      setSelectedFile={setSelectedFile}
+      setSelectedFile={setUserSelectedFile}
       isPlayerVisible={isPlayerVisible}
       videoPlayerOptions={videoPlayerOptions}
       handleExit={handleExit}

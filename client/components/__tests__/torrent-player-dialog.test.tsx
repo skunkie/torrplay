@@ -333,4 +333,178 @@ describe('TorrentPlayerDialog', () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  describe('single file re-open', () => {
+    it('should not flash "No Playable Files" on re-open with single file', async () => {
+      const onOpenChange = vi.fn();
+      const { rerender } = render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Close
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={false}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Immediately after close, no UI should be visible
+      expect(screen.queryByText('No Playable Files')).not.toBeInTheDocument();
+      expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
+
+      // Re-open
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // "No Playable Files" must NOT flash during re-open
+      expect(screen.queryByText('No Playable Files')).not.toBeInTheDocument();
+
+      // File selector must NOT flash during re-open
+      expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
+    });
+
+    it('should show video player immediately on re-open with single file', async () => {
+      const onOpenChange = vi.fn();
+      const { rerender } = render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Close
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={false}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Re-open
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Video player should be visible immediately (not after useEffect)
+      expect(screen.getAllByText('video.mp4')).toHaveLength(2);
+    });
+
+    it('should not call onOpenChange(false) on re-open with single file', async () => {
+      const onOpenChange = vi.fn();
+      const { rerender } = render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      onOpenChange.mockClear();
+
+      // Close
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={false}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Re-open
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Wait for effects to settle
+      await waitFor(() => {
+        expect(screen.getAllByText('video.mp4')).toHaveLength(2);
+      });
+
+      // onOpenChange(false) must not have been called during re-open
+      expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    });
+
+    it('should not flash file selector when opening directly with single file from closed state', async () => {
+      const onOpenChange = vi.fn();
+      const { rerender } = render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={false}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Open directly (first time from closed state)
+      rerender(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      // Must not flash file selector
+      expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
+      // Must not flash "No Playable Files"
+      expect(screen.queryByText('No Playable Files')).not.toBeInTheDocument();
+      // Video player should be visible
+      expect(screen.getAllByText('video.mp4')).toHaveLength(2);
+    });
+
+    it('should not flash when closing and re-opening multiple times', async () => {
+      const onOpenChange = vi.fn();
+      const { rerender } = render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+        />,
+      );
+
+      for (let i = 0; i < 3; i++) {
+        onOpenChange.mockClear();
+
+        rerender(
+          <TorrentPlayerDialog
+            torrent={mockTorrentSingleVideo}
+            open={false}
+            onOpenChange={onOpenChange}
+          />,
+        );
+
+        rerender(
+          <TorrentPlayerDialog
+            torrent={mockTorrentSingleVideo}
+            open={true}
+            onOpenChange={onOpenChange}
+          />,
+        );
+
+        // Must not flash on any re-open cycle
+        expect(screen.queryByText('No Playable Files')).not.toBeInTheDocument();
+        expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
+      }
+    });
+  });
+
 });

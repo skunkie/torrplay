@@ -4,7 +4,7 @@
 
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 
 import DemoVideoPlayer from '@/components/demo-video-player';
 import type { Torrent, TorrentFile } from '@/lib/types/api';
@@ -27,33 +27,42 @@ interface DemoTorrentPlayerDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
+function getSelectedFile(torrent: Torrent | null): TorrentFile | null {
+  if (!torrent) return null;
+  const files = torrent.files.filter(f => videoExtensions.some(ext => f.name.toLowerCase().endsWith(ext)));
+  return getInitialVideoFile(files);
+}
+
 export function DemoTorrentPlayerDialog({ torrent, open, onOpenChange }: DemoTorrentPlayerDialogProps) {
-  const [selectedFile, setSelectedFile] = useState<TorrentFile | null>(null);
+  const [userSelectedFile, setUserSelectedFile] = useState<TorrentFile | null>(null);
+  const prevOpenRef = useRef(open);
 
-  useEffect(() => {
-    if (open && torrent) {
-      const files = torrent.files.filter(f => videoExtensions.some(ext => f.name.toLowerCase().endsWith(ext)));
-      setSelectedFile(getInitialVideoFile(files));
-    } else {
-      setSelectedFile(null);
-    }
-  }, [open, torrent]);
+  if (open && !prevOpenRef.current) {
+    setUserSelectedFile(null);
+  }
+  prevOpenRef.current = open;
 
-  const handleExit = () => {
+  const computedFile = open ? getSelectedFile(torrent) : null;
+  const selectedFile = userSelectedFile ?? computedFile;
+
+  const handleExit = useCallback(() => {
     onOpenChange(false);
-    setSelectedFile(null);
-  };
+    setUserSelectedFile(null);
+  }, [onOpenChange]);
 
-  const videoPlayerOptions = selectedFile && torrent
-    ? {
-      src: {
-        src: 'data:video/mp4;base64,AAAAIGZ0eXBpcG1wAAACAG1pcHJwAAAAUGlwcm9wAAAA7XfSZXZ0AAAAiXVzZSAKbW92dm0gd2lkZQAAAAAAANB3bWhkAAAAAAAAAAAAAAAAAAAAAA==',
-        type: getVideoType(selectedFile.name),
-      },
-      title: selectedFile.name,
-      autoPlay: true,
+  const videoPlayerOptions = useMemo(() => {
+    if (selectedFile && torrent) {
+      return {
+        src: {
+          src: 'data:video/mp4;base64,AAAAIGZ0eXBpcG1wAAACAG1pcHJwAAAAUGlwcm9wAAAA7XfSZXZ0AAAAiXVzZSAKbW92dm0gd2lkZQAAAAAAANB3bWhkAAAAAAAAAAAAAAAAAAAAAA==',
+          type: getVideoType(selectedFile.name),
+        },
+        title: selectedFile.name,
+        autoPlay: true,
+      };
     }
-    : null;
+    return null;
+  }, [selectedFile, torrent]);
 
   const isPlayerVisible = !!videoPlayerOptions;
 
