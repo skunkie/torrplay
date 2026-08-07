@@ -45,7 +45,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [downloaderEnabled, setDownloaderEnabled] = useState(false);
   const [friendlyName, setFriendlyName] = useState('');
   const [maxMemory, setMaxMemory] = useState(512);
-  const [fileStoragePath, setFileStoragePath] = useState('');
+  const [fileStoragePath, setFileStoragePathRaw] = useState('');
+  const setFileStoragePath = (value: string) => {
+    setFileStoragePathRaw(value);
+    if (!value) {
+      setDownloaderEnabled(false);
+    }
+  };
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
@@ -95,12 +101,6 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setLogFormat(settings.logFormat || 'text');
     }
   }, [settings, open, IS_TAURI]);
-
-  useEffect(() => {
-    if (!fileStoragePath) {
-      setDownloaderEnabled(false);
-    }
-  }, [fileStoragePath]);
 
   const handleSave = async () => {
     setSaving(true);
