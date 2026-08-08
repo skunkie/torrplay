@@ -7,7 +7,7 @@
 import { Activity, ArrowDown, ArrowUp, Cloud, Database, HardDrive } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatBytes } from '@/lib/format-utils';
 import { MemoryStats, SystemMetrics } from '@/lib/types/api';
 
@@ -25,6 +25,7 @@ export function MetricsDialogLayout({ open, onOpenChange, memoryStats, systemMet
       <DialogContent className='max-h-[90vh] overflow-hidden flex flex-col'>
         <DialogHeader className='flex-shrink-0'>
           <DialogTitle>System Metrics</DialogTitle>
+          <DialogDescription>Real-time system and torrent statistics</DialogDescription>
         </DialogHeader>
 
         <div className='space-y-4 py-4 overflow-y-auto flex-1'>

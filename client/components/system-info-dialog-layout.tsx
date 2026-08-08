@@ -7,7 +7,7 @@
 import { Calendar, Clock, GitCommit, Info, Server } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatUptime } from '@/lib/format-utils';
 import { SystemInfo } from '@/lib/types/api';
 
@@ -24,6 +24,7 @@ export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: Syste
       <DialogContent className='max-h-[90vh] overflow-hidden flex flex-col'>
         <DialogHeader className='flex-shrink-0'>
           <DialogTitle>System Information</DialogTitle>
+          <DialogDescription>Version, build date, commit, and uptime details</DialogDescription>
         </DialogHeader>
 
         <div className='space-y-4 py-4 overflow-y-auto flex-1'>
