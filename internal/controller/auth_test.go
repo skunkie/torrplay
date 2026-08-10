@@ -42,7 +42,7 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 	}
 
 	metricsSvc := metrics.New()
-	c, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+	c, err := newController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc, testControllerRuntimeConfig())
 	require.NoError(t, err)
 
 	cleanup := func() {

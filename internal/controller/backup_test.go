@@ -26,7 +26,7 @@ func TestBackupAndRestore(t *testing.T) {
 	defer cleanup()
 
 	// Add some torrents to backup.
-	addAllSampleTorrents(t, ctrl.router)
+	addAllSampleTorrents(t, ctrl)
 
 	// Get the backup.
 	rr := testutil.NewRequest().Get("/api/v1/torrents/backup").GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -93,6 +93,7 @@ func TestBackupAndRestoreWithPosters(t *testing.T) {
 
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	primeSampleMetadata(t, ctrl, ih)
 	magnet := samples[ih]
 	req := api.TorrentAdd{Magnet: &magnet, Poster: &posterURL}
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder

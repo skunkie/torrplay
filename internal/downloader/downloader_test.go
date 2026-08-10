@@ -101,6 +101,7 @@ func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	clientCfg.DisableTrackers = true
 	clientCfg.DisableWebtorrent = true
 	clientCfg.DisableWebseeds = true
+	clientCfg.ListenPort = 0
 	client, err := torrent.NewClient(clientCfg)
 	require.NoError(t, err)
 	defer client.Close()
@@ -187,6 +188,7 @@ func TestDownloader_Stop(t *testing.T) {
 	clientCfg.DisableTrackers = true
 	clientCfg.DisableWebtorrent = true
 	clientCfg.DisableWebseeds = true
+	clientCfg.ListenPort = 0
 	client, err := torrent.NewClient(clientCfg)
 	require.NoError(t, err)
 	defer client.Close()
@@ -242,6 +244,7 @@ func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
 	clientCfg.DisableTrackers = true
 	clientCfg.DisableWebtorrent = true
 	clientCfg.DisableWebseeds = true
+	clientCfg.ListenPort = 0
 	client, err := torrent.NewClient(clientCfg)
 	require.NoError(t, err)
 	defer client.Close()
@@ -293,6 +296,7 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	clientCfg.DisableTrackers = true
 	clientCfg.DisableWebtorrent = true
 	clientCfg.DisableWebseeds = true
+	clientCfg.ListenPort = 0
 	client, err := torrent.NewClient(clientCfg)
 	require.NoError(t, err)
 	defer client.Close()
