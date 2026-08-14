@@ -55,6 +55,7 @@ const (
 	gotInfoTimeoutMsg         = "timeout waiting for torrent metadata"
 	imageDownloadTimeout      = 1 * time.Minute
 	multipartFormMaxMemory    = 1 << 20
+	multipartFormMaxBody      = 32 << 20
 	posterCleanupInterval     = 6 * time.Hour
 	torrentTrackerTTL         = 3 * time.Hour
 )

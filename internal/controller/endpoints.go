@@ -69,7 +69,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case strings.HasPrefix(contentType, "multipart/form-data"):
-		err := r.ParseMultipartForm(multipartFormMaxMemory)
+		err := parseMultipartForm(w, r)
 		if err != nil {
 			api.HTTPError(w, fmt.Sprintf("failed to parse multipart form: %v", err), http.StatusBadRequest)
 			return

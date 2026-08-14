@@ -325,7 +325,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
-	err := r.ParseMultipartForm(multipartFormMaxMemory)
+	err := parseMultipartForm(w, r)
 	if err != nil {
 		api.HTTPError(w, fmt.Sprintf("failed to parse multipart form: %v", err), http.StatusBadRequest)
 		return
@@ -650,7 +650,7 @@ func tSUploadTorrentMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		err := r.ParseMultipartForm(multipartFormMaxMemory)
+		err := parseMultipartForm(w, r)
 		if err != nil {
 			api.HTTPError(w, err.Error(), http.StatusBadRequest)
 			return
