@@ -132,7 +132,25 @@ export function TorrentStatsDialogLayout({
                   <PieceGrid
                     totalPieces={stats.totalPieces}
                     pieces={stats.pieces}
+                    readers={stats.readers ?? []}
                   />
+                </div>
+              )}
+
+              {stats.readers && stats.readers.length > 0 && (
+                <div className='space-y-3'>
+                  <h4 className='text-sm font-medium'>Active Readers</h4>
+                  <div className='space-y-2'>
+                    {stats.readers.map((r, idx) => (
+                      <div key={`${r.reader}-${r.start}-${r.end}-${idx}`}
+                        className='flex items-center justify-between rounded-md border p-2 text-sm'>
+                        <span className='font-medium'>piece {r.reader}</span>
+                        <span className='text-muted-foreground'>
+                          pieces {r.start} – {r.end}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

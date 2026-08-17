@@ -158,6 +158,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
       index: i,
       size: 131072
     })),
+    readers: [],
     totalPieces: 987,
     totalSize: 129302391,
   },
@@ -193,6 +194,9 @@ const demoTorrentStats: Record<string, TorrentStats> = {
       index: i,
       size: 262144
     })),
+    readers: [
+      { reader: 200, start: 190, end: 320 }
+    ],
     totalPieces: 1055,
     totalSize: 276445467,
   },
@@ -228,6 +232,9 @@ const demoTorrentStats: Record<string, TorrentStats> = {
       index: i,
       size: 262144
     })),
+    readers: [
+      { reader: 180, start: 170, end: 300 }
+    ],
     totalPieces: 843,
     totalSize: 220864086
   },
@@ -257,6 +264,9 @@ const demoTorrentStats: Record<string, TorrentStats> = {
       { complete: true, inMemory: true, index: 0, size: 524288 },
       { complete: true, inMemory: true, index: 1, size: 524288 },
       { complete: true, inMemory: true, index: 1089, size: 476875 }
+    ],
+    readers: [
+      { reader: 0, start: 0, end: 40 }
     ],
     piecesComplete: 3,
     piecesDirtiedBad: 0,

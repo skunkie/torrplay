@@ -116,6 +116,12 @@ interface TorrentAddWithFile {
   title?: string
 };
 
+interface ReaderInfo {
+  end: number,
+  reader: number,
+  start: number
+}
+
 interface TorrentStats {
   activePeers: number,
   bytesHashed: number,
@@ -143,6 +149,7 @@ interface TorrentStats {
   memoryStats: MemoryStats,
   memoryUsagePercentage: number,
   pieces: PieceInfo[],
+  readers?: ReaderInfo[],
   totalPieces: number,
   totalSize: number
 }
@@ -165,6 +172,7 @@ export type {
   Auth,
   MemoryStats,
   PieceInfo,
+  ReaderInfo,
   Settings,
   SystemInfo,
   SystemMetrics,

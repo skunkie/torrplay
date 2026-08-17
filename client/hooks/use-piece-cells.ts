@@ -42,8 +42,11 @@ export const usePieceCells = ({
       cells.push({ isComplete: piece?.complete ?? false });
     }
 
-    const calculatedHeight = piecesInOneRow > 0 ? Math.ceil(cells.length / piecesInOneRow) * pieceSizeWithGap : 0;
+    const visibleRowCount = Math.ceil(numPiecesToRender / piecesInOneRow);
+    const visiblePieceCount = Math.min(numPiecesToRender, piecesInOneRow * visibleRowCount);
 
-    return { cells, height: calculatedHeight };
+    const calculatedHeight = piecesInOneRow > 0 ? Math.ceil(visiblePieceCount / piecesInOneRow) * pieceSizeWithGap : 0;
+
+    return { cells: cells.slice(0, visiblePieceCount), height: calculatedHeight };
   }, [totalPieces, piecesInOneRow, pieceSizeWithGap, piecesByIndex]);
 };
