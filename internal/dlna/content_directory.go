@@ -35,10 +35,15 @@ const (
 	allTorrentsContainerID    = "1"
 	recentlyAddedContainerID  = "2"
 	recentlyViewedContainerID = "3"
+	categoriesContainerID     = "4"
 
 	allTorrentsContainer    = "All"
 	recentlyAddedContainer  = "Recently Added"
 	recentlyViewedContainer = "Recently Viewed"
+	categoriesContainer     = "Categories"
+
+	categoryIDPrefix      = "category:"
+	uncategorizedCategory = "Uncategorized"
 
 	recentlyItemsCount = 10
 )
@@ -85,6 +90,24 @@ func NewContentDirectory(db database.DatabaseInterface, images images.ServiceInt
 
 func (cd *ContentDirectory) BrowseMetadata(ctx context.Context, id upnpav.ObjectID, filter xmltypes.CommaSeparatedStrings) (*upnpav.DIDLLite, error) {
 	if id == rootID {
+		torrents, err := cd.db.GetTorrents()
+		if err != nil {
+			return nil, err
+		}
+
+		var all []*database.Torrent
+		for _, torrent := range torrents {
+			if hasMediaFiles(torrent.Files) {
+				all = append(all, torrent)
+			}
+		}
+
+		categories := getCategories(all)
+		childCount := 3
+		if len(categories) > 0 {
+			childCount = 4
+		}
+
 		return &upnpav.DIDLLite{
 			Containers: []upnpav.Container{
 				{
@@ -94,13 +117,13 @@ func (cd *ContentDirectory) BrowseMetadata(ctx context.Context, id upnpav.Object
 					Class:      upnpav.StorageFolder,
 					Restricted: true,
 					Searchable: true,
-					ChildCount: 3,
+					ChildCount: childCount,
 				},
 			},
 		}, nil
 	}
 
-	if strings.Contains(string(id), "/") {
+	if isItemID(id) {
 		return cd.browseItemMetadata(ctx, id)
 	}
 
@@ -124,14 +147,29 @@ func (cd *ContentDirectory) BrowseChildren(ctx context.Context, parentID upnpav.
 		}
 	}
 
+	if parentID == categoriesContainerID {
+		categories := getCategories(all)
+		if len(categories) == 0 {
+			return nil, 0, contentdirectory.ErrNoSuchObject
+		}
+		return cd.browseCategories(ctx, all, startingIndex, requestedCount)
+	}
+
 	var torrentsByParentID []*database.Torrent
-	switch parentID {
-	case allTorrentsContainerID:
+	switch {
+	case parentID == allTorrentsContainerID:
 		torrentsByParentID = all
-	case recentlyAddedContainerID:
+	case parentID == recentlyAddedContainerID:
 		torrentsByParentID = getRecentlyAddedTorrents(all)
-	case recentlyViewedContainerID:
+	case parentID == recentlyViewedContainerID:
 		torrentsByParentID = getRecentlyViewedTorrents(all)
+	case isCategoryContainerID(parentID):
+		catName := getCategoryFromID(parentID)
+		categories := getCategories(all)
+		if !slices.Contains(categories, catName) {
+			return nil, 0, contentdirectory.ErrNoSuchObject
+		}
+		torrentsByParentID = getTorrentsByCategory(all, catName)
 	default:
 		return cd.browseTorrent(ctx, parentID, startingIndex, requestedCount)
 	}
@@ -162,15 +200,30 @@ func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criter
 	parentID := allTorrentsContainerID
 	searchContainers := true
 
-	switch id {
-	case rootID, allTorrentsContainerID:
+	switch {
+	case id == rootID, id == allTorrentsContainerID:
 		torrentsToSearch = all
-	case recentlyAddedContainerID:
+	case id == categoriesContainerID:
+		categories := getCategories(all)
+		if len(categories) == 0 {
+			return nil, 0, contentdirectory.ErrNoSuchObject
+		}
+		torrentsToSearch = all
+		parentID = categoriesContainerID
+	case id == recentlyAddedContainerID:
 		torrentsToSearch = getRecentlyAddedTorrents(all)
 		parentID = recentlyAddedContainerID
-	case recentlyViewedContainerID:
+	case id == recentlyViewedContainerID:
 		torrentsToSearch = getRecentlyViewedTorrents(all)
 		parentID = recentlyViewedContainerID
+	case isCategoryContainerID(id):
+		catName := getCategoryFromID(id)
+		categories := getCategories(all)
+		if !slices.Contains(categories, catName) {
+			return nil, 0, contentdirectory.ErrNoSuchObject
+		}
+		torrentsToSearch = getTorrentsByCategory(all, catName)
+		parentID = string(id)
 	default:
 		searchContainers = false
 		for _, t := range all {
@@ -334,6 +387,7 @@ func (cd *ContentDirectory) browseRoot(_ context.Context, startingIndex, request
 
 	recentlyAdded := getRecentlyAddedTorrents(all)
 	recentlyViewed := getRecentlyViewedTorrents(all)
+	categories := getCategories(all)
 
 	containers := []upnpav.Container{
 		{
@@ -363,6 +417,51 @@ func (cd *ContentDirectory) browseRoot(_ context.Context, startingIndex, request
 			Searchable: true,
 			ChildCount: len(recentlyViewed),
 		},
+	}
+
+	if len(categories) > 0 {
+		containers = append(containers, upnpav.Container{
+			ID:         categoriesContainerID,
+			Parent:     rootID,
+			Title:      categoriesContainer,
+			Class:      upnpav.StorageFolder,
+			Restricted: true,
+			Searchable: true,
+			ChildCount: len(categories),
+		})
+	}
+
+	totalMatches := uint(len(containers))
+
+	if startingIndex >= uint(len(containers)) {
+		return &upnpav.DIDLLite{}, totalMatches, nil
+	}
+
+	end := int(startingIndex) + int(requestedCount)
+	if end > len(containers) || requestedCount == 0 {
+		end = len(containers)
+	}
+
+	return &upnpav.DIDLLite{
+		Containers: containers[startingIndex:end],
+	}, totalMatches, nil
+}
+
+func (cd *ContentDirectory) browseCategories(_ context.Context, all []*database.Torrent, startingIndex, requestedCount uint) (*upnpav.DIDLLite, uint, error) {
+	categories := getCategories(all)
+
+	var containers []upnpav.Container
+	for _, cat := range categories {
+		catTorrents := getTorrentsByCategory(all, cat)
+		containers = append(containers, upnpav.Container{
+			ID:         categoryContainerID(cat),
+			Parent:     categoriesContainerID,
+			Title:      cat,
+			Class:      upnpav.StorageFolder,
+			Restricted: true,
+			Searchable: true,
+			ChildCount: len(catTorrents),
+		})
 	}
 
 	totalMatches := uint(len(containers))
@@ -398,16 +497,43 @@ func (cd *ContentDirectory) browseContainerMetadata(_ context.Context, id upnpav
 	var childCount int
 	parentID := rootID
 
-	switch id {
-	case allTorrentsContainerID:
+	switch {
+	case id == allTorrentsContainerID:
 		title = allTorrentsContainer
 		childCount = len(all)
-	case recentlyAddedContainerID:
+	case id == recentlyAddedContainerID:
 		title = recentlyAddedContainer
 		childCount = len(getRecentlyAddedTorrents(all))
-	case recentlyViewedContainerID:
+	case id == recentlyViewedContainerID:
 		title = recentlyViewedContainer
 		childCount = len(getRecentlyViewedTorrents(all))
+	case id == categoriesContainerID:
+		categories := getCategories(all)
+		if len(categories) == 0 {
+			return nil, contentdirectory.ErrNoSuchObject
+		}
+		title = categoriesContainer
+		childCount = len(categories)
+	case isCategoryContainerID(id):
+		catName := getCategoryFromID(id)
+		categories := getCategories(all)
+		if !slices.Contains(categories, catName) {
+			return nil, contentdirectory.ErrNoSuchObject
+		}
+		catTorrents := getTorrentsByCategory(all, catName)
+		return &upnpav.DIDLLite{
+			Containers: []upnpav.Container{
+				{
+					ID:         id,
+					Parent:     categoriesContainerID,
+					Title:      catName,
+					Class:      upnpav.StorageFolder,
+					Restricted: true,
+					Searchable: true,
+					ChildCount: len(catTorrents),
+				},
+			},
+		}, nil
 	default:
 		for _, torrent := range all {
 			if torrent.Hash.HexString() == string(id) {
@@ -544,7 +670,7 @@ func (cd *ContentDirectory) buildTorrentsDIDL(_ context.Context, parentID upnpav
 		validTorrents = append(validTorrents, torrent)
 	}
 
-	if parentID == allTorrentsContainerID {
+	if parentID == allTorrentsContainerID || isCategoryContainerID(parentID) {
 		sort.SliceStable(validTorrents, func(i, j int) bool {
 			return validTorrents[i].Name < validTorrents[j].Name
 		})
@@ -790,4 +916,77 @@ func getMediaFiles(files []api.TorrentFile) []api.TorrentFile {
 		}
 	}
 	return mediaFiles
+}
+
+func isItemID(id upnpav.ObjectID) bool {
+	parts := strings.Split(string(id), "/")
+	if len(parts) != 2 {
+		return false
+	}
+	if _, err := utils.HashFromHexString(parts[0]); err != nil {
+		return false
+	}
+	if _, err := strconv.Atoi(parts[1]); err != nil {
+		return false
+	}
+	return true
+}
+
+func categoryContainerID(category string) upnpav.ObjectID {
+	return upnpav.ObjectID(categoryIDPrefix + category)
+}
+
+func isCategoryContainerID(id upnpav.ObjectID) bool {
+	return strings.HasPrefix(string(id), categoryIDPrefix)
+}
+
+func getCategoryFromID(id upnpav.ObjectID) string {
+	return strings.TrimPrefix(string(id), categoryIDPrefix)
+}
+
+func getTorrentCategory(t *database.Torrent) string {
+	if t.Category == nil || strings.TrimSpace(*t.Category) == "" {
+		return uncategorizedCategory
+	}
+	return strings.TrimSpace(*t.Category)
+}
+
+func getCategories(allTorrents []*database.Torrent) []string {
+	hasExplicit := false
+	categorySet := make(map[string]struct{})
+	for _, t := range allTorrents {
+		if t.Category != nil && strings.TrimSpace(*t.Category) != "" {
+			hasExplicit = true
+			categorySet[strings.TrimSpace(*t.Category)] = struct{}{}
+		}
+	}
+
+	if !hasExplicit {
+		return nil
+	}
+
+	for _, t := range allTorrents {
+		if t.Category == nil || strings.TrimSpace(*t.Category) == "" {
+			categorySet[uncategorizedCategory] = struct{}{}
+			break
+		}
+	}
+
+	categories := make([]string, 0, len(categorySet))
+	for cat := range categorySet {
+		categories = append(categories, cat)
+	}
+
+	sort.Strings(categories)
+	return categories
+}
+
+func getTorrentsByCategory(allTorrents []*database.Torrent, category string) []*database.Torrent {
+	var result []*database.Torrent
+	for _, t := range allTorrents {
+		if getTorrentCategory(t) == category {
+			result = append(result, t)
+		}
+	}
+	return result
 }
