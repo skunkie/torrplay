@@ -270,16 +270,9 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		c.mu.Lock()
-		defer c.mu.Unlock()
-
+		var needsDrop bool
 		if req.Action == api.TSTorrentRequestActionAdd && utils.Val(req.SaveToDB) {
-			defer func() {
-				to.Drop()
-				<-to.Closed()
-				c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
-			}()
-
+			needsDrop = true
 			addTorrentReq := api.TorrentAdd{
 				Category: req.Category,
 				Magnet:   magnet,
@@ -287,7 +280,10 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 				Storage:  utils.Ptr(api.Memory),
 				Title:    req.Title,
 			}
-			if _, err := c.createTorrentInDBLocked(to, addTorrentReq); err != nil && !errors.Is(err, database.ErrTorrentExists) {
+			c.mu.Lock()
+			_, err := c.createTorrentInDBLocked(to, addTorrentReq)
+			c.mu.Unlock()
+			if err != nil && !errors.Is(err, database.ErrTorrentExists) {
 				api.HandleError(w, err)
 				return
 			}
@@ -306,6 +302,13 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp := c.buildTSTorrentResponse(t, to)
+
+		if needsDrop {
+			to.Drop()
+			<-to.Closed()
+			c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
