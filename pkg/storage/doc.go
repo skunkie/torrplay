@@ -2,41 +2,82 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Package storage provides a memory-limited, piece-level storage client for torrent downloads.
-// It implements the storage.Client interface from the anacrolix/torrent library with efficient
-// memory management and LRU-based eviction policies.
+// Package storage provides a memory-limited, piece-level storage client for torrent downloads
+// and high-performance media streaming. It implements the storage.Client and storage.PieceCompletion
+// interfaces from the anacrolix/torrent library with proximity-weighted eviction and active range protection.
 //
 // # Overview
 //
-// The Client type manages torrent data storage with configurable memory limits. Unlike traditional
-// file-based storage, this implementation keeps downloaded pieces in memory, making it suitable for
-// scenarios where:
-// - Disk I/O should be minimized.
-// - Data needs to be served quickly to peers.
-// - Memory is plentiful but limited.
-// - Temporary storage of downloaded content is required.
+// The Client type manages torrent piece data in memory with configurable memory limits. Unlike traditional
+// file-based storage, this implementation keeps active and downloaded pieces resident in RAM, making it
+// optimal for media streaming and scenarios where:
+//   - Disk I/O, wear, and storage footprint should be eliminated.
+//   - Pieces must be served with minimum latency to players and peers.
+//   - Memory is bounded and shared across multiple concurrent torrents and streams.
 //
 // # Key Features
 //
-//  1. Memory Management: Enforces a global memory limit across all torrents with automatic eviction
-//     of least-recently-used pieces when limits are exceeded.
+//  1. Global Memory Management: Enforces a configurable global memory limit across all active torrents,
+//     automatically reclaiming memory when limits are exceeded.
 //
-//  2. Piece Tracking: Maintains detailed information about each piece including completion status,
-//     memory residency, and LRU position.
+//  2. Proximity-Weighted Eviction: Employs a multi-tiered proximity scoring
+//     algorithm that prioritizes pieces based on their distance to active stream reader positions.
 //
-//  3. Multi-Torrent Support: Tracks memory usage per torrent while maintaining global limits.
+//  3. Active Range & Stream Reader Protection: Supports concurrent streaming sessions with independent
+//     reader IDs, protecting both active playback windows and trailing demuxer buffers from eviction.
 //
-//  4. Statistics: Provides comprehensive memory usage statistics at both global and per-torrent levels.
+//  4. Seamless Re-downloading on Eviction: When pieces are evicted under memory pressure, the storage
+//     layer reports them as incomplete to anacrolix/torrent, allowing players to seek backwards and forwards
+//     freely while the engine dynamically re-downloads required pieces.
 //
-//  5. Self-Hashing: Implements the SelfHashing interface to verify piece integrity without external
-//     hashing mechanisms.
+//  5. Self-Hashing Integrity: Implements the storage.SelfHashing interface to verify piece SHA1 checksums
+//     directly in memory without external hashing pipelines.
+//
+//  6. Detailed Metrics & Monitoring: Provides real-time global and per-torrent memory consumption,
+//     residency maps, and piece completion statistics.
+//
+// # Proximity-Weighted Eviction Model
+//
+// When memory limits are reached, pieces are evaluated and assigned an eviction-protection score
+// (higher score = greater protection against eviction):
+//
+//   - Tier 3 — In-Window & Trailing Buffer (Score: 100,000–1,000,000):
+//     Pieces currently inside or immediately behind an active stream reader's window. Pieces closest to
+//     the active read head receive the highest protection, preventing playback stutter.
+//
+//   - Tier 2 — Forward Prefetch / Readahead (Score: 1–10,000):
+//     Pieces ahead of the reader head within the readahead window. Protection decays smoothly with distance,
+//     prioritizing pieces that will be consumed next.
+//
+//   - Tier 1.5 — Backward History / Rewind Buffer (Score: 1–5,000):
+//     Pieces behind the trailing buffer. Retains moderate protection decaying with distance to accommodate
+//     short rewinds and player demuxer lookbacks without triggering immediate re-downloads.
+//
+//   - Tier 0 — Inactive & Unreferenced Pieces (Score: 0):
+//     Pieces belonging to torrents or files without active readers. These are evicted first.
+//
+//   - LRU Tie-Breaker:
+//     Among pieces with identical proximity scores, the piece least recently used (furthest back in the global
+//     LRU list) is evicted first.
+//
+// # Stream Reader Tracking
+//
+// Readers register and update their streaming byte positions using SetActiveRange:
+//
+//	storageClient.SetActiveRange(infoHash, readerID, windowStartBytes, windowEndBytes)
+//
+// When a reader finishes or is closed, its range is unregistered:
+//
+//	storageClient.ClearActiveRange(infoHash, readerID)
+//
+// Multiple readers on the same or different torrents operate concurrently, each maintaining its own
+// protected window in the shared memory pool.
 //
 // # Usage Example
 //
 //	package main
 //
 //	import (
-//		"context"
 //		"log/slog"
 //
 //		"github.com/anacrolix/torrent"
@@ -44,10 +85,11 @@
 //	)
 //
 //	func main() {
-//		// Create a storage client with 1GB memory limit.
-//		storageClient := storage.NewClient(1<<30, slog.Default())
+//		// Create a storage client with a 64MB memory limit.
+//		storageClient := storage.NewClient(64*1024*1024, slog.Default())
+//		defer storageClient.Close()
 //
-//		// Configure torrent client to use our storage.
+//		// Configure anacrolix/torrent to use memory storage.
 //		config := torrent.NewDefaultClientConfig()
 //		config.DefaultStorage = storageClient
 //
@@ -57,55 +99,25 @@
 //		}
 //		defer client.Close()
 //
-//		// Add and download torrents...
+//		// Download and stream torrents...
 //	}
-//
-// # Memory Eviction
-//
-// When the total memory usage exceeds the configured limit, the client automatically evicts
-// least-recently-used pieces. Eviction only removes piece data from memory; metadata about
-// piece completion status is preserved. Re-downloading evicted pieces is required to access
-// their data again.
 //
 // # Thread Safety
 //
-// All public methods are thread-safe and can be called concurrently from multiple goroutines.
-// The implementation uses fine-grained locking to minimize contention.
-//
-// # Limitations
-//
-//  1. Data Persistence: All data is stored in memory and not persisted to disk. Application
-//     restarts will lose all downloaded data.
-//
-//  2. Memory Pressure: Large torrents or many concurrent torrents may exceed available memory,
-//     causing frequent evictions and reduced performance.
-//
-//  3. Completion Tracking: While piece completion status is tracked, the actual piece data
-//     may be evicted. This means a piece can be marked as "complete" but not have its data
-//     in memory.
+// All public methods on Client are fully thread-safe and safe for concurrent use across multiple
+// goroutines, HTTP handlers, and streaming readers. Fine-grained mutexes protect individual piece buffers,
+// torrent states, and the global LRU list independently to minimize lock contention.
 //
 // # Statistics and Monitoring
 //
-// The package provides several methods for monitoring storage usage:
-// - GetMemoryStats(): Global memory usage statistics.
-// - GetTorrentMemoryStats(): Per-torrent detailed statistics.
-// - GetPieceStatus(): Individual piece information.
-// - Various helper methods for tracking completion progress and memory usage.
+// The package exposes several inspection methods:
+//   - GetMemoryStats: Returns global statistics (total memory used, max memory, active torrent count).
+//   - GetTorrentMemoryStats: Returns detailed per-torrent metrics, including memory usage percentage,
+//     in-memory piece counts, and individual piece statuses.
+//   - GetPieceStatus: Returns completion and residency status for a specific piece index.
 //
-// # Error Handling
+// # Error Conditions
 //
-// The package defines several error conditions:
-// - ErrPieceNotAvailable: Returned when reading a piece that has been evicted from memory.
-// - ErrInsufficientMemory: When memory limits cannot be satisfied even after eviction.
-//
-// # Implementation Details
-//
-// Internally, the client maintains:
-// - A global LRU list for eviction decisions.
-// - Per-piece metadata with synchronization.
-// - Per-torrent memory usage tracking.
-// - Piece hashes for integrity verification.
-//
-// The implementation is designed to be efficient for the common case of sequential piece
-// downloading while supporting random access patterns.
+//   - ErrPieceNotAvailable: Returned when attempting to read a piece whose data is not resident in memory.
+//   - ErrInsufficientMemory: Returned when an allocation cannot be fulfilled even after evicting all eligible pieces.
 package storage
