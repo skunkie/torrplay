@@ -10,7 +10,8 @@ RUN corepack prepare pnpm@latest --activate && corepack enable
 
 COPY client/package.json .
 COPY client/pnpm-lock.yaml .
-RUN pnpm install --frozen-lockfile --ignore-scripts
+COPY client/pnpm-workspace.yaml .
+RUN pnpm install --frozen-lockfile
 
 COPY client-entrypoint.sh client/ ./
 
