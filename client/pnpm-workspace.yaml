@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+allowBuilds:
+  sharp: true
+  unrs-resolver: true
