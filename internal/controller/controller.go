@@ -63,6 +63,12 @@ var gotInfoTimeout = 30 * time.Second
 
 var _ api.ServerInterface = (*Controller)(nil)
 
+func init() {
+	chi.RegisterMethod("SUBSCRIBE")
+	chi.RegisterMethod("UNSUBSCRIBE")
+	chi.RegisterMethod("NOTIFY")
+}
+
 type torrentInfo struct {
 	lastUsedAt  time.Time
 	storageType api.TorrentStorage
@@ -243,7 +249,7 @@ func (c *Controller) buildRouter() *chi.Mux {
 	// CORS setup.
 	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "SUBSCRIBE", "UNSUBSCRIBE", "NOTIFY"},
 		AllowedHeaders: []string{
 			"Accept", "Accept-Ranges", "Accept-Language", "Access-Control-Request-Private-Network",
 			"Authorization", "Content-Language", "Content-Type", "Content-Length", "Origin", "Range",
