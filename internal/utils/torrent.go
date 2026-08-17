@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/httpclient"
 )
 
@@ -78,4 +79,9 @@ func FetchTrackers(ctx context.Context, client *httpclient.Client) ([][]string, 
 	}
 
 	return tiers, nil
+}
+
+// MagnetURIFromHash returns a magnet URI string for the specified info hash.
+func MagnetURIFromHash(ih metainfo.Hash) string {
+	return "magnet:?xt=urn:btih:" + ih.HexString()
 }

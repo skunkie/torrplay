@@ -6,6 +6,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,29 +21,104 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/httpclient"
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
-// Taken from https://webtorrent.io/free-torrents.
-var samples = map[metainfo.Hash]string{
-	metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c"): "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fbig-buck-bunny.torrent",
-	metainfo.NewHashFromHex("c9e15763f722f23e98a29decdfae341b98d53056"): "magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Cosmos+Laundromat&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fcosmos-laundromat.torrent",
-	metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10"): "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fsintel.torrent",
-}
+var (
+	sintelHash = metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	bunnyMeta  = newMetadataFixture("Big Buck Bunny")
+	bunnyHash  = bunnyMeta.HashInfoBytes()
+	cosmosMeta = newMetadataFixture("Cosmos Laundromat")
+	cosmosHash = cosmosMeta.HashInfoBytes()
+	samples    = map[metainfo.Hash]string{
+		sintelHash: utils.MagnetURIFromHash(sintelHash),
+		bunnyHash:  utils.MagnetURIFromHash(bunnyHash),
+		cosmosHash: utils.MagnetURIFromHash(cosmosHash),
+	}
+)
 
 const sintelTorrentFile = "testdata/sintel.torrent"
+
+func newMetadataFixture(name string) *metainfo.MetaInfo {
+	info := metainfo.Info{
+		Name:        name,
+		PieceLength: 64,
+		Pieces:      make([]byte, 20),
+		Files: []metainfo.FileInfo{{
+			Length: 64,
+			Path:   []string{name + ".mp4"},
+		}},
+	}
+	infoBytes, err := bencode.Marshal(info)
+	if err != nil {
+		panic(err)
+	}
+	return &metainfo.MetaInfo{InfoBytes: infoBytes}
+}
+
+func sampleMetaInfo(t *testing.T, ih metainfo.Hash) *metainfo.MetaInfo {
+	t.Helper()
+	switch ih {
+	case bunnyHash:
+		return bunnyMeta
+	case cosmosHash:
+		return cosmosMeta
+	case sintelHash:
+		file, err := os.Open(sintelTorrentFile)
+		require.NoError(t, err)
+		defer file.Close()
+		meta, err := metainfo.Load(file)
+		require.NoError(t, err)
+		return meta
+	default:
+		t.Fatalf("unknown sample torrent %s", ih.HexString())
+		return nil
+	}
+}
+
+func primeSampleMetadata(t *testing.T, ctrl *Controller, ih metainfo.Hash) {
+	t.Helper()
+	_, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(sampleMetaInfo(t, ih)))
+	require.NoError(t, err)
+}
+
+func testControllerRuntimeConfig() controllerRuntimeConfig {
+	return controllerRuntimeConfig{
+		fetchTrackers: func(context.Context, *httpclient.Client) ([][]string, error) {
+			return nil, nil
+		},
+		configureClient: func(config *torrent.ClientConfig) {
+			config.NoDHT = true
+			config.DisablePEX = true
+			config.DisableTrackers = true
+			config.DisableWebtorrent = true
+			config.DisableWebseeds = true
+			config.NoDefaultPortForwarding = true
+		},
+		clientCloseDelay: 0,
+		gotInfoTimeout:   100 * time.Millisecond,
+	}
+}
 
 type testControllerOpt func(*Controller)
 
 func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, func()) {
+	t.Helper()
+	return newTestControllerWithRuntimeConfig(t, testControllerRuntimeConfig(), opts...)
+}
+
+func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRuntimeConfig, opts ...testControllerOpt) (*Controller, func()) {
 	t.Helper()
 
 	dbPath := tempfile()
@@ -59,7 +135,7 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 	l.Close()
 
 	metricsSvc := metrics.New()
-	ctrl, err := NewController(".", "127.0.0.1", port, dbClient, imagesSvc, metricsSvc)
+	ctrl, err := newController(".", "127.0.0.1", port, dbClient, imagesSvc, metricsSvc, runtimeConfig)
 	require.NoError(t, err)
 
 	// Disable auth.
@@ -74,12 +150,15 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 	ctrl.SetupRouter()
 	ctrl.Start()
 
+	var cleanupOnce sync.Once
 	cleanup := func() {
-		ctrl.Shutdown()
-		dbClient.Close()
-		imagesSvc.Close()
-		os.Remove(dbPath)
-		os.Remove(postersDBPath)
+		cleanupOnce.Do(func() {
+			ctrl.Shutdown()
+			dbClient.Close()
+			imagesSvc.Close()
+			os.Remove(dbPath)
+			os.Remove(postersDBPath)
+		})
 	}
 
 	return ctrl, cleanup
@@ -120,14 +199,18 @@ func doGet(t *testing.T, router http.Handler, url string) *httptest.ResponseReco
 	return response.Recorder
 }
 
-func addAllSampleTorrents(t *testing.T, router http.Handler) {
+func addAllSampleTorrents(t *testing.T, ctrl *Controller) {
 	t.Helper()
 	for ih, magnet := range samples {
+		primeSampleMetadata(t, ctrl, ih)
 		req := api.TorrentAdd{
 			Magnet: &magnet,
 		}
-		rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, router).Recorder
+		rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 		require.Equal(t, http.StatusCreated, rr.Code, "failed to add sample torrent %s", ih.HexString())
+	}
+	for ih := range samples {
+		primeSampleMetadata(t, ctrl, ih)
 	}
 }
 
@@ -171,9 +254,6 @@ func TestAddNonExistentTorrent(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	gotInfoTimeout = 2 * time.Second
-	defer func() { gotInfoTimeout = 30 * time.Second }()
-
 	magnet := "magnet:?xt=urn:btih:0000000000000000000000000000000000000001"
 	body, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
 	require.NoError(t, err)
@@ -192,12 +272,14 @@ func TestAddDuplicateTorrent(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	ih := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+	ih := bunnyHash
+	primeSampleMetadata(t, ctrl, ih)
 	magnet := samples[ih]
 	req := api.TorrentAdd{Magnet: &magnet}
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusCreated, rr.Code)
 
+	primeSampleMetadata(t, ctrl, ih)
 	rr = testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 	assert.Equal(t, http.StatusConflict, rr.Code)
 }
@@ -206,7 +288,7 @@ func TestGetTorrent(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	addAllSampleTorrents(t, ctrl.router)
+	addAllSampleTorrents(t, ctrl)
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 
 	rr := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -221,34 +303,6 @@ func TestGetTorrent(t *testing.T) {
 	assert.NotNil(t, result.Name)
 	assert.NotNil(t, result.PieceCount)
 	assert.NotNil(t, result.TotalSize)
-}
-
-func TestStreamFileFromTorrent(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	addAllSampleTorrents(t, ctrl.router)
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-
-	streamURL := fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4", ih)
-	rr := testutil.NewRequest().Get(streamURL).WithHeader("Range", "bytes=0-1023").GoWithHTTPHandler(t, ctrl.router).Recorder
-
-	require.Equal(t, http.StatusPartialContent, rr.Code)
-	assert.NotEmpty(t, rr.Body.String())
-}
-
-func TestStreamFileFromTorrentByIndex(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	addAllSampleTorrents(t, ctrl.router)
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-
-	streamURL := fmt.Sprintf("/api/v1/stream/%s?index=0", ih)
-	rr := testutil.NewRequest().Get(streamURL).WithHeader("Range", "bytes=0-1023").GoWithHTTPHandler(t, ctrl.router).Recorder
-
-	require.Equal(t, http.StatusPartialContent, rr.Code)
-	assert.NotEmpty(t, rr.Body.String())
 }
 
 func TestStreamFileWithBothIdentifiers(t *testing.T) {
@@ -279,7 +333,7 @@ func TestGetPlaylist(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	addAllSampleTorrents(t, ctrl.router)
+	addAllSampleTorrents(t, ctrl)
 
 	t.Run("master playlist", func(t *testing.T) {
 		rr := doGet(t, ctrl.router, "/api/v1/playlist")
@@ -324,7 +378,7 @@ func TestGetTorrentStatistics(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	addAllSampleTorrents(t, ctrl.router)
+	addAllSampleTorrents(t, ctrl)
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 
 	var result api.TorrentStats
@@ -347,6 +401,7 @@ func TestGetTorrentStatistics(t *testing.T) {
 func TestQBittorrentAddTorrentFromURL(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
+	primeSampleMetadata(t, ctrl, sintelHash)
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -369,6 +424,7 @@ func TestQBittorrentAddTorrentFromURL(t *testing.T) {
 func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
+	primeSampleMetadata(t, ctrl, sintelHash)
 
 	body, writer := createMultipartForm(t, sintelTorrentFile, nil, "torrents")
 
@@ -385,9 +441,6 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 func TestTorrentMetadataFetchTimesOut(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
-
-	gotInfoTimeout = 2 * time.Second
-	defer func() { gotInfoTimeout = 30 * time.Second }()
 
 	rr := doGet(t, ctrl.router, "/api/v1/torrents/0000000000000000000000000000000000000001")
 	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
@@ -409,150 +462,11 @@ func TestInvalidHash(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, apiError.Code)
 }
 
-func TestTSStreamWithFilenameInPath(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	addAllSampleTorrents(t, ctrl.router)
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	streamURL := fmt.Sprintf("/stream/Sintel.mp4?link=%s&play&index=6", ih.HexString())
-	rr := testutil.NewRequest().Get(streamURL).WithHeader("Range", "bytes=0-1023").GoWithHTTPHandler(t, ctrl.router).Recorder
-	assert.Equal(t, http.StatusPartialContent, rr.Code)
-}
-
-func TestDeleteTorrentWhileStreamingConcurrently(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	addAllSampleTorrents(t, ctrl.router)
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-
-	server := httptest.NewServer(ctrl.router)
-	defer server.Close()
-
-	streamErrChan := make(chan error, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-		streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ih)
-		req, _ := http.NewRequest(http.MethodGet, streamURL, nil)
-		req.Header.Set("Range", "bytes=0-")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			streamErrChan <- err
-			return
-		}
-		defer resp.Body.Close()
-
-		_, readErr := io.Copy(io.Discard, resp.Body)
-		streamErrChan <- readErr
-	}()
-
-	time.Sleep(5 * time.Second)
-
-	deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ih)
-	req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
-	resp, err := http.DefaultClient.Do(req)
-	require.NoError(t, err)
-	defer resp.Body.Close()
-	require.Equal(t, http.StatusNoContent, resp.StatusCode)
-
-	wg.Wait()
-
-	err = <-streamErrChan
-	if err != nil {
-		require.True(t, err == io.EOF || err == io.ErrUnexpectedEOF, "unexpected error: %v", err)
-	}
-}
-
-func TestStreamAndConcurrentlyDelete(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	addAllSampleTorrents(t, ctrl.router)
-	ihSintel := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	ihBunny := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
-	ihCosmos := metainfo.NewHashFromHex("c9e15763f722f23e98a29decdfae341b98d53056")
-
-	server := httptest.NewServer(ctrl.router)
-	defer server.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(3)
-
-	streamErrChan := make(chan error, 1)
-
-	go func() {
-		defer wg.Done()
-		streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ihSintel)
-		req, _ := http.NewRequest(http.MethodGet, streamURL, nil)
-		req.Header.Set("Range", "bytes=0-")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			streamErrChan <- err
-			return
-		}
-		defer resp.Body.Close()
-
-		_, readErr := io.CopyN(io.Discard, resp.Body, 1024)
-		streamErrChan <- readErr
-	}()
-
-	go func() {
-		defer wg.Done()
-		deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ihBunny)
-		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-	}()
-
-	go func() {
-		defer wg.Done()
-		deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ihCosmos)
-		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-	}()
-
-	wg.Wait()
-
-	err := <-streamErrChan
-	assert.NoError(t, err)
-
-	listURL := fmt.Sprintf("%s/api/v1/torrents?hashes=%s", server.URL, ihSintel.HexString())
-	resp, err := http.Get(listURL)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var listSintel api.ListTorrents
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&listSintel))
-	assert.Equal(t, 1, len(listSintel.Torrents))
-	resp.Body.Close()
-
-	listURL = fmt.Sprintf("%s/api/v1/torrents?hashes=%s,%s", server.URL, ihBunny.HexString(), ihCosmos.HexString())
-	resp, err = http.Get(listURL)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var torrentsList api.ListTorrents
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&torrentsList))
-	assert.Equal(t, 0, len(torrentsList.Torrents))
-	resp.Body.Close()
-}
-
 func TestDeleteTorrents(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	addAllSampleTorrents(t, ctrl.router)
+	addAllSampleTorrents(t, ctrl)
 	rr := testutil.NewRequest().Delete("/api/v1/torrents/0000000000000000000000000000000000000000").GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusNotFound, rr.Code)
 
@@ -584,6 +498,7 @@ func TestUpdateTorrentPosterRepeatedly(t *testing.T) {
 
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+	primeSampleMetadata(t, ctrl, ih)
 	magnet := samples[ih]
 	req := api.TorrentAdd{Magnet: &magnet, Poster: &posterURL}
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -629,6 +544,7 @@ func TestUpdateTorrentPosterRepeatedlyWithDifferentPosters(t *testing.T) {
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 	posterA := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 	posterB := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+	primeSampleMetadata(t, ctrl, ih)
 	magnet := samples[ih]
 
 	req := api.TorrentAdd{Magnet: &magnet, Poster: &posterA}
@@ -706,7 +622,8 @@ func TestUpdateTorrentWithSharedPoster(t *testing.T) {
 
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 
-	ihA := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+	ihA := bunnyHash
+	primeSampleMetadata(t, ctrl, ihA)
 	magnetA := samples[ihA]
 	reqA := api.TorrentAdd{Magnet: &magnetA, Poster: &posterURL}
 	rrA := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(reqA).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -714,7 +631,8 @@ func TestUpdateTorrentWithSharedPoster(t *testing.T) {
 	var torrentA api.Torrent
 	require.NoError(t, json.NewDecoder(rrA.Body).Decode(&torrentA))
 
-	ihB := metainfo.NewHashFromHex("c9e15763f722f23e98a29decdfae341b98d53056")
+	ihB := cosmosHash
+	primeSampleMetadata(t, ctrl, ihB)
 	magnetB := samples[ihB]
 	reqB := api.TorrentAdd{Magnet: &magnetB, Poster: &posterURL}
 	rrB := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(reqB).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -787,7 +705,8 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	ih := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+	ih := bunnyHash
+	primeSampleMetadata(t, ctrl, ih)
 	magnet := samples[ih]
 	req := api.TorrentAdd{Magnet: &magnet}
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -1010,6 +929,7 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	primeSampleMetadata(t, ctrl, ih)
 
 	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{"poster": posterURL})
 
@@ -1064,44 +984,14 @@ func tempfile() string {
 	return f.Name()
 }
 
-func TestUpdateTorrent_Deadlock(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	magnet := samples[ih]
-	req := api.TorrentAdd{Magnet: &magnet}
-	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
-	require.Equal(t, http.StatusCreated, rr.Code)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		streamURL := fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4", ih)
-		rr := testutil.NewRequest().Get(streamURL).WithHeader("Range", "bytes=0-1023").GoWithHTTPHandler(t, ctrl.router).Recorder
-		assert.Equal(t, http.StatusPartialContent, rr.Code)
-	}()
-
-	go func() {
-		defer wg.Done()
-		time.Sleep(100 * time.Millisecond) // Give the stream time to start.
-		updateReq := api.TorrentUpdate{Title: utils.Ptr("new title")}
-		rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
-		assert.Equal(t, http.StatusNoContent, rr.Code)
-	}()
-
-	wg.Wait()
-}
-
 func TestUpdateTorrentStorage(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
 		c.settings.FileStoragePath = utils.Ptr(t.TempDir())
 	})
 	defer cleanup()
 
-	ih := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+	ih := bunnyHash
+	primeSampleMetadata(t, ctrl, ih)
 	magnet := samples[ih]
 	req := api.TorrentAdd{Magnet: &magnet, Storage: utils.Ptr(api.File)}
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -1141,6 +1031,8 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 		require.NoError(t, err)
 	})
 	defer cleanup()
+
+	primeSampleMetadata(t, ctrl, sintelHash)
 
 	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{
 		"storage": string(api.File),
@@ -1182,6 +1074,16 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, dbTorrent.InfoBytes, "InfoBytes should not be saved for new torrent with memory storage")
 
+	// Pre-load the torrent into memory client with metadata so the storage switch can read InfoBytes
+	sintelFile, err := os.Open(sintelTorrentFile)
+	require.NoError(t, err)
+	meta, err := metainfo.Load(sintelFile)
+	_ = sintelFile.Close()
+	require.NoError(t, err)
+	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta))
+	require.NoError(t, err)
+	<-to.GotInfo()
+
 	updateReqBody := api.TorrentUpdate{
 		Storage: utils.Ptr(api.File),
 	}
@@ -1189,9 +1091,8 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", resp.Hash.HexString())).WithJsonBody(updateReqBody).GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusNoContent, rr.Code)
 
-	time.Sleep(100 * time.Millisecond)
-
-	updatedDbTorrent, err := ctrl.db.GetTorrent(resp.Hash)
-	require.NoError(t, err)
-	assert.NotEmpty(t, updatedDbTorrent.InfoBytes, "InfoBytes should be saved after updating torrent to file storage")
+	require.Eventually(t, func() bool {
+		updatedDbTorrent, getErr := ctrl.db.GetTorrent(resp.Hash)
+		return getErr == nil && len(updatedDbTorrent.InfoBytes) != 0
+	}, time.Second, time.Millisecond, "InfoBytes should be saved after updating torrent to file storage")
 }

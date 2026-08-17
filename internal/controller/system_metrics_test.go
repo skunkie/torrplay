@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,6 +18,7 @@ func TestGetSystemMetrics(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
+	// Initial metrics with 0 torrents.
 	rr := doGet(t, ctrl.router, "/api/system/metrics")
 	require.Equal(t, http.StatusOK, rr.Code)
 
@@ -30,21 +30,13 @@ func TestGetSystemMetrics(t *testing.T) {
 	assert.Equal(t, int64(0), metrics.DownloadSpeed)
 	assert.Equal(t, int64(0), metrics.UploadSpeed)
 
+	// Add sample torrents without blocking on external network DHT resolution.
 	for _, magnet := range samples {
-		torrent, err := ctrl.client.AddMagnet(magnet)
+		_, err := ctrl.client.AddMagnet(magnet)
 		require.NoError(t, err)
-
-		select {
-		case <-torrent.GotInfo():
-		case <-time.After(10 * time.Second):
-			t.Fatalf("timeout waiting for GotInfo on %s", magnet)
-		}
-
-		torrent.DownloadAll()
 	}
 
-	time.Sleep(1 * time.Second)
-
+	// Verify active torrent count updates immediately.
 	rr = doGet(t, ctrl.router, "/api/system/metrics")
 	require.Equal(t, http.StatusOK, rr.Code)
 	err = json.NewDecoder(rr.Body).Decode(&metrics)
@@ -54,14 +46,14 @@ func TestGetSystemMetrics(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.DownloadSpeed, int64(0))
 	assert.GreaterOrEqual(t, metrics.UploadSpeed, int64(0))
 
-	time.Sleep(3 * time.Second)
-
-	rr = doGet(t, ctrl.router, "/api/system/metrics")
-	require.Equal(t, http.StatusOK, rr.Code)
-	err = json.NewDecoder(rr.Body).Decode(&metrics)
-	require.NoError(t, err)
-
-	assert.Equal(t, len(samples), metrics.ActiveTorrents)
-	assert.GreaterOrEqual(t, metrics.DownloadSpeed, int64(0))
-	assert.GreaterOrEqual(t, metrics.UploadSpeed, int64(0))
+	// Rapid consecutive calls return consistent values without mutating state.
+	for range 3 {
+		rr = doGet(t, ctrl.router, "/api/system/metrics")
+		require.Equal(t, http.StatusOK, rr.Code)
+		var m api.SystemMetrics
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&m))
+		assert.Equal(t, len(samples), m.ActiveTorrents)
+		assert.GreaterOrEqual(t, m.DownloadSpeed, int64(0))
+		assert.GreaterOrEqual(t, m.UploadSpeed, int64(0))
+	}
 }

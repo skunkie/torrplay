@@ -62,6 +62,12 @@ docker: application
 generate:
 	go generate ./...
 
+test:
+	go test ./...
+
+test-integration:
+	go test -count=1 -tags=integration -run '^TestIntegration' ./internal/controller
+
 help:
 	@echo "TorrPlay Build System"
 	@echo "====================="
@@ -71,9 +77,11 @@ help:
 	@echo "  client       - Build web artifacts"
 	@echo "  application  - Build the application"
 	@echo "  android      - Build the Android APK files"
-	@echo "  docker       - Build the multi-platform Docker image"
-	@echo "  generate     - Run go generate to generate code"
-	@echo "  help         - Show this help message"
+	@echo "  docker           - Build the multi-platform Docker image"
+	@echo "  generate         - Run go generate to generate code"
+	@echo "  test             - Run the fast offline test suite"
+	@echo "  test-integration - Run local controller integration tests"
+	@echo "  help             - Show this help message"
 	@echo ""
 	@echo "Variables:"
 	@echo "  VERSION         - Version tag for application and Docker images (default: 1.0.0)"
@@ -85,4 +93,4 @@ help:
 	@echo "  make docker                        # Build the Docker image"
 	@echo ""
 
-.PHONY: all android application client docker generate help
+.PHONY: all android application client docker generate help test test-integration
