@@ -8,10 +8,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/ethulhu/helix/upnpav"
+	"github.com/stretchr/testify/assert"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
@@ -169,4 +172,160 @@ func TestService_ServeHTTP(t *testing.T) {
 	if rw.Code != http.StatusOK {
 		t.Errorf("ServeHTTP returned status %d, expected %d", rw.Code, http.StatusOK)
 	}
+}
+
+func TestService_ConnectionManagerAndRegistrar(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+		t.Fatalf("service.Start() returned an error: %v", err)
+	}
+
+	// Test ConnectionManager service handler is registered
+	cmHandler, ok := service.device.SOAPInterface("urn:schemas-upnp-org:service:ConnectionManager:1")
+	if !ok || cmHandler == nil {
+		t.Fatal("ConnectionManager SOAPInterface is not registered")
+	}
+
+	// Test MediaReceiverRegistrar service handler is registered
+	mrrHandler, ok := service.device.SOAPInterface("urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1")
+	if !ok || mrrHandler == nil {
+		t.Fatal("MediaReceiverRegistrar SOAPInterface is not registered")
+	}
+}
+
+func TestAddHeader(t *testing.T) {
+	t.Run("no DLNA headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Empty(t, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Empty(t, rec.Header().Get("transferMode.dlna.org"))
+	})
+
+	t.Run("getContentFeatures requested", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("getContentFeatures.dlna.org", "1")
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Equal(t, upnpav.ContentFeatures, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Equal(t, "Streaming", rec.Header().Get("transferMode.dlna.org"))
+	})
+
+	t.Run("custom transferMode provided", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("transferMode.dlna.org", "Background")
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Empty(t, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Equal(t, "Background", rec.Header().Get("transferMode.dlna.org"))
+	})
+
+	t.Run("both headers provided", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("getContentFeatures.dlna.org", "1")
+		req.Header.Set("transferMode.dlna.org", "Interactive")
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Equal(t, upnpav.ContentFeatures, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Equal(t, "Interactive", rec.Header().Get("transferMode.dlna.org"))
+	})
+}
+
+func TestService_SetLogger(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	newLogger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	service.SetLogger(newLogger)
+	assert.Equal(t, newLogger, service.logger)
+}
+
+func TestService_IncrementSystemUpdateID(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	// When content directory is nil (not started)
+	service.IncrementSystemUpdateID()
+
+	// When service is running
+	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+		t.Fatalf("service.Start() returned an error: %v", err)
+	}
+	defer service.Stop()
+
+	initialID, err := service.contentDirectory.SystemUpdateID(t.Context())
+	assert.NoError(t, err)
+
+	service.IncrementSystemUpdateID()
+	newID, err := service.contentDirectory.SystemUpdateID(t.Context())
+	assert.NoError(t, err)
+	assert.Equal(t, initialID+1, newID)
+}
+
+func TestService_SendUpdateNotification(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	// When stopped (no-op)
+	service.SendUpdateNotification()
+
+	// When running
+	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+		t.Fatalf("service.Start() returned an error: %v", err)
+	}
+	defer service.Stop()
+
+	service.SendUpdateNotification()
+}
+
+func TestService_ServeHTTP_IconsAndNotFound(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	t.Run("handler is nil when stopped", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/upnp/test", nil)
+		rec := httptest.NewRecorder()
+		service.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+	})
+
+	t.Run("serve embedded icon", func(t *testing.T) {
+		if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+			t.Fatalf("service.Start() returned an error: %v", err)
+		}
+		defer service.Stop()
+
+		req := httptest.NewRequest(http.MethodGet, "/upnp/icons/device/icon-128x128.png", nil)
+		rec := httptest.NewRecorder()
+		service.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "max-age=600", rec.Header().Get("Cache-Control"))
+	})
+}
+
+func TestService_StartAlreadyRunning(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+		t.Fatalf("service.Start() returned an error: %v", err)
+	}
+	defer service.Stop()
+
+	err := service.Start("test-server", "127.0.0.1", 8080)
+	assert.ErrorContains(t, err, "already running")
+}
+
+func TestDeviceIcons_Error(t *testing.T) {
+	baseURL, _ := url.Parse("http://127.0.0.1:8080")
+	_, err := deviceIcons(iconsFS, "nonexistent-dir", baseURL)
+	assert.Error(t, err)
 }

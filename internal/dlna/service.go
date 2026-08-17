@@ -99,7 +99,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// serve icons.
 	if strings.HasPrefix(r.URL.Path, path.Join(s.basePath, "/icons")) {
-		http.StripPrefix(s.basePath, http.FileServerFS(iconsFS)).ServeHTTP(w, r)
+		http.StripPrefix(strings.TrimRight(s.basePath, "/"), http.FileServerFS(iconsFS)).ServeHTTP(w, r)
 		return
 	}
 
