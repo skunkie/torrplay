@@ -14,6 +14,7 @@ import (
 	"path"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -99,70 +100,43 @@ func (cd *ContentDirectory) BrowseMetadata(ctx context.Context, id upnpav.Object
 		}, nil
 	}
 
-	if id == allTorrentsContainerID || id == recentlyAddedContainerID || id == recentlyViewedContainerID {
-		return cd.browseTorrents(ctx, id)
+	if strings.Contains(string(id), "/") {
+		return cd.browseItemMetadata(ctx, id)
 	}
 
-	torrents, err := cd.db.GetTorrents()
-	if err != nil {
-		return nil, err
-	}
-
-	for _, torrent := range torrents {
-		if torrent.Hash.HexString() == string(id) {
-			didl := &upnpav.DIDLLite{}
-			date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
-			if torrent.UpdatedAt != nil {
-				date = &upnpav.Date{Time: *torrent.UpdatedAt}
-			}
-
-			container := upnpav.Container{
-				ID:         id,
-				Parent:     allTorrentsContainerID,
-				Title:      torrent.Name,
-				Class:      upnpav.StorageFolder,
-				Restricted: true,
-				Searchable: true,
-				Date:       date,
-			}
-			childCount := 0
-			for _, file := range torrent.Files {
-				if isMediaFile(file) {
-					childCount++
-				}
-			}
-			container.ChildCount = childCount
-			didl.Containers = append(didl.Containers, container)
-			return didl, nil
-		}
-	}
-
-	return nil, contentdirectory.ErrNoSuchObject
+	return cd.browseContainerMetadata(ctx, id)
 }
 
-func (cd *ContentDirectory) BrowseChildren(ctx context.Context, parentID upnpav.ObjectID, filter xmltypes.CommaSeparatedStrings) (*upnpav.DIDLLite, error) {
+func (cd *ContentDirectory) BrowseChildren(ctx context.Context, parentID upnpav.ObjectID, startingIndex, requestedCount uint, filter xmltypes.CommaSeparatedStrings) (*upnpav.DIDLLite, uint, error) {
 	if parentID == rootID {
-		return cd.browseRoot(ctx)
+		return cd.browseRoot(ctx, startingIndex, requestedCount)
 	}
 
 	torrents, err := cd.db.GetTorrents()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	var all []*database.Torrent
+	for _, torrent := range torrents {
+		if hasMediaFiles(torrent.Files) {
+			all = append(all, torrent)
+		}
 	}
 
 	var torrentsByParentID []*database.Torrent
 	switch parentID {
 	case allTorrentsContainerID:
-		torrentsByParentID = torrents
+		torrentsByParentID = all
 	case recentlyAddedContainerID:
-		torrentsByParentID = getRecentlyAddedTorrents(torrents)
+		torrentsByParentID = getRecentlyAddedTorrents(all)
 	case recentlyViewedContainerID:
-		torrentsByParentID = getRecentlyViewedTorrents(torrents)
+		torrentsByParentID = getRecentlyViewedTorrents(all)
 	default:
-		return cd.browseTorrent(ctx, parentID)
+		return cd.browseTorrent(ctx, parentID, startingIndex, requestedCount)
 	}
 
-	return cd.buildTorrentsDIDL(ctx, parentID, torrentsByParentID)
+	return cd.buildTorrentsDIDL(ctx, parentID, torrentsByParentID, startingIndex, requestedCount)
 }
 
 func (cd *ContentDirectory) IncrementSystemUpdateID() {
@@ -171,65 +145,145 @@ func (cd *ContentDirectory) IncrementSystemUpdateID() {
 	cd.systemUpdateID++
 }
 
-func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criteria search.Criteria) (*upnpav.DIDLLite, error) {
+func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criteria search.Criteria, startingIndex, requestedCount uint, sortCriteria xmltypes.CommaSeparatedStrings) (*upnpav.DIDLLite, uint, error) {
 	torrents, err := cd.db.GetTorrents()
 	if err != nil {
-		return nil, fmt.Errorf("could not get torrents: %w", err)
+		return nil, 0, fmt.Errorf("could not get torrents: %w", err)
 	}
 
-	didl := &upnpav.DIDLLite{}
+	var all []*database.Torrent
 	for _, torrent := range torrents {
-		if !hasMediaFiles(torrent.Files) {
-			continue
+		if hasMediaFiles(torrent.Files) {
+			all = append(all, torrent)
+		}
+	}
+
+	var torrentsToSearch []*database.Torrent
+	parentID := allTorrentsContainerID
+	searchContainers := true
+
+	switch id {
+	case rootID, allTorrentsContainerID:
+		torrentsToSearch = all
+	case recentlyAddedContainerID:
+		torrentsToSearch = getRecentlyAddedTorrents(all)
+		parentID = recentlyAddedContainerID
+	case recentlyViewedContainerID:
+		torrentsToSearch = getRecentlyViewedTorrents(all)
+		parentID = recentlyViewedContainerID
+	default:
+		searchContainers = false
+		for _, t := range all {
+			if t.Hash.HexString() == string(id) {
+				torrentsToSearch = []*database.Torrent{t}
+				parentID = string(id)
+				break
+			}
+		}
+		if torrentsToSearch == nil {
+			return nil, 0, contentdirectory.ErrNoSuchObject
+		}
+	}
+
+	var matchingContainers []upnpav.Container
+	var matchingItems []upnpav.Item
+
+	for _, torrent := range torrentsToSearch {
+		mediaFiles := getMediaFiles(torrent.Files)
+
+		if searchContainers {
+			date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
+			if torrent.UpdatedAt != nil {
+				date = &upnpav.Date{Time: *torrent.UpdatedAt}
+			}
+			container := upnpav.Container{
+				ID:         upnpav.ObjectID(torrent.Hash.HexString()),
+				Parent:     upnpav.ObjectID(parentID),
+				Title:      torrent.Name,
+				Class:      upnpav.StorageFolder,
+				Restricted: true,
+				Searchable: true,
+				Date:       date,
+				ChildCount: len(mediaFiles),
+			}
+
+			if search.Matches(container, criteria) {
+				matchingContainers = append(matchingContainers, container)
+			}
 		}
 
-		critStr := criteria.String()
-		if after, ok := strings.CutPrefix(critStr, `(dc:title contains "`); ok {
-			searchTerm := after
-			searchTerm = strings.TrimSuffix(searchTerm, `")`)
-			if !strings.Contains(torrent.Name, searchTerm) {
+		for realIndex, file := range mediaFiles {
+			class, err := upnpav.ClassForMIMEType(mime.TypeByExtension(path.Ext(file.Path)))
+			if err != nil {
 				continue
 			}
-		}
 
-		parentID := allTorrentsContainerID
+			var albumArtURIs []string
+			var itemIcon *upnpav.URL
 
-		if id != rootID {
-			parentID = string(id)
-		}
+			if torrent.Poster != nil && *torrent.Poster != "" {
+				if pURI := cd.posterURI(*torrent.Poster); pURI != nil {
+					albumArtURIs = []string{pURI.String()}
+					itemIcon = pURI
+				}
+			}
 
-		date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
-		if torrent.UpdatedAt != nil {
-			date = &upnpav.Date{Time: *torrent.UpdatedAt}
-		}
-		container := upnpav.Container{
-			ID:         upnpav.ObjectID(torrent.Hash.HexString()),
-			Parent:     upnpav.ObjectID(parentID),
-			Title:      torrent.Name,
-			Class:      upnpav.StorageFolder,
-			Restricted: true,
-			Searchable: true,
-			Date:       date,
-		}
-		childCount := 0
-		for _, file := range torrent.Files {
-			if isMediaFile(file) {
-				childCount++
+			if itemIcon == nil {
+				if iURI := cd.iconURI(file.Path); iURI != nil {
+					albumArtURIs = []string{iURI.String()}
+					itemIcon = iURI
+				}
+			}
+
+			resources := []upnpav.Resource{
+				{
+					URI: cd.fileURI(torrent.Hash.HexString(), file.Path),
+					ProtocolInfo: &upnpav.ProtocolInfo{
+						Protocol:       upnpav.ProtocolHTTP,
+						ContentFormat:  mime.TypeByExtension(path.Ext(file.Path)),
+						AdditionalInfo: upnpav.ContentFeatures,
+					},
+					SizeBytes: uint(file.Length),
+				},
+			}
+
+			item := upnpav.Item{
+				ID:           upnpav.ObjectID(fmt.Sprintf("%s/%d", torrent.Hash.HexString(), realIndex)),
+				Parent:       upnpav.ObjectID(torrent.Hash.HexString()),
+				Title:        file.Name,
+				Class:        class,
+				Restricted:   true,
+				Searchable:   true,
+				Icon:         itemIcon,
+				AlbumArtURIs: albumArtURIs,
+				Resources:    resources,
+			}
+
+			if search.Matches(item, criteria) {
+				matchingItems = append(matchingItems, item)
 			}
 		}
-		container.ChildCount = childCount
-		didl.Containers = append(didl.Containers, container)
 	}
 
-	sort.SliceStable(didl.Containers, func(i, j int) bool {
-		return didl.Containers[i].Title < didl.Containers[j].Title
+	sort.SliceStable(matchingContainers, func(i, j int) bool {
+		return matchingContainers[i].Title < matchingContainers[j].Title
+	})
+	sort.SliceStable(matchingItems, func(i, j int) bool {
+		return matchingItems[i].Title < matchingItems[j].Title
 	})
 
-	return didl, nil
+	totalMatches := uint(len(matchingContainers) + len(matchingItems))
+
+	didl := &upnpav.DIDLLite{
+		Containers: matchingContainers,
+		Items:      matchingItems,
+	}
+
+	return didl.Paginate(startingIndex, requestedCount), totalMatches, nil
 }
 
 func (cd *ContentDirectory) SearchCapabilities(_ context.Context) ([]string, error) {
-	return []string{"dc:title"}, nil
+	return []string{"dc:title", "upnp:class"}, nil
 }
 func (cd *ContentDirectory) SortCapabilities(_ context.Context) ([]string, error) {
 	return []string{"dc:title", "dc:date"}, nil
@@ -265,10 +319,10 @@ func (cd *ContentDirectory) XGetFeatureList(_ context.Context) ([]string, error)
 	return []string{string(bytes)}, nil
 }
 
-func (cd *ContentDirectory) browseRoot(_ context.Context) (*upnpav.DIDLLite, error) {
+func (cd *ContentDirectory) browseRoot(_ context.Context, startingIndex, requestedCount uint) (*upnpav.DIDLLite, uint, error) {
 	torrents, err := cd.db.GetTorrents()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var all []*database.Torrent
@@ -281,91 +335,245 @@ func (cd *ContentDirectory) browseRoot(_ context.Context) (*upnpav.DIDLLite, err
 	recentlyAdded := getRecentlyAddedTorrents(all)
 	recentlyViewed := getRecentlyViewedTorrents(all)
 
-	return &upnpav.DIDLLite{
-		Containers: []upnpav.Container{
-			{
-				ID:         allTorrentsContainerID,
-				Parent:     rootID,
-				Title:      allTorrentsContainer,
-				Class:      upnpav.StorageFolder,
-				Restricted: true,
-				Searchable: true,
-				ChildCount: len(all),
-			},
-			{
-				ID:         recentlyAddedContainerID,
-				Parent:     rootID,
-				Title:      recentlyAddedContainer,
-				Class:      upnpav.StorageFolder,
-				Restricted: true,
-				Searchable: true,
-				ChildCount: len(recentlyAdded),
-			},
-			{
-				ID:         recentlyViewedContainerID,
-				Parent:     rootID,
-				Title:      recentlyViewedContainer,
-				Class:      upnpav.StorageFolder,
-				Restricted: true,
-				Searchable: true,
-				ChildCount: len(recentlyViewed),
-			},
+	containers := []upnpav.Container{
+		{
+			ID:         allTorrentsContainerID,
+			Parent:     rootID,
+			Title:      allTorrentsContainer,
+			Class:      upnpav.StorageFolder,
+			Restricted: true,
+			Searchable: true,
+			ChildCount: len(all),
 		},
-	}, nil
+		{
+			ID:         recentlyAddedContainerID,
+			Parent:     rootID,
+			Title:      recentlyAddedContainer,
+			Class:      upnpav.StorageFolder,
+			Restricted: true,
+			Searchable: true,
+			ChildCount: len(recentlyAdded),
+		},
+		{
+			ID:         recentlyViewedContainerID,
+			Parent:     rootID,
+			Title:      recentlyViewedContainer,
+			Class:      upnpav.StorageFolder,
+			Restricted: true,
+			Searchable: true,
+			ChildCount: len(recentlyViewed),
+		},
+	}
+
+	totalMatches := uint(len(containers))
+
+	if startingIndex >= uint(len(containers)) {
+		return &upnpav.DIDLLite{}, totalMatches, nil
+	}
+
+	end := int(startingIndex) + int(requestedCount)
+	if end > len(containers) || requestedCount == 0 {
+		end = len(containers)
+	}
+
+	return &upnpav.DIDLLite{
+		Containers: containers[startingIndex:end],
+	}, totalMatches, nil
 }
 
-func (cd *ContentDirectory) browseTorrents(_ context.Context, id upnpav.ObjectID) (*upnpav.DIDLLite, error) {
+func (cd *ContentDirectory) browseContainerMetadata(_ context.Context, id upnpav.ObjectID) (*upnpav.DIDLLite, error) {
 	torrents, err := cd.db.GetTorrents()
 	if err != nil {
 		return nil, err
 	}
 
-	var childCount int
+	var all []*database.Torrent
+	for _, torrent := range torrents {
+		if hasMediaFiles(torrent.Files) {
+			all = append(all, torrent)
+		}
+	}
+
 	var title string
+	var childCount int
+	parentID := rootID
 
 	switch id {
 	case allTorrentsContainerID:
 		title = allTorrentsContainer
-		var all []*database.Torrent
-		for _, torrent := range torrents {
-			if hasMediaFiles(torrent.Files) {
-				all = append(all, torrent)
-			}
-		}
 		childCount = len(all)
 	case recentlyAddedContainerID:
 		title = recentlyAddedContainer
-		childCount = len(getRecentlyAddedTorrents(torrents))
+		childCount = len(getRecentlyAddedTorrents(all))
 	case recentlyViewedContainerID:
 		title = recentlyViewedContainer
-		childCount = len(getRecentlyViewedTorrents(torrents))
+		childCount = len(getRecentlyViewedTorrents(all))
+	default:
+		for _, torrent := range all {
+			if torrent.Hash.HexString() == string(id) {
+				date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
+				if torrent.UpdatedAt != nil {
+					date = &upnpav.Date{Time: *torrent.UpdatedAt}
+				}
+
+				var containerIcon *upnpav.URL
+				if torrent.Poster != nil && *torrent.Poster != "" {
+					containerIcon = cd.posterURI(*torrent.Poster)
+				}
+
+				container := upnpav.Container{
+					ID:         id,
+					Parent:     allTorrentsContainerID,
+					Title:      torrent.Name,
+					Class:      upnpav.StorageFolder,
+					Restricted: true,
+					Searchable: true,
+					Date:       date,
+					Icon:       containerIcon,
+					ChildCount: len(getMediaFiles(torrent.Files)),
+				}
+				return &upnpav.DIDLLite{
+					Containers: []upnpav.Container{container},
+				}, nil
+			}
+		}
+		return nil, contentdirectory.ErrNoSuchObject
 	}
 
 	return &upnpav.DIDLLite{
 		Containers: []upnpav.Container{
 			{
 				ID:         id,
-				Parent:     rootID,
+				Parent:     upnpav.ObjectID(parentID),
 				Title:      title,
 				Class:      upnpav.StorageFolder,
 				Restricted: true,
+				Searchable: true,
 				ChildCount: childCount,
 			},
 		},
 	}, nil
 }
 
-func (cd *ContentDirectory) buildTorrentsDIDL(_ context.Context, parentID upnpav.ObjectID, torrents []*database.Torrent) (*upnpav.DIDLLite, error) {
-	didl := &upnpav.DIDLLite{}
+func (cd *ContentDirectory) browseItemMetadata(_ context.Context, id upnpav.ObjectID) (*upnpav.DIDLLite, error) {
+	parts := strings.Split(string(id), "/")
+	if len(parts) != 2 {
+		return nil, contentdirectory.ErrNoSuchObject
+	}
+
+	hashStr := parts[0]
+	fileIndex, err := strconv.Atoi(parts[1])
+	if err != nil || fileIndex < 0 {
+		return nil, contentdirectory.ErrNoSuchObject
+	}
+
+	ih, err := utils.HashFromHexString(hashStr)
+	if err != nil {
+		return nil, contentdirectory.ErrNoSuchObject
+	}
+
+	torrent, err := cd.db.GetTorrent(ih)
+	if err != nil {
+		return nil, contentdirectory.ErrNoSuchObject
+	}
+
+	mediaFiles := getMediaFiles(torrent.Files)
+	if fileIndex >= len(mediaFiles) {
+		return nil, contentdirectory.ErrNoSuchObject
+	}
+
+	file := mediaFiles[fileIndex]
+
+	class, err := upnpav.ClassForMIMEType(mime.TypeByExtension(path.Ext(file.Path)))
+	if err != nil {
+		return nil, upnpav.ErrActionFailed
+	}
+
+	var albumArtURIs []string
+	var itemIcon *upnpav.URL
+
+	if torrent.Poster != nil && *torrent.Poster != "" {
+		if pURI := cd.posterURI(*torrent.Poster); pURI != nil {
+			albumArtURIs = []string{pURI.String()}
+			itemIcon = pURI
+		}
+	}
+
+	if itemIcon == nil {
+		if iURI := cd.iconURI(file.Path); iURI != nil {
+			albumArtURIs = []string{iURI.String()}
+			itemIcon = iURI
+		}
+	}
+
+	resources := []upnpav.Resource{
+		{
+			URI: cd.fileURI(torrent.Hash.HexString(), file.Path),
+			ProtocolInfo: &upnpav.ProtocolInfo{
+				Protocol:       upnpav.ProtocolHTTP,
+				ContentFormat:  mime.TypeByExtension(path.Ext(file.Path)),
+				AdditionalInfo: upnpav.ContentFeatures,
+			},
+			SizeBytes: uint(file.Length),
+		},
+	}
+
+	item := upnpav.Item{
+		ID:           id,
+		Parent:       upnpav.ObjectID(torrent.Hash.HexString()),
+		Title:        file.Name,
+		Class:        class,
+		Restricted:   true,
+		Searchable:   true,
+		Icon:         itemIcon,
+		AlbumArtURIs: albumArtURIs,
+		Resources:    resources,
+	}
+
+	return &upnpav.DIDLLite{
+		Items: []upnpav.Item{item},
+	}, nil
+}
+
+func (cd *ContentDirectory) buildTorrentsDIDL(_ context.Context, parentID upnpav.ObjectID, torrents []*database.Torrent, startingIndex, requestedCount uint) (*upnpav.DIDLLite, uint, error) {
+	var validTorrents []*database.Torrent
 	for _, torrent := range torrents {
 		if !hasMediaFiles(torrent.Files) {
 			continue
 		}
+		validTorrents = append(validTorrents, torrent)
+	}
 
+	if parentID == allTorrentsContainerID {
+		sort.SliceStable(validTorrents, func(i, j int) bool {
+			return validTorrents[i].Name < validTorrents[j].Name
+		})
+	}
+
+	totalMatches := uint(len(validTorrents))
+
+	if startingIndex >= uint(len(validTorrents)) {
+		return &upnpav.DIDLLite{}, totalMatches, nil
+	}
+
+	end := int(startingIndex) + int(requestedCount)
+	if end > len(validTorrents) || requestedCount == 0 {
+		end = len(validTorrents)
+	}
+	pagedTorrents := validTorrents[startingIndex:end]
+
+	didl := &upnpav.DIDLLite{}
+	for _, torrent := range pagedTorrents {
 		date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
 		if torrent.UpdatedAt != nil {
 			date = &upnpav.Date{Time: *torrent.UpdatedAt}
 		}
+
+		var containerIcon *upnpav.URL
+		if torrent.Poster != nil && *torrent.Poster != "" {
+			containerIcon = cd.posterURI(*torrent.Poster)
+		}
+
 		container := upnpav.Container{
 			ID:         upnpav.ObjectID(torrent.Hash.HexString()),
 			Parent:     parentID,
@@ -374,54 +582,62 @@ func (cd *ContentDirectory) buildTorrentsDIDL(_ context.Context, parentID upnpav
 			Restricted: true,
 			Searchable: true,
 			Date:       date,
+			Icon:       containerIcon,
+			ChildCount: len(getMediaFiles(torrent.Files)),
 		}
-		childCount := 0
-		for _, file := range torrent.Files {
-			if isMediaFile(file) {
-				childCount++
-			}
-		}
-		container.ChildCount = childCount
 		didl.Containers = append(didl.Containers, container)
 	}
 
-	if parentID == allTorrentsContainerID {
-		sort.SliceStable(didl.Containers, func(i, j int) bool {
-			return didl.Containers[i].Title < didl.Containers[j].Title
-		})
-	}
-
-	return didl, nil
+	return didl, totalMatches, nil
 }
 
-func (cd *ContentDirectory) browseTorrent(_ context.Context, torrentHash upnpav.ObjectID) (*upnpav.DIDLLite, error) {
+func (cd *ContentDirectory) browseTorrent(_ context.Context, torrentHash upnpav.ObjectID, startingIndex, requestedCount uint) (*upnpav.DIDLLite, uint, error) {
 	ih, err := utils.HashFromHexString(string(torrentHash))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	torrent, err := cd.db.GetTorrent(ih)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
-	slices.SortFunc(torrent.Files, func(a, b api.TorrentFile) int {
-		return strings.Compare(a.Path, b.Path)
-	})
+	mediaFiles := getMediaFiles(torrent.Files)
+	totalMatches := uint(len(mediaFiles))
+
+	if startingIndex >= uint(len(mediaFiles)) {
+		return &upnpav.DIDLLite{}, totalMatches, nil
+	}
+
+	end := int(startingIndex) + int(requestedCount)
+	if end > len(mediaFiles) || requestedCount == 0 {
+		end = len(mediaFiles)
+	}
+	pagedFiles := mediaFiles[startingIndex:end]
 
 	didl := &upnpav.DIDLLite{}
-	for i, file := range torrent.Files {
-		if !isMediaFile(file) {
-			continue
-		}
+	for i, file := range pagedFiles {
+		realIndex := int(startingIndex) + i
 
 		class, err := upnpav.ClassForMIMEType(mime.TypeByExtension(path.Ext(file.Path)))
 		if err != nil {
 			continue
 		}
 
-		iconURI, err := cd.iconURI(file.Path)
-		if err != nil {
-			return nil, err
+		var albumArtURIs []string
+		var itemIcon *upnpav.URL
+
+		if torrent.Poster != nil && *torrent.Poster != "" {
+			if pURI := cd.posterURI(*torrent.Poster); pURI != nil {
+				albumArtURIs = []string{pURI.String()}
+				itemIcon = pURI
+			}
+		}
+
+		if itemIcon == nil {
+			if iURI := cd.iconURI(file.Path); iURI != nil {
+				albumArtURIs = []string{iURI.String()}
+				itemIcon = iURI
+			}
 		}
 
 		resources := []upnpav.Resource{
@@ -436,29 +652,21 @@ func (cd *ContentDirectory) browseTorrent(_ context.Context, torrentHash upnpav.
 			},
 		}
 
-		if iconURI.String() != "" {
-			resources = append(resources, upnpav.Resource{
-				URI: iconURI.String(),
-				ProtocolInfo: &upnpav.ProtocolInfo{
-					Protocol:       upnpav.ProtocolHTTP,
-					ContentFormat:  "image/png",
-					AdditionalInfo: "DLNA.ORG_PN=PNG_LRG",
-				},
-			})
-		}
-
 		item := upnpav.Item{
-			ID:        upnpav.ObjectID(fmt.Sprintf("%s/%d", torrent.Hash.HexString(), i)),
-			Parent:    upnpav.ObjectID(torrent.Hash.HexString()),
-			Title:     file.Name,
-			Class:     class,
-			Icon:      iconURI,
-			Resources: resources,
+			ID:           upnpav.ObjectID(fmt.Sprintf("%s/%d", torrent.Hash.HexString(), realIndex)),
+			Parent:       upnpav.ObjectID(torrent.Hash.HexString()),
+			Title:        file.Name,
+			Class:        class,
+			Restricted:   true,
+			Searchable:   true,
+			Icon:         itemIcon,
+			AlbumArtURIs: albumArtURIs,
+			Resources:    resources,
 		}
 		didl.Items = append(didl.Items, item)
 	}
 
-	return didl, nil
+	return didl, totalMatches, nil
 }
 
 func (cd *ContentDirectory) fileURI(hash string, filepath string) string {
@@ -478,11 +686,23 @@ func (cd *ContentDirectory) fileURI(hash string, filepath string) string {
 	return fileURL.String()
 }
 
-func (cd *ContentDirectory) iconURI(filepath string) (*url.URL, error) {
+func (cd *ContentDirectory) posterURI(poster string) *upnpav.URL {
+	cd.mu.RLock()
+	defer cd.mu.RUnlock()
+	if cd.baseURL == nil || poster == "" {
+		return nil
+	}
+
+	posterURL := *cd.baseURL
+	posterURL.Path = path.Join(cd.postersPath, poster)
+	return &upnpav.URL{URL: posterURL}
+}
+
+func (cd *ContentDirectory) iconURI(filepath string) *upnpav.URL {
 	cd.mu.RLock()
 	defer cd.mu.RUnlock()
 	if cd.baseURL == nil {
-		return nil, fmt.Errorf("DLNA ContentDirectory has no base URL set, can't generate icon URI")
+		return nil
 	}
 
 	mediaType := strings.SplitN(mime.TypeByExtension(path.Ext(filepath)), "/", 2)[0]
@@ -490,8 +710,7 @@ func (cd *ContentDirectory) iconURI(filepath string) (*url.URL, error) {
 
 	iconURL := *cd.baseURL
 	iconURL.Path = path.Join(iconURL.Path, "/icons/media", iconFilename)
-
-	return &iconURL, nil
+	return &upnpav.URL{URL: iconURL}
 }
 
 func getRecentlyAddedTorrents(allTorrents []*database.Torrent) []*database.Torrent {
@@ -550,5 +769,25 @@ func hasMediaFiles(files []api.TorrentFile) bool {
 }
 
 func isMediaFile(file api.TorrentFile) bool {
-	return media.IsAudioOrVideo(file.Path) || media.IsImage(file.Path)
+	if !media.IsAudioOrVideo(file.Path) && !media.IsImage(file.Path) {
+		return false
+	}
+	_, err := upnpav.ClassForMIMEType(mime.TypeByExtension(path.Ext(file.Path)))
+	return err == nil
+}
+
+func getMediaFiles(files []api.TorrentFile) []api.TorrentFile {
+	sortedFiles := make([]api.TorrentFile, len(files))
+	copy(sortedFiles, files)
+	slices.SortFunc(sortedFiles, func(a, b api.TorrentFile) int {
+		return strings.Compare(a.Path, b.Path)
+	})
+
+	var mediaFiles []api.TorrentFile
+	for _, file := range sortedFiles {
+		if isMediaFile(file) {
+			mediaFiles = append(mediaFiles, file)
+		}
+	}
+	return mediaFiles
 }
