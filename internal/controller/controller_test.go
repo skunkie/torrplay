@@ -344,6 +344,94 @@ func TestGetTorrentStatistics(t *testing.T) {
 	assert.GreaterOrEqual(t, result.PiecesComplete, 0)
 }
 
+func TestGetMemoryStatistics(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	var result api.MemoryStats
+	rr := doGet(t, ctrl.router, "/api/stats/memory")
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
+	assert.Greater(t, result.MaxMemory, int64(0))
+	assert.GreaterOrEqual(t, result.UsedMemory, int64(0))
+	assert.GreaterOrEqual(t, result.ActiveTorrents, 0)
+	assert.GreaterOrEqual(t, result.TotalPieces, 0)
+}
+
+func TestGetTorrentStatistics_WithActiveReaders(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	body, writer := createMultipartForm(t, sintelTorrentFile, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var createdTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&createdTorrent))
+	ih := createdTorrent.Hash
+
+	to, err := ctrl.loadTorrent(createdTorrent.Magnet, api.Memory)
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	rs, release := ctrl.streamPool.Acquire(ih, to.Files()[0], to.Info().PieceLength, false, ctrl.totalReadaheadPool())
+	defer release()
+
+	_, _ = rs.Seek(5*to.Info().PieceLength, io.SeekStart)
+
+	var result api.TorrentStats
+	rrStats := doGet(t, ctrl.router, fmt.Sprintf("/api/stats/torrents/%s", ih))
+	require.Equal(t, http.StatusOK, rrStats.Code)
+
+	require.NoError(t, json.NewDecoder(rrStats.Body).Decode(&result))
+	require.NotNil(t, result.Readers, "readers array must be returned when active")
+	require.Len(t, *result.Readers, 1)
+	assert.Equal(t, 5, (*result.Readers)[0].Reader)
+}
+
+func TestGetTorrentStatistics_FileStorage(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = utils.Ptr(tmpDir)
+		err := c.db.UpdateSettings(database.FromAPISettings(c.settings))
+		require.NoError(t, err)
+	})
+	defer cleanup()
+
+	// Add file-storage torrent
+	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{
+		"storage": string(api.File),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var createdTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&createdTorrent))
+	ih := createdTorrent.Hash
+
+	var result api.TorrentStats
+	rrStats := doGet(t, ctrl.router, fmt.Sprintf("/api/stats/torrents/%s", ih))
+	require.Equal(t, http.StatusOK, rrStats.Code)
+
+	require.NoError(t, json.NewDecoder(rrStats.Body).Decode(&result))
+	assert.Equal(t, 0, result.InMemory)
+	assert.Equal(t, int64(0), result.InMemorySize)
+	assert.Equal(t, 0.0, result.MemoryUsagePercentage)
+	assert.Greater(t, result.TotalPieces, 0)
+	assert.Greater(t, result.TotalSize, int64(0))
+	assert.Len(t, result.Pieces, result.TotalPieces)
+	for _, p := range result.Pieces {
+		assert.False(t, p.InMemory, "pieces in file storage are not in memory")
+	}
+}
+
 func TestQBittorrentAddTorrentFromURL(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

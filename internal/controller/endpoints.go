@@ -25,7 +25,6 @@ import (
 	"sync"
 	"time"
 
-	gotorrentfs "github.com/ajnavarro/go-torrent-fs"
 	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -902,14 +901,24 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			api.HTTPError(w, fmt.Sprintf("failed to reconfigure torrent client, %v", err), http.StatusInternalServerError)
 			return
 		}
-	} else if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
-		c.mu.Lock()
-		if *c.settings.EnableDownloader && *c.settings.FileStoragePath != "" {
-			c.downloader.Start()
-		} else {
-			c.downloader.Stop()
+	} else {
+		if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
+			c.mu.Lock()
+			if *c.settings.EnableDownloader && *c.settings.FileStoragePath != "" {
+				c.downloader.Start()
+			} else {
+				c.downloader.Stop()
+			}
+			c.mu.Unlock()
 		}
-		c.mu.Unlock()
+		if utils.Differ(oldSettings.ReadaheadPercentage, newSettings.ReadaheadPercentage) {
+			c.mu.RLock()
+			pool := c.streamPool
+			c.mu.RUnlock()
+			if pool != nil {
+				pool.RefreshReadahead(c.totalReadaheadPool())
+			}
+		}
 	}
 
 	if reconfigureDLNA {
@@ -1124,6 +1133,10 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalSize = storageStats.TotalSize
 	}
 
+	if readers := c.readerPositions(to.InfoHash()); len(readers) > 0 {
+		resp.Readers = &readers
+	}
+
 	return resp, nil
 }
 
@@ -1184,6 +1197,10 @@ func (c *Controller) deleteTorrentLocked(ih metainfo.Hash) error {
 			st = http.StatusNotFound
 		}
 		return api.NewError(dbErr.Error(), st)
+	}
+
+	if c.streamPool != nil {
+		c.streamPool.CloseTorrent(ih)
 	}
 
 	if isClientTorrent {
@@ -1392,6 +1409,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	to.AllowDataDownload()
 
 	select {
 	case <-to.GotInfo():
@@ -1440,24 +1458,9 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		}()
 	}
 
-	reader := file.NewReader()
-	defer reader.Close()
-
 	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
-
-	if isFileStorage {
-		reader.SetReadahead(fileStorageReadahead)
-	} else {
-		c.mu.RLock()
-		readahead := int64(*c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100)
-		c.mu.RUnlock()
-		reader.SetReadahead(readahead)
-	}
-
-	fs := gotorrentfs.New(to)
-
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = file.Path()
+	rs, release := c.streamPool.Acquire(ih, file, to.Info().PieceLength, isFileStorage, c.totalReadaheadPool())
+	defer release()
 
 	dlna.AddHeader(w, r)
 
@@ -1487,7 +1490,14 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
 
-	http.FileServerFS(fs).ServeHTTP(w, r2)
+	http.ServeContent(w, r, path.Base(file.Path()), time.Time{}, rs)
+}
+
+func (c *Controller) totalReadaheadPool() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return *c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100
 }
 
 func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.TorrentUpdate) error {

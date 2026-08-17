@@ -40,13 +40,57 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if t, err := c.db.GetTorrent(ih); err != nil {
-		if !errors.Is(err, database.ErrTorrentNotFound) {
-			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	to, ok := c.client.Torrent(ih)
+	if !ok {
+		to, err = c.addTorrentByHash(ih)
+		if err != nil {
+			api.HandleError(w, err)
 			return
 		}
-	} else if *t.Storage == api.File {
-		api.HTTPError(w, "torrent uses file storage", http.StatusBadRequest)
+	}
+
+	select {
+	case <-to.GotInfo():
+	case <-time.After(gotInfoTimeout):
+		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+		return
+	}
+
+	readers := c.readerPositions(ih)
+	if len(readers) == 0 {
+		api.HTTPError(w, "torrent has no active readers", http.StatusBadRequest)
+		return
+	}
+
+	isFileStorage := false
+	if t, err := c.db.GetTorrent(ih); err == nil && t.Storage != nil && *t.Storage == api.File {
+		isFileStorage = true
+	}
+
+	if isFileStorage {
+		numPieces := to.NumPieces()
+		pieceLength := to.Info().PieceLength
+		resp := api.TSCacheResponse{
+			Capacity:     to.Length(),
+			Pieces:       make(map[string]api.TSPieceInfo, numPieces),
+			PiecesCount:  numPieces,
+			PiecesLength: pieceLength,
+			Readers:      readers,
+		}
+
+		for i := 0; i < numPieces; i++ {
+			p := to.Piece(i)
+			resp.Pieces[fmt.Sprint(i)] = api.TSPieceInfo{
+				Completed: p.State().Complete,
+				ID:        i,
+				Length:    p.Info().Length(),
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
@@ -64,13 +108,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
 		PiecesCount:  info.TotalPieces,
 		PiecesLength: info.Pieces[0].Size,
-		Readers: []api.TSReaderInfo{
-			{
-				Reader: info.Pieces[0].Index,
-				Start:  info.Pieces[0].Index,
-				End:    info.Pieces[len(info.Pieces)-1].Index,
-			},
-		},
+		Readers:      readers,
 	}
 
 	for _, piece := range info.Pieces {

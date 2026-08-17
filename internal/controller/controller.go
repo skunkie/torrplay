@@ -43,6 +43,7 @@ import (
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 	"github.com/torrplay/torrplay/web"
 	"golang.org/x/time/rate"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -113,6 +114,7 @@ type Controller struct {
 	settings            *api.Settings
 	startedAt           time.Time
 	storageClient       *memstorage.Client
+	streamPool          *stream.Pool
 	torrentTracker      torrentTracker
 	trackers            [][]string
 
@@ -230,6 +232,25 @@ func (c *Controller) Settings() *api.Settings {
 	defer c.mu.RUnlock()
 
 	return c.settings
+}
+
+func (c *Controller) readerPositions(ih metainfo.Hash) []api.ReaderInfo {
+	if c.streamPool == nil {
+		return nil
+	}
+	streamReaders := c.streamPool.ReaderPositions(ih)
+	if len(streamReaders) == 0 {
+		return nil
+	}
+	apiReaders := make([]api.ReaderInfo, len(streamReaders))
+	for i, r := range streamReaders {
+		apiReaders[i] = api.ReaderInfo{
+			End:    r.End,
+			Reader: r.Reader,
+			Start:  r.Start,
+		}
+	}
+	return apiReaders
 }
 
 func (c *Controller) buildRouter() *chi.Mux {
@@ -522,6 +543,9 @@ func (c *Controller) Shutdown() {
 	close(c.posterCleanupDone)
 
 	_ = c.dlna.Stop()
+	if c.streamPool != nil {
+		_ = c.streamPool.Close()
+	}
 	_ = c.storageClient.Close()
 	if c.pieceCompletion != nil {
 		_ = c.pieceCompletion.Close()
@@ -691,6 +715,14 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	c.mu.Lock()
 	c.client = client
 	c.storageClient = storageClient
+	if c.streamPool != nil {
+		_ = c.streamPool.Close()
+	}
+	c.streamPool = stream.New(stream.Config{
+		FileStorageReadahead: fileStorageReadahead,
+		Logger:               c.logger,
+		Storage:              storageClient,
+	})
 	if isReconfiguring {
 		c.downloader.Stop()
 		c.trackers = newTrackers

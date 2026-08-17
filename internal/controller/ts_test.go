@@ -6,6 +6,7 @@ package controller
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -16,6 +17,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/utils"
 )
 
 func TestTSCorrectionMiddleware(t *testing.T) {
@@ -273,4 +277,89 @@ func TestTSUploadTorrentMiddleware_ParseError(t *testing.T) {
 
 	assert.False(t, called, "next handler should not be called on parse error")
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestTSCache_FileStorage_WithReaders(t *testing.T) {
+	tmpDir := t.TempDir()
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = utils.Ptr(tmpDir)
+		err := c.db.UpdateSettings(database.FromAPISettings(c.settings))
+		require.NoError(t, err)
+	})
+	defer cleanup()
+
+	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{
+		"storage": string(api.File),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var createdTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&createdTorrent))
+	ih := createdTorrent.Hash
+
+	to, err := ctrl.loadTorrent(createdTorrent.Magnet, api.File)
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	rs, release := ctrl.streamPool.Acquire(ih, to.Files()[0], to.Info().PieceLength, true, 0)
+	defer release()
+
+	_, _ = rs.Seek(5*to.Info().PieceLength, io.SeekStart)
+
+	cacheReqBody, err := json.Marshal(api.TSCacheRequest{
+		Hash: ih.HexString(),
+	})
+	require.NoError(t, err)
+
+	reqCache := httptest.NewRequest(http.MethodPost, "/cache", bytes.NewReader(cacheReqBody))
+	reqCache.Header.Set("Content-Type", "application/json")
+	rrCache := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rrCache, reqCache)
+	require.Equal(t, http.StatusOK, rrCache.Code)
+
+	var cacheResp api.TSCacheResponse
+	require.NoError(t, json.NewDecoder(rrCache.Body).Decode(&cacheResp))
+	assert.Greater(t, cacheResp.PiecesCount, 0)
+	assert.Greater(t, cacheResp.Capacity, int64(0))
+	assert.NotEmpty(t, cacheResp.Pieces)
+	require.Len(t, cacheResp.Readers, 1)
+	assert.Equal(t, 5, cacheResp.Readers[0].Reader)
+	assert.Equal(t, 0, cacheResp.Readers[0].Start)
+	assert.Greater(t, cacheResp.Readers[0].End, 5)
+}
+
+func TestTSCache_NoActiveReaders_ReturnsError(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	body, writer := createMultipartForm(t, sintelTorrentFile, nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var createdTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&createdTorrent))
+	ih := createdTorrent.Hash
+
+	// Load torrent without acquiring any stream readers
+	to, err := ctrl.loadTorrent(createdTorrent.Magnet, api.Memory)
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	cacheReqBody, err := json.Marshal(api.TSCacheRequest{
+		Hash: ih.HexString(),
+	})
+	require.NoError(t, err)
+
+	reqCache := httptest.NewRequest(http.MethodPost, "/cache", bytes.NewReader(cacheReqBody))
+	reqCache.Header.Set("Content-Type", "application/json")
+	rrCache := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rrCache, reqCache)
+	assert.Equal(t, http.StatusBadRequest, rrCache.Code)
 }

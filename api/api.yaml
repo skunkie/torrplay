@@ -1352,6 +1352,30 @@ components:
           minimum: 0
           example: 3145728
 
+    ReaderInfo:
+      type: object
+      description: Active reader information.
+      required:
+        - reader
+        - start
+        - end
+      properties:
+        reader:
+          type: integer
+          description: Reader piece index.
+          minimum: 0
+          example: 12
+        start:
+          type: integer
+          description: Start piece index.
+          minimum: 0
+          example: 10
+        end:
+          type: integer
+          description: End piece index.
+          minimum: 0
+          example: 20
+
     TorrentStats:
       type: object
       description: Statistics about torrent activity and performance.
@@ -1503,6 +1527,11 @@ components:
           description: Total size of all managed pieces in bytes.
           minimum: 0
           example: 104857600
+        readers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReaderInfo"
+          description: Active read stream positions for this torrent.
 
     TorrentStorage:
       type: string
@@ -1915,7 +1944,7 @@ components:
         Readers:
           type: array
           items:
-            $ref: "#/components/schemas/TSReaderInfo"
+            $ref: "#/components/schemas/ReaderInfo"
           description: Active read operations on the cache.
 
     TSPieceInfo:
@@ -1947,29 +1976,6 @@ components:
           minimum: 0
           default: 0
           example: 1
-
-    TSReaderInfo:
-      type: object
-      description: TorrServer reader information.
-      required:
-        - reader
-        - start
-        - end
-      properties:
-        reader:
-          type: integer
-          description: Reader identifier.
-          example: 12345
-        start:
-          type: integer
-          description: Start position in bytes.
-          minimum: 0
-          example: 0
-        end:
-          type: integer
-          description: End position in bytes.
-          minimum: 0
-          example: 1048576
 
     TSTorrentAddFile:
       type: object
