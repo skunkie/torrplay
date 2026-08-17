@@ -13,6 +13,7 @@ builds:
     goarch:
       - amd64
     binary: torrplay
+    # Stub; the workflow's binary is copied over it, keeping the 0755 mode.
     main: ./dummy.go
     hooks:
       post:
@@ -32,22 +33,26 @@ nfpms:
   - id: packages
     package_name: torrplay
     homepage: https://github.com/torrplay/torrplay
-    maintainer: "TorrPlay Team"
+    maintainer: "TorrPlay Team <skunkie@users.noreply.github.com>"
+    vendor: TorrPlay
     description: "TorrPlay is a torrent streaming application."
     license: MIT
     formats:
       - deb
       - rpm
     bindir: /usr/bin
+    dependencies:
+      - systemd
     contents:
+      # /lib is a symlink on merged-/usr distros; rpm rejects it.
       - src: ./.goreleaser/packaging/torrplay.service
-        dst: /lib/systemd/system/torrplay.service
-        type: config
+        dst: /usr/lib/systemd/system/torrplay.service
     scripts:
-      preinstall: ./.goreleaser/packaging/preinst.sh
       postinstall: ./.goreleaser/packaging/postinst.sh
       preremove: ./.goreleaser/packaging/prerm.sh
       postremove: ./.goreleaser/packaging/postrm.sh
 
+# Only the nfpm packages are published; no tarballs needed.
 archives:
   - id: default
+    formats: [binary]

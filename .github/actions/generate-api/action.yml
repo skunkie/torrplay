@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+name: Generate API code
+description: >-
+  Stamps the release version into the OpenAPI spec and regenerates the Go code.
+  Requires actions/checkout and actions/setup-go to have run first.
+
+inputs:
+  version:
+    description: Release version or tag name; a leading "v" is stripped.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install yq
+      shell: bash
+      run: go install github.com/mikefarah/yq/v4@v4.53.6
+    - name: Stamp version into API spec and regenerate
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        VERSION="${VERSION#v}"
+        "$(go env GOPATH)/bin/yq" e -i ".info.version = \"${VERSION}\"" api/api.yaml
+        go generate ./...
