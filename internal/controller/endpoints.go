@@ -43,7 +43,11 @@ import (
 )
 
 func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
-	var req api.TorrentAdd
+	var (
+		req  api.TorrentAdd
+		meta *metainfo.MetaInfo
+		err  error
+	)
 
 	defer r.Body.Close()
 
@@ -83,7 +87,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		meta, err := metainfo.Load(file)
+		meta, err = metainfo.Load(file)
 		if err != nil {
 			api.HTTPError(w, fmt.Sprintf("invalid torrent file: %v", err), http.StatusBadRequest)
 			return
@@ -138,7 +142,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		meta, err := metainfo.Load(r.Body)
+		meta, err = metainfo.Load(r.Body)
 		if err != nil {
 			api.HTTPError(w, fmt.Sprintf("invalid torrent file: %v", err), http.StatusBadRequest)
 			return
@@ -186,7 +190,13 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	to, err := c.addTorrentByMagnet(*req.Magnet)
+	var to *torrent.Torrent
+	if meta != nil {
+		spec := torrent.TorrentSpecFromMetaInfo(meta)
+		to, err = c.loadTorrentSpec(spec, api.TorrentStorage(utils.Val(req.Storage)))
+	} else {
+		to, err = c.addTorrentByMagnet(*req.Magnet)
+	}
 	if err != nil {
 		api.HandleError(w, err)
 		return
@@ -1315,15 +1325,8 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 	return ts, nil
 }
 
-// loadTorrent is the single entry point for adding a torrent to the client.
-// It handles adding trackers and managing torrents' lifetime in the torrent client.
-func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*torrent.Torrent, error) {
-	spec, err := torrent.TorrentSpecFromMagnetUri(uri)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse magnet URI: %w", err)
-	}
-
-	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 {
+func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.TorrentStorage) (*torrent.Torrent, error) {
+	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 && len(spec.InfoBytes) == 0 {
 		spec.InfoBytes = t.InfoBytes
 	}
 
@@ -1343,6 +1346,9 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 
 	if ok && info.storageType != storageType {
 		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+			if len(spec.InfoBytes) == 0 && to.Info() != nil {
+				spec.InfoBytes = to.Metainfo().InfoBytes
+			}
 			to.Drop()
 			<-to.Closed()
 		}
@@ -1382,6 +1388,16 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 	c.torrentTracker.mu.Unlock()
 
 	return to, nil
+}
+
+// loadTorrent is the single entry point for adding a torrent to the client.
+// It handles adding trackers and managing torrents' lifetime in the torrent client.
+func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*torrent.Torrent, error) {
+	spec, err := torrent.TorrentSpecFromMagnetUri(uri)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse magnet URI: %w", err)
+	}
+	return c.loadTorrentSpec(spec, storageType)
 }
 
 // streamFile is the internal implementation for streaming a torrent file.
@@ -1550,6 +1566,11 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 		t.Storage = req.Storage
 
 		if utils.Val(t.Storage) == api.File {
+			if len(t.InfoBytes) == 0 {
+				if clientTo, ok := c.client.Torrent(ih); ok && clientTo.Info() != nil {
+					t.InfoBytes = clientTo.Metainfo().InfoBytes
+				}
+			}
 			to, err := c.loadTorrent(t.Magnet, api.File)
 			if err != nil {
 				return api.NewError(err.Error(), http.StatusInternalServerError)
