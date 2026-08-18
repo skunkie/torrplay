@@ -88,8 +88,9 @@ func (d *Downloader) Start() {
 	}
 
 	d.logger.Info("starting background downloader")
-	d.stop = make(chan struct{})
-	go d.run()
+	stop := make(chan struct{})
+	d.stop = stop
+	go d.run(stop)
 }
 
 // Stop stops the background downloader.
@@ -125,7 +126,7 @@ func (d *Downloader) Stop() {
 	d.metrics.SetDownloadingTorrents(0)
 }
 
-func (d *Downloader) run() {
+func (d *Downloader) run(stop <-chan struct{}) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
@@ -138,7 +139,7 @@ func (d *Downloader) run() {
 		select {
 		case <-ticker.C:
 			d.processTorrents()
-		case <-d.stop:
+		case <-stop:
 			d.logger.Info("background downloader stopped")
 			return
 		}
