@@ -41,6 +41,7 @@ import (
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/piececompletion"
+	"github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/web"
@@ -122,11 +123,24 @@ type Controller struct {
 func NewController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, images images.ServiceInterface, metrics *metrics.Metrics) (*Controller, error) {
 	dbSettings, err := dbClient.GetSettings()
 	if err != nil {
-		return nil, err
+		if errors.Is(err, database.ErrSettingsNotFound) {
+			def := settings.Default()
+			dbSettings = database.FromAPISettings(&def)
+			if err := dbClient.UpdateSettings(dbSettings); err != nil {
+				return nil, fmt.Errorf("failed to save default settings: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get settings: %w", err)
+		}
 	}
 
-	settings := database.ToAPISettings(dbSettings)
-	logging.DefaultStore.Resize(utils.Val(settings.LogStoreSize))
+	appSettings := database.ToAPISettings(dbSettings)
+	if settings.Merge(appSettings, settings.Default()) {
+		if err := dbClient.UpdateSettings(database.FromAPISettings(appSettings)); err != nil {
+			return nil, fmt.Errorf("failed to update default settings: %w", err)
+		}
+	}
+	logging.DefaultStore.Resize(utils.Val(appSettings.LogStoreSize))
 
 	c := &Controller{
 		dataDir:           dataDir,
@@ -139,7 +153,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
-		settings:          settings,
+		settings:          appSettings,
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
 			cleanupDone: make(chan struct{}),
@@ -148,10 +162,10 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 		},
 	}
 
-	c.logger = c.configureLogger(*settings.LogLevel, settings)
+	c.logger = c.configureLogger(*appSettings.LogLevel, appSettings)
 
 	var pc piececompletion.DeletablePieceCompletion
-	if fsp := utils.Val(settings.FileStoragePath); fsp != "" {
+	if fsp := utils.Val(appSettings.FileStoragePath); fsp != "" {
 		if _, err := os.Stat(fsp); os.IsNotExist(err) {
 			if err := os.MkdirAll(fsp, 0755); err != nil {
 				return nil, fmt.Errorf("failed to create file storage directory: %w", err)
@@ -180,8 +194,8 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.logger.Info(fmt.Sprintf("initializing TorrPlay with data directory: %s", c.dataDir))
 
-	if settings.TorrentTrackers != nil && len(*settings.TorrentTrackers) > 0 {
-		for _, tracker := range *settings.TorrentTrackers {
+	if c.settings.TorrentTrackers != nil && len(*c.settings.TorrentTrackers) > 0 {
+		for _, tracker := range *c.settings.TorrentTrackers {
 			c.trackers = append(c.trackers, strings.Split(tracker, ","))
 		}
 	}
@@ -201,14 +215,14 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(c.settings.FileStoragePath), c.trackers)
 
-	if *settings.EnableDlna {
+	if *c.settings.EnableDlna {
 		err = c.dlna.Start(*c.settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if *settings.EnableDownloader {
+	if *c.settings.EnableDownloader {
 		c.downloader.Start()
 	}
 
