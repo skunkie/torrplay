@@ -30,20 +30,15 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 	dbClient, err := database.NewBBoltDB(dbPath)
 	require.NoError(t, err)
 
-	dbSettings, err := dbClient.GetSettings()
-	require.NoError(t, err)
-
-	apiSettings := database.ToAPISettings(dbSettings)
-
-	if updateSettings != nil {
-		updateSettings(apiSettings)
-		err = dbClient.UpdateSettings(database.FromAPISettings(apiSettings))
-		require.NoError(t, err)
-	}
-
 	metricsSvc := metrics.New()
 	c, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
 	require.NoError(t, err)
+
+	if updateSettings != nil {
+		updateSettings(c.settings)
+		err = dbClient.UpdateSettings(database.FromAPISettings(c.settings))
+		require.NoError(t, err)
+	}
 
 	cleanup := func() {
 		c.Shutdown()
