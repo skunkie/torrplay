@@ -1283,3 +1283,121 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, updatedDbTorrent.InfoBytes, "InfoBytes should be saved after updating torrent to file storage")
 }
+
+func TestNewController_SettingsBootstrapping(t *testing.T) {
+	t.Run("with pre-existing secrets on empty DB", func(t *testing.T) {
+		dbPath := tempfile()
+		defer os.Remove(dbPath)
+
+		dbClient, err := database.NewBBoltDB(dbPath)
+		require.NoError(t, err)
+		defer dbClient.Close()
+
+		secretBefore, err := dbClient.GetJWTSecret()
+		require.NoError(t, err)
+		assert.NotEmpty(t, secretBefore)
+
+		udnBefore, err := dbClient.GetDLNAUDN()
+		require.NoError(t, err)
+		assert.NotEmpty(t, udnBefore)
+
+		metricsSvc := metrics.New()
+		ctrl, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+		require.NoError(t, err)
+		defer ctrl.Shutdown()
+
+		assert.Equal(t, "TorrPlay", *ctrl.settings.FriendlyName)
+		assert.Equal(t, 8090, *ctrl.settings.HTTPServerPort)
+		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
+		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
+
+		secretAfter, err := dbClient.GetJWTSecret()
+		require.NoError(t, err)
+		assert.Equal(t, secretBefore, secretAfter)
+
+		udnAfter, err := dbClient.GetDLNAUDN()
+		require.NoError(t, err)
+		assert.Equal(t, udnBefore, udnAfter)
+	})
+
+	t.Run("with pre-existing secrets and partial settings", func(t *testing.T) {
+		dbPath := tempfile()
+		defer os.Remove(dbPath)
+
+		dbClient, err := database.NewBBoltDB(dbPath)
+		require.NoError(t, err)
+		defer dbClient.Close()
+
+		secretBefore, err := dbClient.GetJWTSecret()
+		require.NoError(t, err)
+		assert.NotEmpty(t, secretBefore)
+
+		udnBefore, err := dbClient.GetDLNAUDN()
+		require.NoError(t, err)
+		assert.NotEmpty(t, udnBefore)
+
+		customPort := 9999
+		customName := "CustomTorrPlay"
+		partialSettings := &api.Settings{
+			HTTPServerPort: &customPort,
+			FriendlyName:   &customName,
+		}
+		err = dbClient.UpdateSettings(database.FromAPISettings(partialSettings))
+		require.NoError(t, err)
+
+		metricsSvc := metrics.New()
+		ctrl, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+		require.NoError(t, err)
+		defer ctrl.Shutdown()
+
+		assert.Equal(t, "CustomTorrPlay", *ctrl.settings.FriendlyName)
+		assert.Equal(t, 9999, *ctrl.settings.HTTPServerPort)
+		// Missing fields filled from defaults
+		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
+		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
+
+		secretAfter, err := dbClient.GetJWTSecret()
+		require.NoError(t, err)
+		assert.Equal(t, secretBefore, secretAfter)
+
+		udnAfter, err := dbClient.GetDLNAUDN()
+		require.NoError(t, err)
+		assert.Equal(t, udnBefore, udnAfter)
+	})
+}
+
+func TestUpdateSettings_PreservesSecrets(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	secretBefore, err := ctrl.db.GetJWTSecret()
+	require.NoError(t, err)
+	assert.NotEmpty(t, secretBefore)
+
+	udnBefore, err := ctrl.db.GetDLNAUDN()
+	require.NoError(t, err)
+	assert.NotEmpty(t, udnBefore)
+
+	newFriendlyName := "PatchedTorrPlay"
+	patchBody := api.Settings{
+		FriendlyName: &newFriendlyName,
+	}
+	rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(patchBody).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusNoContent, rr.Code)
+
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var res api.Settings
+	err = json.NewDecoder(rr.Body).Decode(&res)
+	require.NoError(t, err)
+	assert.Equal(t, newFriendlyName, *res.FriendlyName)
+
+	secretAfter, err := ctrl.db.GetJWTSecret()
+	require.NoError(t, err)
+	assert.Equal(t, secretBefore, secretAfter)
+
+	udnAfter, err := ctrl.db.GetDLNAUDN()
+	require.NoError(t, err)
+	assert.Equal(t, udnBefore, udnAfter)
+}
