@@ -313,3 +313,33 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	assert.Empty(t, downloader.downloading)
 	assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
 }
+
+func TestDownloader_StartStop_CleanExit(t *testing.T) {
+	td := t.TempDir()
+	pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+	require.NoError(t, err)
+	defer pc.Close()
+
+	db := &MockDB{
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(false)}},
+	}
+	m := metrics.New()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	clientCfg := torrent.NewDefaultClientConfig()
+	clientCfg.DataDir = td
+	clientCfg.NoDHT = true
+	clientCfg.DisablePEX = true
+	clientCfg.DisableTrackers = true
+	client, err := torrent.NewClient(clientCfg)
+	require.NoError(t, err)
+	defer client.Close()
+
+	downloader := New(client, db, logger, m, pc, td, nil)
+
+	// Start and stop multiple times in quick succession
+	for i := 0; i < 5; i++ {
+		downloader.Start()
+		downloader.Stop()
+	}
+}
