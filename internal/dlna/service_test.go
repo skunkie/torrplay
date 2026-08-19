@@ -15,6 +15,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/ethulhu/helix/upnpav"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
@@ -73,6 +74,23 @@ func (m *mockDB) GetTorrent(ih metainfo.Hash) (*database.Torrent, error) {
 	return database.FromAPITorrent(testTorrents[0]), nil
 }
 
+// newTestService creates a Service, starts it on 127.0.0.1 with a fixed
+// test address, and registers a cleanup that stops the service when the test
+// finishes. Using t.Cleanup guarantees the UPnP broadcast goroutine launched
+// by Start is cancelled before the next test (or the next -count iteration of
+// the same test) starts a new one.
+func newTestService(t *testing.T) (*Service, func()) {
+	t.Helper()
+
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+
+	require.NoError(t, service.Start("test-server", "127.0.0.1", 8080))
+
+	return service, func() { _ = service.Stop() }
+}
+
 func TestNewService(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -92,13 +110,8 @@ func TestNewService(t *testing.T) {
 }
 
 func TestService_Start(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	if service.cancel == nil {
 		t.Error("service.cancel was not set")
@@ -124,13 +137,8 @@ func TestService_Start_NoErrorWithUnspecifiedIP(t *testing.T) {
 }
 
 func TestService_Stop(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	if err := service.Stop(); err != nil {
 		t.Fatalf("service.Stop() returned an error: %v", err)
@@ -142,13 +150,8 @@ func TestService_Stop(t *testing.T) {
 }
 
 func TestService_Reconfigure(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	if err := service.Reconfigure("new-test-server", "127.0.0.1", 8081); err != nil {
 		t.Fatalf("service.Reconfigure() returned an error: %v", err)
@@ -156,13 +159,8 @@ func TestService_Reconfigure(t *testing.T) {
 }
 
 func TestService_ServeHTTP(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	req := httptest.NewRequest(http.MethodGet, "/upnp/", nil)
 	rw := httptest.NewRecorder()
@@ -175,13 +173,8 @@ func TestService_ServeHTTP(t *testing.T) {
 }
 
 func TestService_ConnectionManagerAndRegistrar(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	// Test ConnectionManager service handler is registered
 	cmHandler, ok := service.device.SOAPInterface("urn:schemas-upnp-org:service:ConnectionManager:1")
@@ -311,14 +304,8 @@ func TestService_ServeHTTP_IconsAndNotFound(t *testing.T) {
 }
 
 func TestService_StartAlreadyRunning(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
-	defer service.Stop()
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	err := service.Start("test-server", "127.0.0.1", 8080)
 	assert.ErrorContains(t, err, "already running")
