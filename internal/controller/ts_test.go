@@ -6,16 +6,22 @@ package controller
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
+	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/api"
 )
 
 func TestTSCorrectionMiddleware(t *testing.T) {
@@ -273,4 +279,59 @@ func TestTSUploadTorrentMiddleware_ParseError(t *testing.T) {
 
 	assert.False(t, called, "next handler should not be called on parse error")
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestTSViewed_Deadlock(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+	magnet := samples[ih]
+
+	rr := testutil.NewRequest().Post("/api/v1/torrents").
+		WithJsonBody(api.TorrentAdd{Magnet: &magnet}).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var createdTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&createdTorrent))
+	require.NotEmpty(t, createdTorrent.Files)
+
+	const goroutines = 10
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		wg.Add(goroutines * 2)
+		for i := 0; i < goroutines; i++ {
+			// Concurrent set-viewed requests.
+			go func() {
+				defer wg.Done()
+				body := api.TSViewedRequest{
+					Hash:      ih.HexString(),
+					FileIndex: 1,
+					Action:    "set",
+				}
+				testutil.NewRequest().Post("/viewed").
+					WithJsonBody(body).
+					GoWithHTTPHandler(t, ctrl.router)
+			}()
+			// Concurrent list-viewed requests interleaved.
+			go func() {
+				defer wg.Done()
+				body := api.TSViewedRequest{Action: "list"}
+				testutil.NewRequest().Post("/viewed").
+					WithJsonBody(body).
+					GoWithHTTPHandler(t, ctrl.router)
+			}()
+		}
+		wg.Wait()
+	}()
+
+	select {
+	case <-done:
+		// All goroutines completed — no deadlock.
+	case <-time.After(10 * time.Second):
+		t.Fatal("TSViewed deadlock detected: goroutines did not complete within 10 seconds")
+	}
 }
