@@ -457,9 +457,6 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		c.mu.Lock()
-		defer c.mu.Unlock()
-
 		t, err := c.db.GetTorrent(ih)
 		if err != nil {
 			api.HTTPError(w, "torrent not found", http.StatusNotFound)
@@ -490,9 +487,6 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 
 	case api.TSViewedRequestActionList:
-		c.mu.RLock()
-		defer c.mu.RUnlock()
-
 		allTorrents, err := c.db.GetTorrents()
 		if err != nil {
 			api.HTTPError(w, "failed to get torrents", http.StatusInternalServerError)
