@@ -7,10 +7,8 @@ package dlna
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
@@ -37,13 +35,8 @@ func (m *mockImages) SaveData(data []byte) (*string, error) {
 func (m *mockImages) ServeHTTP(w http.ResponseWriter, r *http.Request) {}
 
 func TestContentDirectory_BrowseMetadata(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -104,13 +97,8 @@ func TestContentDirectory_BrowseMetadata(t *testing.T) {
 }
 
 func TestContentDirectory_BrowseChildren(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	didl, totalMatches, err := service.contentDirectory.BrowseChildren(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0, nil)
 	if err != nil {
@@ -135,13 +123,8 @@ func TestContentDirectory_BrowseChildren(t *testing.T) {
 }
 
 func TestContentDirectory_Search(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	t.Run("search by title", func(t *testing.T) {
 		criteria, err := search.Parse(`(dc:title contains "Test")`)
@@ -193,13 +176,8 @@ func TestContentDirectory_Search(t *testing.T) {
 }
 
 func TestContentDirectory_fileURI(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	didl, _, err := service.contentDirectory.BrowseChildren(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0, nil)
 	if err != nil {
@@ -287,13 +265,8 @@ func TestBrowseTorrent_WithPoster(t *testing.T) {
 }
 
 func TestContentDirectory_BrowseChildren_Pagination(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -366,13 +339,8 @@ func TestContentDirectory_BrowseChildren_Pagination(t *testing.T) {
 }
 
 func TestContentDirectory_Capabilities(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -473,13 +441,8 @@ func TestContentDirectory_NilBaseURL(t *testing.T) {
 }
 
 func TestContentDirectory_Search_CategoriesAndErrors(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	ctx := context.Background()
 	criteria, err := search.Parse(`(dc:title contains "Test")`)
@@ -506,13 +469,8 @@ func TestContentDirectory_Search_CategoriesAndErrors(t *testing.T) {
 }
 
 func TestContentDirectory_BrowseChildren_RecentlyViewed(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	ctx := context.Background()
 	didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, recentlyViewedContainerID, 0, 10, nil)
