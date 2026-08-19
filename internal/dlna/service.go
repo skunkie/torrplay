@@ -29,6 +29,7 @@ const notifyInterval = 30 * time.Second
 
 type Service struct {
 	basePath         string
+	broadcastDone    sync.WaitGroup
 	cancel           context.CancelFunc
 	contentDirectory *ContentDirectory
 	db               database.DatabaseInterface
@@ -179,7 +180,9 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 
+	s.broadcastDone.Add(1)
 	go func() {
+		defer s.broadcastDone.Done()
 		if err := upnp.BroadcastDevice(ctx, device, baseURL.String(), nil, notifyInterval); err != nil {
 			s.logger.Error("failed to broadcast DLNA device", "err", err)
 		}
@@ -197,7 +200,6 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 
 func (s *Service) Stop() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.logger.Info("stopping DLNA service")
 
@@ -213,6 +215,13 @@ func (s *Service) Stop() error {
 		s.handler = nil
 		s.contentDirectory = nil
 	}
+
+	s.mu.Unlock()
+
+	// Wait for the broadcast goroutine to exit fully before returning.
+	// This ensures Stop is synchronous: any subsequent Start (or the next
+	// -count iteration in tests) cannot race with the previous goroutine.
+	s.broadcastDone.Wait()
 
 	s.logger.Info("DLNA service stopped")
 
