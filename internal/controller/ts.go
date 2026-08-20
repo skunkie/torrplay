@@ -50,7 +50,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := c.storageClient.GetTorrentMemoryStats(ih)
+	info, err := c.storageClient.TorrentStats(ih)
 	if err != nil {
 		api.HTTPError(w, "torrent memory stats unavailable", http.StatusBadRequest)
 		return
@@ -60,10 +60,10 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := api.TSCacheResponse{
-		Capacity:     info.TotalSize,
+		Capacity:     info.TrackedBytes,
 		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
 		PiecesCount:  info.TotalPieces,
-		PiecesLength: info.Pieces[0].Size,
+		PiecesLength: info.Pieces[0].SizeBytes,
 		Readers: []api.TSReaderInfo{
 			{
 				Reader: info.Pieces[0].Index,
@@ -77,7 +77,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		resp.Pieces[fmt.Sprint(piece.Index)] = api.TSPieceInfo{
 			Completed: piece.Complete,
 			ID:        piece.Index,
-			Length:    piece.Size,
+			Length:    piece.SizeBytes,
 		}
 	}
 
