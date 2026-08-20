@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,7 @@ import (
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/utils"
+	"github.com/torrplay/torrplay/pkg/stream"
 )
 
 // Taken from https://webtorrent.io/free-torrents.
@@ -81,6 +83,7 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 		os.Remove(dbPath)
 		os.Remove(postersDBPath)
 	}
+	t.Cleanup(cleanup)
 
 	return ctrl, cleanup
 }
@@ -148,6 +151,74 @@ func TestAddTorrentFromFile(t *testing.T) {
 	var result api.Torrent
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
 	assert.Equal(t, metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10"), result.Hash)
+
+	_, ok := ctrl.client.Torrent(result.Hash)
+	assert.False(t, ok, "torrent should be dropped from client when not streaming")
+}
+
+func TestAddTorrentWhileStreaming(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	magnet := samples[ih]
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+
+	// 1. Start streaming the torrent before it is added to the database.
+	streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ih)
+	req, err := http.NewRequest(http.MethodGet, streamURL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=0-")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+
+	buf := make([]byte, 1024)
+	n, err := io.ReadFull(resp.Body, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 1024, n)
+
+	// Verify torrent is active.
+	require.True(t, ctrl.hasTorrentReaders(ih))
+
+	to, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok)
+	select {
+	case <-to.Closed():
+		t.Fatal("torrent should not be closed while streaming")
+	default:
+	}
+
+	// 2. Add the torrent to the database while it is actively being streamed.
+	addBody, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
+	require.NoError(t, err)
+	addReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/torrents", server.URL), bytes.NewBuffer(addBody))
+	require.NoError(t, err)
+	addReq.Header.Set("Content-Type", "application/json")
+
+	addResp, err := http.DefaultClient.Do(addReq)
+	require.NoError(t, err)
+	defer addResp.Body.Close()
+	require.Equal(t, http.StatusCreated, addResp.StatusCode)
+
+	// 3. Verify the torrent was NOT dropped from the client.
+	toAfter, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok, "torrent should remain in client while active")
+	assert.Equal(t, to, toAfter)
+	select {
+	case <-toAfter.Closed():
+		t.Fatal("torrent should not be closed after adding to database")
+	default:
+	}
+
+	// 4. Verify streaming continues without error.
+	n, err = io.ReadFull(resp.Body, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 1024, n)
 }
 
 func TestAddInvalidTorrent(t *testing.T) {
@@ -221,6 +292,7 @@ func TestGetTorrent(t *testing.T) {
 	assert.NotNil(t, result.Name)
 	assert.NotNil(t, result.PieceCount)
 	assert.NotNil(t, result.TotalSize)
+	assert.NotNil(t, result.Active)
 }
 
 func TestStreamFileFromTorrent(t *testing.T) {
@@ -806,8 +878,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 		},
 	}
 
-	dummyReq := httptest.NewRequest(http.MethodPatch, "/", nil)
-	err := ctrl.updateTorrent(dummyReq, ih, updateReq)
+	err := ctrl.updateTorrent(ih, updateReq)
 	require.NoError(t, err)
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -834,7 +905,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 		},
 	}
 
-	err = ctrl.updateTorrent(dummyReq, ih, updateReq)
+	err = ctrl.updateTorrent(ih, updateReq)
 	require.NoError(t, err)
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -856,7 +927,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 		},
 	}
 
-	err = ctrl.updateTorrent(dummyReq, ih, updateReq)
+	err = ctrl.updateTorrent(ih, updateReq)
 	require.NoError(t, err)
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -1161,8 +1232,10 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, dbTorrent.InfoBytes, "InfoBytes should be saved for new torrent with file storage")
 
-	err = ctrl.db.DeleteTorrent(resp.Hash)
-	require.NoError(t, err)
+	delReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/torrents/%s", resp.Hash.HexString()), nil)
+	delW := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(delW, delReq)
+	require.Equal(t, http.StatusNoContent, delW.Code)
 
 	body, writer = createMultipartForm(t, sintelTorrentFile, map[string]string{
 		"storage": string(api.Memory),
@@ -1181,6 +1254,16 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	dbTorrent, err = ctrl.db.GetTorrent(resp.Hash)
 	require.NoError(t, err)
 	assert.Empty(t, dbTorrent.InfoBytes, "InfoBytes should not be saved for new torrent with memory storage")
+
+	// Pre-load the torrent into memory client with metadata so the storage switch can read InfoBytes
+	sintelFile, err := os.Open(sintelTorrentFile)
+	require.NoError(t, err)
+	meta, err := metainfo.Load(sintelFile)
+	_ = sintelFile.Close()
+	require.NoError(t, err)
+	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta))
+	require.NoError(t, err)
+	<-to.GotInfo()
 
 	updateReqBody := api.TorrentUpdate{
 		Storage: utils.Ptr(api.File),
@@ -1220,7 +1303,6 @@ func TestNewController_SettingsBootstrapping(t *testing.T) {
 
 		assert.Equal(t, "TorrPlay", *ctrl.settings.FriendlyName)
 		assert.Equal(t, 8090, *ctrl.settings.HTTPServerPort)
-		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
 		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
@@ -1264,8 +1346,6 @@ func TestNewController_SettingsBootstrapping(t *testing.T) {
 
 		assert.Equal(t, "CustomTorrPlay", *ctrl.settings.FriendlyName)
 		assert.Equal(t, 9999, *ctrl.settings.HTTPServerPort)
-		// Missing fields filled from defaults
-		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
 		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
@@ -1312,4 +1392,147 @@ func TestUpdateSettings_PreservesSecrets(t *testing.T) {
 	udnAfter, err := ctrl.db.GetDLNAUDN()
 	require.NoError(t, err)
 	assert.Equal(t, udnBefore, udnAfter)
+}
+
+func TestController_ShutdownIdempotent(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	// Calling Shutdown multiple times should not panic
+	require.NotPanics(t, func() {
+		ctrl.Shutdown()
+		ctrl.Shutdown()
+	})
+}
+
+func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	magnet := samples[ih]
+	req := api.TorrentAdd{Magnet: &magnet}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// Mark the torrent expired in the tracker
+	ctrl.torrentTracker.mu.Lock()
+	ctrl.torrentTracker.torrents[ih] = torrentInfo{
+		lastUsedAt:  time.Now().Add(-4 * time.Hour),
+		storageType: api.Memory,
+	}
+	ctrl.torrentTracker.mu.Unlock()
+
+	// Simulate an active streaming reader in streamPool
+	to, err := ctrl.addTorrentByHash(ih)
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	file := to.Files()[0]
+	ctrl.streamPool.SetReadaheadBudget(1024 * 1024)
+	_, release, err := ctrl.streamPool.Acquire(file, stream.MemoryStorage)
+	require.NoError(t, err)
+	defer release()
+
+	// Trigger cleanup
+	ctrl.cleanupExpiredTorrents()
+
+	// The torrent should NOT have been removed because of the active reader
+	ctrl.torrentTracker.mu.RLock()
+	info, exists := ctrl.torrentTracker.torrents[ih]
+	ctrl.torrentTracker.mu.RUnlock()
+
+	assert.True(t, exists, "active torrent should not be dropped during cleanup")
+	assert.True(t, time.Since(info.lastUsedAt) < 1*time.Minute, "lastUsedAt should have been refreshed")
+}
+
+func TestUpdateTorrent_NoConfiguredFileStorage_Unlocks(t *testing.T) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = nil
+	})
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	magnet := samples[ih]
+	req := api.TorrentAdd{Magnet: &magnet}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// Attempt to switch to File storage with unconfigured path
+	updateReq := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+	rr = testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Verify that controller is not deadlocked and can handle subsequent requests
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUpdateTorrent_StorageSwitch_GotInfoTimeout_Unlocks(t *testing.T) {
+	origTimeout := gotInfoTimeout
+	gotInfoTimeout = 100 * time.Millisecond
+	defer func() { gotInfoTimeout = origTimeout }()
+
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = utils.Ptr(t.TempDir())
+	})
+	defer cleanup()
+
+	// Add a dummy torrent directly into the database with an unresolvable magnet link (empty InfoBytes)
+	deadHash := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+	deadMagnet := "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=DeadTorrent"
+	err := ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash:    deadHash,
+			Name:    "DeadTorrent",
+			Magnet:  deadMagnet,
+			Storage: utils.Ptr(api.Memory),
+		},
+	})
+	require.NoError(t, err)
+
+	// Attempt to update storage from Memory to File - this will trigger loadTorrent and time out on <-to.GotInfo()
+	updateReq := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+	rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", deadHash)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
+
+	// Verify that controller is not deadlocked and can handle subsequent requests
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	rr = testutil.NewRequest().Get("/api/v1/torrents").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestCalcReadaheadPct(t *testing.T) {
+	tests := []struct {
+		name      string
+		maxMemory int64
+		want      int
+	}{
+		{"below 64MB", 32 * 1024 * 1024, 50},
+		{"exactly 64MB", 64 * 1024 * 1024, 50},
+		{"midway 64-128MB (96MB)", 96 * 1024 * 1024, 55},
+		{"boundary 128MB - 1", 128*1024*1024 - 1, 59},
+		{"exactly 128MB", 128 * 1024 * 1024, 60},
+		{"midway 128-256MB (192MB)", 192 * 1024 * 1024, 65},
+		{"boundary 256MB - 1", 256*1024*1024 - 1, 69},
+		{"exactly 256MB", 256 * 1024 * 1024, 70},
+		{"midway 256-512MB (384MB)", 384 * 1024 * 1024, 72},
+		{"boundary 512MB - 1", 512*1024*1024 - 1, 74},
+		{"exactly 512MB", 512 * 1024 * 1024, 75},
+		{"1GB", 1024 * 1024 * 1024, 75},
+		{"2GB", 2048 * 1024 * 1024, 75},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calcReadaheadPct(tt.maxMemory)
+			assert.Equal(t, tt.want, got, "maxMemory = %d", tt.maxMemory)
+		})
+	}
 }

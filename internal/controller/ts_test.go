@@ -7,6 +7,7 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/utils"
 )
 
 func TestTSCorrectionMiddleware(t *testing.T) {
@@ -334,4 +336,126 @@ func TestTSViewed_Deadlock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("TSViewed deadlock detected: goroutines did not complete within 10 seconds")
 	}
+}
+
+func TestTSTorrentsAddMagnetField(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	magnet := samples[ih]
+
+	// 1. Add via /torrents with magnet link
+	addReq := map[string]interface{}{
+		"action":     "add",
+		"link":       magnet,
+		"title":      "Sintel Test",
+		"save_to_db": true,
+	}
+
+	rr := testutil.NewRequest().Post("/torrents").
+		WithJsonBody(addReq).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	getRR := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih.HexString()))
+	require.Equal(t, http.StatusOK, getRR.Code)
+
+	var fetchedTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(getRR.Body).Decode(&fetchedTorrent))
+	assert.NotEmpty(t, fetchedTorrent.Magnet)
+	assert.Contains(t, fetchedTorrent.Magnet, ih.HexString())
+
+	// 2. Add via /torrents with hash field
+	ih2 := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
+	addHashReq := map[string]interface{}{
+		"action":     "add",
+		"hash":       ih2.HexString(),
+		"title":      "Bunny Test",
+		"save_to_db": true,
+	}
+
+	rr2 := testutil.NewRequest().Post("/torrents").
+		WithJsonBody(addHashReq).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr2.Code)
+
+	getRR2 := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih2.HexString()))
+	require.Equal(t, http.StatusOK, getRR2.Code)
+
+	var fetchedTorrent2 api.Torrent
+	require.NoError(t, json.NewDecoder(getRR2.Body).Decode(&fetchedTorrent2))
+	assert.NotEmpty(t, fetchedTorrent2.Magnet)
+	assert.Contains(t, fetchedTorrent2.Magnet, ih2.HexString())
+}
+
+func TestTSTorrentsAddWhileStreaming(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	magnet := samples[ih]
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+
+	// 1. Stream the torrent before adding to database.
+	streamURL := fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&play&index=6", server.URL, ih.HexString())
+	req, err := http.NewRequest(http.MethodGet, streamURL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=0-")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+
+	buf := make([]byte, 1024)
+	n, err := io.ReadFull(resp.Body, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 1024, n)
+
+	// Verify torrent is active.
+	require.True(t, ctrl.hasTorrentReaders(ih))
+
+	to, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok)
+	select {
+	case <-to.Closed():
+		t.Fatal("torrent should not be closed while streaming")
+	default:
+	}
+
+	// 2. Add via /torrents with save_to_db: true while stream is active.
+	addReq := api.TSTorrentRequest{
+		Action:   "add",
+		Link:     &magnet,
+		Title:    utils.Ptr("Sintel Test"),
+		SaveToDB: utils.Ptr(true),
+	}
+	addBody, err := json.Marshal(addReq)
+	require.NoError(t, err)
+	addHTTPReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/torrents", server.URL), bytes.NewBuffer(addBody))
+	require.NoError(t, err)
+	addHTTPReq.Header.Set("Content-Type", "application/json")
+
+	addResp, err := http.DefaultClient.Do(addHTTPReq)
+	require.NoError(t, err)
+	defer addResp.Body.Close()
+	require.Equal(t, http.StatusOK, addResp.StatusCode)
+
+	// 3. Verify torrent is still loaded and not closed.
+	toAfter, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok, "torrent should remain in client while streaming")
+	assert.Equal(t, to, toAfter)
+	select {
+	case <-toAfter.Closed():
+		t.Fatal("torrent should not be closed after adding to database")
+	default:
+	}
+
+	// 4. Verify streaming continues without error.
+	n, err = io.ReadFull(resp.Body, buf)
+	require.NoError(t, err)
+	assert.Equal(t, 1024, n)
 }

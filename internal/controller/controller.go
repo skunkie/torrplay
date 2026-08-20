@@ -44,6 +44,7 @@ import (
 	"github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 	"github.com/torrplay/torrplay/web"
 	"golang.org/x/time/rate"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -112,8 +113,10 @@ type Controller struct {
 	postersPath         string
 	router              *chi.Mux
 	settings            *api.Settings
+	shutdownOnce        sync.Once
 	startedAt           time.Time
 	storageClient       *memstorage.Client
+	streamPool          *stream.Pool
 	torrentTracker      torrentTracker
 	trackers            [][]string
 
@@ -522,30 +525,35 @@ func (c *Controller) Start() {
 }
 
 func (c *Controller) Shutdown() {
-	c.logger.Info("shutting down TorrPlay...")
+	c.shutdownOnce.Do(func() {
+		c.logger.Info("shutting down TorrPlay...")
 
-	if c.httpServer != nil {
-		_ = c.httpServer.Shutdown()
-	}
+		if c.httpServer != nil {
+			_ = c.httpServer.Shutdown()
+		}
 
-	if c.downloader != nil {
-		c.downloader.Stop()
-	}
+		if c.downloader != nil {
+			c.downloader.Stop()
+		}
 
-	close(c.torrentTracker.cleanupDone)
-	close(c.posterCleanupDone)
+		close(c.torrentTracker.cleanupDone)
+		close(c.posterCleanupDone)
 
-	_ = c.dlna.Stop()
-	_ = c.storageClient.Close()
-	if c.pieceCompletion != nil {
-		_ = c.pieceCompletion.Close()
-	}
-	_ = c.client.Close()
-	if c.logFile != nil {
-		_ = c.logFile.Close()
-	}
+		_ = c.dlna.Stop()
+		if c.streamPool != nil {
+			c.streamPool.Close()
+		}
+		_ = c.storageClient.Close()
+		if c.pieceCompletion != nil {
+			_ = c.pieceCompletion.Close()
+		}
+		_ = c.client.Close()
+		if c.logFile != nil {
+			_ = c.logFile.Close()
+		}
 
-	c.logger.Info("TorrPlay stopped")
+		c.logger.Info("TorrPlay stopped")
+	})
 }
 
 func (c *Controller) startTorrentCleanup() {
@@ -613,14 +621,27 @@ func (c *Controller) cleanupExpiredTorrents() {
 	for ih, info := range c.torrentTracker.torrents {
 		sub := now.Sub(info.lastUsedAt)
 		if sub > c.torrentTracker.ttl {
+			// Check if the torrent is actively being streamed or downloaded in the background.
+			c.mu.RLock()
+			isStreaming := c.streamPool != nil && c.streamPool.HasReaders(ih)
+			isDownloading := c.downloader != nil && c.downloader.IsActive(ih)
+			c.mu.RUnlock()
+
+			if isStreaming || isDownloading {
+				info.lastUsedAt = now
+				c.torrentTracker.torrents[ih] = info
+				c.logger.Debug("skipping expiration for active torrent", "hash", ih)
+				continue
+			}
+
 			c.logger.Debug("mark torrent as expired", "hash", ih, "age", sub)
 			delete(c.torrentTracker.torrents, ih)
 			if to, ok := c.client.Torrent(ih); ok {
-				go func() {
-					to.Drop()
-					<-to.Closed()
-					c.logger.Debug("dropped torrent", "hash", ih, "age", sub)
-				}()
+				go func(t *torrent.Torrent, hash metainfo.Hash, age time.Duration) {
+					t.Drop()
+					<-t.Closed()
+					c.logger.Debug("dropped torrent", "hash", hash, "age", age)
+				}(to, ih, sub)
 			}
 		}
 	}
@@ -641,6 +662,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	c.mu.RLock()
 	oldClient := c.client
 	oldStorageClient := c.storageClient
+	oldPool := c.streamPool
 	settings := c.settings
 	logger := c.logger
 	isReconfiguring := c.downloader != nil
@@ -670,6 +692,11 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	if oldStorageClient != nil {
 		_ = oldStorageClient.Close()
 		<-oldStorageClient.Closed()
+	}
+
+	// Close old stream pool.
+	if oldPool != nil {
+		oldPool.Close()
 	}
 
 	clientConfig := torrent.NewDefaultClientConfig()
@@ -702,9 +729,31 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 		return fmt.Errorf("failed to initiate torrent client: %w", err)
 	}
 
+	// Create new stream pool.
+	// Registry: storageClient protects actively-read pieces from eviction
+	// by registering readahead windows with the storage layer.
+	pool := stream.New(stream.Config{
+		FileReadaheadBytes:     fileStorageReadahead,
+		IdleCloseTimeout:       5 * time.Minute,
+		IdleParkTimeout:        30 * time.Second,
+		Logger:                 logger,
+		MaxReadersPerFile:      10,
+		PriorityWindowFraction: 0.5,
+		MemoryUsage: func() float64 {
+			stats := storageClient.MemoryStats()
+			if stats.LimitBytes <= 0 {
+				return 0
+			}
+			return float64(stats.UsedBytes) / float64(stats.LimitBytes)
+		},
+		Registry: storageClient,
+	})
+	pool.SetReadaheadBudget(int64(*settings.MaxMemory) * int64(calcReadaheadPct(*settings.MaxMemory)) / 100)
+
 	c.mu.Lock()
 	c.client = client
 	c.storageClient = storageClient
+	c.streamPool = pool
 	if isReconfiguring {
 		c.downloader.Stop()
 		c.trackers = newTrackers

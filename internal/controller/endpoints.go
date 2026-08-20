@@ -22,10 +22,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	gotorrentfs "github.com/ajnavarro/go-torrent-fs"
 	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -40,6 +38,7 @@ import (
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 )
 
 func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +176,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case req.Hash != nil:
-		req.Magnet = utils.Ptr(magnetURIfromHash(*req.Hash))
+		req.Magnet = utils.Ptr(utils.MagnetURIFromHash(*req.Hash))
 		fallthrough
 	case req.Magnet != nil:
 	default:
@@ -195,6 +194,9 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		spec := torrent.TorrentSpecFromMetaInfo(meta)
 		to, err = c.loadTorrentSpec(spec, api.TorrentStorage(utils.Val(req.Storage)))
 	} else {
+		// Use addTorrentByMagnet to validate the magnet URI format (v2 support),
+		// check if the torrent already exists in the database, and reuse it if so
+		// before falling back to loadTorrent with the appropriate storage backend.
 		to, err = c.addTorrentByMagnet(*req.Magnet)
 	}
 	if err != nil {
@@ -205,6 +207,8 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-to.GotInfo():
 	case <-time.After(gotInfoTimeout):
+		to.Drop()
+		<-to.Closed()
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 		return
 	}
@@ -217,9 +221,11 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	to.Drop()
-	<-to.Closed()
-	c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+	if !c.hasTorrentReaders(to.InfoHash()) {
+		to.Drop()
+		<-to.Closed()
+		c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Location", fmt.Sprintf("/api/v1/torrents/%s", resp.Hash))
@@ -526,6 +532,8 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		}
 	case <-time.After(gotInfoTimeout):
+		to.Drop()
+		<-to.Closed()
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 	}
 }
@@ -540,6 +548,8 @@ func (c *Controller) GetTorrentStats(w http.ResponseWriter, _ *http.Request, ih 
 	select {
 	case <-to.GotInfo():
 	case <-time.After(gotInfoTimeout):
+		to.Drop()
+		<-to.Closed()
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 		return
 	}
@@ -782,9 +792,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reqSettings.FileStoragePath != nil {
 		newSettings.FileStoragePath = reqSettings.FileStoragePath
 	}
-	if reqSettings.ReadaheadPercentage != nil {
-		newSettings.ReadaheadPercentage = reqSettings.ReadaheadPercentage
-	}
 	if reqSettings.TorrentTrackers != nil {
 		newSettings.TorrentTrackers = reqSettings.TorrentTrackers
 	}
@@ -882,9 +889,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 		reconfigureTorrentClient = true
 		restartHTTPServer = true
-		saveSettings = true
-	}
-	if utils.Differ(oldSettings.ReadaheadPercentage, newSettings.ReadaheadPercentage) {
 		saveSettings = true
 	}
 	if !slices.Equal(utils.Val(oldSettings.TorrentTrackers), utils.Val(newSettings.TorrentTrackers)) {
@@ -989,7 +993,7 @@ func (c *Controller) UpdateTorrent(w http.ResponseWriter, r *http.Request, ih me
 		return
 	}
 
-	if err := c.updateTorrent(r, ih, req); err != nil {
+	if err := c.updateTorrent(ih, req); err != nil {
 		api.HandleError(w, err)
 		return
 	}
@@ -1011,7 +1015,7 @@ func (c *Controller) addTorrentByHash(ih metainfo.Hash) (*torrent.Torrent, error
 		if !errors.Is(err, database.ErrTorrentNotFound) {
 			return nil, err
 		}
-		return c.loadTorrent(magnetURIfromHash(ih), api.Memory)
+		return c.loadTorrent(utils.MagnetURIFromHash(ih), api.Memory)
 	}
 
 	return c.loadTorrent(t.Magnet, utils.Val(t.Storage))
@@ -1150,6 +1154,19 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalSize = storageStats.TrackedBytes
 	}
 
+	if pool := c.streamPool; pool != nil {
+		readers := pool.ReaderPositions(to.InfoHash())
+		apiReaders := make([]api.ReaderInfo, len(readers))
+		for i, ri := range readers {
+			apiReaders[i] = api.ReaderInfo{
+				End:      ri.End,
+				Position: ri.Position,
+				Start:    ri.Start,
+			}
+		}
+		resp.Readers = &apiReaders
+	}
+
 	return resp, nil
 }
 
@@ -1163,7 +1180,9 @@ func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.Torren
 	}
 
 	t := torrentToMetadata(to)
-	t.Magnet = *req.Magnet
+	if reqMagnet := utils.Val(req.Magnet); reqMagnet != "" {
+		t.Magnet = reqMagnet
+	}
 	t.Storage = req.Storage
 
 	if req.Category != nil {
@@ -1341,6 +1360,16 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 	return ts, nil
 }
 
+// hasTorrentReaders returns true if the torrent has any stream pool readers
+// (active or idle) or is being downloaded by the background downloader.
+// Idle readers are included because they can be resumed and should keep the
+// torrent alive — see stream.Pool.HasReaders for details.
+func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
+	isStreaming := c.streamPool != nil && c.streamPool.HasReaders(ih)
+	isDownloading := c.downloader != nil && c.downloader.IsActive(ih)
+	return isStreaming || isDownloading
+}
+
 func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.TorrentStorage) (*torrent.Torrent, error) {
 	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 && len(spec.InfoBytes) == 0 {
 		spec.InfoBytes = t.InfoBytes
@@ -1416,6 +1445,26 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 	return c.loadTorrentSpec(spec, storageType)
 }
 
+// calcReadaheadPct computes the percentage of maxMemory allocated for streaming readahead.
+// Scale:
+//
+//	<= 64 MiB: 50% (leaving 50% headroom for incoming piece downloads)
+//	   128 MiB: 60%
+//	   256 MiB: 70%
+//	>= 512 MiB: 75% (capped)
+func calcReadaheadPct(maxMemory int64) int {
+	if maxMemory >= 512*1024*1024 {
+		return 75
+	} else if maxMemory >= 256*1024*1024 {
+		return 70 + int(float64(maxMemory-256*1024*1024)/float64(256*1024*1024)*5)
+	} else if maxMemory >= 128*1024*1024 {
+		return 60 + int(float64(maxMemory-128*1024*1024)/float64(128*1024*1024)*10)
+	} else if maxMemory > 64*1024*1024 {
+		return 50 + int(float64(maxMemory-64*1024*1024)/float64(64*1024*1024)*10)
+	}
+	return 50
+}
+
 // streamFile is the internal implementation for streaming a torrent file.
 // It can identify the file to stream by either a file path (string) or a file index (int).
 func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdentifier any) {
@@ -1424,6 +1473,10 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Ensure data downloading is permitted for this torrent (e.g. if it was previously
+	// paused or recovering from a transient state).
+	to.AllowDataDownload()
 
 	select {
 	case <-to.GotInfo():
@@ -1455,10 +1508,23 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
+	var isFileStorage bool
 	t, err := c.db.GetTorrent(ih)
-	if err == nil {
+	if err != nil {
+		if !errors.Is(err, database.ErrTorrentNotFound) {
+			c.logger.Error("failed to get torrent from database for streaming", "err", err, "hash", ih)
+		}
+		c.torrentTracker.mu.RLock()
+		if info, ok := c.torrentTracker.torrents[ih]; ok {
+			isFileStorage = info.storageType == api.File
+		} else if !errors.Is(err, database.ErrTorrentNotFound) {
+			c.logger.Warn("torrent not found in tracker fallback either, defaulting to memory storage", "hash", ih)
+		}
+		c.torrentTracker.mu.RUnlock()
+	} else {
+		isFileStorage = utils.Val(t.Storage) == api.File
 		go func() {
-			err := c.updateTorrent(r, ih, api.TorrentUpdate{
+			err := c.updateTorrent(ih, api.TorrentUpdate{
 				Files: &[]api.TorrentFileUpdate{
 					{
 						Path:   file.Path(),
@@ -1472,64 +1538,53 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		}()
 	}
 
-	reader := file.NewReader()
-	defer reader.Close()
-
-	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
-
-	if isFileStorage {
-		reader.SetReadahead(fileStorageReadahead)
-	} else {
-		c.mu.RLock()
-		readahead := int64(*c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100)
-		c.mu.RUnlock()
-		reader.SetReadahead(readahead)
+	c.mu.RLock()
+	pool := c.streamPool
+	c.mu.RUnlock()
+	if pool == nil {
+		api.HTTPError(w, "stream pool is unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
-	fs := gotorrentfs.New(to)
-
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = file.Path()
+	mode := stream.MemoryStorage
+	if isFileStorage {
+		mode = stream.FileStorage
+	}
+	reader, release, err := pool.Acquire(file, mode)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, stream.ErrPoolClosed) {
+			status = http.StatusServiceUnavailable
+		}
+		api.HTTPError(w, err.Error(), status)
+		return
+	}
+	defer release()
 
 	dlna.AddHeader(w, r)
-
-	var once sync.Once
-	decrement := func() {
-		once.Do(func() {
-			c.metrics.DecStreamingTorrents()
-			if c.downloader != nil {
-				c.downloader.RemoveStreaming(ih)
-			}
-		})
-	}
-	defer decrement()
-
-	go func() {
-		<-r.Context().Done()
-		decrement()
-	}()
 
 	c.metrics.IncStreamingTorrents()
 	if c.downloader != nil {
 		c.downloader.AddStreaming(ih)
 	}
+	defer func() {
+		c.metrics.DecStreamingTorrents()
+		if c.downloader != nil {
+			c.downloader.RemoveStreaming(ih)
+		}
+	}()
 
 	// For streaming endpoints, it is important to disable the read and write timeouts.
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
 
-	http.FileServerFS(fs).ServeHTTP(w, r2)
+	http.ServeContent(w, r, path.Base(file.Path()), time.Time{}, reader)
 }
 
-func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.TorrentUpdate) error {
-	c.mu.Lock()
-	c.posterOpMu.Lock()
-
+func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) error {
 	t, err := c.db.GetTorrent(ih)
 	if err != nil {
-		c.posterOpMu.Unlock()
-		c.mu.Unlock()
 		st := http.StatusInternalServerError
 		if errors.Is(err, database.ErrTorrentNotFound) {
 			st = http.StatusNotFound
@@ -1537,7 +1592,17 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 		return api.NewError(err.Error(), st)
 	}
 
-	var needsUpdate, needsDrop bool
+	c.mu.RLock()
+	fileStoragePath := c.settings.FileStoragePath
+	dlnaEnabled := *c.settings.EnableDlna
+	c.mu.RUnlock()
+
+	var (
+		needsUpdate bool
+		needsDrop   bool
+		infoBytes   []byte
+	)
+
 	if utils.Differ(t.Category, req.Category) {
 		needsUpdate = true
 		t.Category = req.Category
@@ -1572,9 +1637,7 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 
 	oldStorage := t.Storage
 	if utils.Differ(t.Storage, req.Storage) {
-		if utils.Val(req.Storage) == api.File && (c.settings.FileStoragePath == nil || *c.settings.FileStoragePath == "") {
-			c.posterOpMu.Unlock()
-			c.mu.Unlock()
+		if utils.Val(req.Storage) == api.File && (fileStoragePath == nil || *fileStoragePath == "") {
 			return api.NewError("file storage is not configured", http.StatusBadRequest)
 		}
 		needsUpdate = true
@@ -1582,22 +1645,28 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 		t.Storage = req.Storage
 
 		if utils.Val(t.Storage) == api.File {
-			if len(t.InfoBytes) == 0 {
+			infoBytes = t.InfoBytes
+			if len(infoBytes) == 0 {
 				if clientTo, ok := c.client.Torrent(ih); ok && clientTo.Info() != nil {
-					t.InfoBytes = clientTo.Metainfo().InfoBytes
+					infoBytes = clientTo.Metainfo().InfoBytes
 				}
 			}
-			to, err := c.loadTorrent(t.Magnet, api.File)
-			if err != nil {
-				return api.NewError(err.Error(), http.StatusInternalServerError)
+			if len(infoBytes) == 0 {
+				to, err := c.loadTorrent(t.Magnet, api.File)
+				if err != nil {
+					return api.NewError(err.Error(), http.StatusInternalServerError)
+				}
+				select {
+				case <-to.GotInfo():
+					meta := to.Metainfo()
+					infoBytes = meta.InfoBytes
+				case <-time.After(gotInfoTimeout):
+					to.Drop()
+					<-to.Closed()
+					return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+				}
 			}
-			select {
-			case <-to.GotInfo():
-				meta := to.Metainfo()
-				t.InfoBytes = meta.InfoBytes
-			case <-time.After(gotInfoTimeout):
-				return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
-			}
+			t.InfoBytes = infoBytes
 		} else {
 			t.InfoBytes = nil
 		}
@@ -1609,22 +1678,20 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 	}
 
 	if !needsUpdate {
-		c.posterOpMu.Unlock()
-		c.mu.Unlock()
 		return nil
 	}
 
 	t.UpdatedAt = utils.Ptr(time.Now())
-	if err := c.db.UpdateTorrent(t); err != nil {
-		c.posterOpMu.Unlock()
-		c.mu.Unlock()
-		return api.NewError(fmt.Sprintf("failed to update torrent with hash %s", ih.HexString()), http.StatusInternalServerError)
-	}
 
-	dlnaEnabled := *c.settings.EnableDlna
-
+	c.mu.Lock()
+	c.posterOpMu.Lock()
+	err = c.db.UpdateTorrent(t)
 	c.posterOpMu.Unlock()
 	c.mu.Unlock()
+
+	if err != nil {
+		return api.NewError(fmt.Sprintf("failed to update torrent with hash %s", ih.HexString()), http.StatusInternalServerError)
+	}
 
 	if needsDrop {
 		if to, ok := c.client.Torrent(ih); ok {
@@ -1634,8 +1701,8 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 	}
 
 	if utils.Val(oldStorage) == api.File && utils.Val(t.Storage) == api.Memory {
-		if runtime.GOOS != "windows" && c.settings.FileStoragePath != nil && *c.settings.FileStoragePath != "" {
-			torrentStoragePath := filepath.Join(*c.settings.FileStoragePath, t.Name)
+		if runtime.GOOS != "windows" && fileStoragePath != nil && *fileStoragePath != "" {
+			torrentStoragePath := filepath.Join(*fileStoragePath, t.Name)
 			if err := os.RemoveAll(torrentStoragePath); err != nil {
 				c.logger.Error("failed to delete torrent file storage", "path", torrentStoragePath, "error", err)
 			}
@@ -1706,10 +1773,6 @@ func nameOpt(names ...string) func([]*api.Torrent) []*api.Torrent {
 
 		return opted
 	}
-}
-
-func magnetURIfromHash(ih metainfo.Hash) string {
-	return "magnet:?xt=urn:btih:" + ih.HexString()
 }
 
 func torrentToMetadata(to *torrent.Torrent) *api.Torrent {
