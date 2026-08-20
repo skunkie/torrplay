@@ -726,7 +726,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 		c.runtimeConfig.configureClient(clientConfig)
 	}
 
-	storageClient := memstorage.NewClient(*settings.MaxMemory, logger)
+	storageClient := memstorage.New(*settings.MaxMemory, logger)
 	clientConfig.DefaultStorage = storageClient
 
 	client, err := torrent.NewClient(clientConfig)
