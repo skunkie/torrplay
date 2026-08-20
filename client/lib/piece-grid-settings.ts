@@ -10,5 +10,6 @@ export const pieceGridSettings = {
     borderColor: '#d1d5db',
     incompleteColor: 'transparent',
     borderWidth: 1,
+    readerColor: '#f59e0b',
   },
 };

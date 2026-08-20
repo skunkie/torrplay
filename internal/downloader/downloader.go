@@ -77,6 +77,14 @@ func (d *Downloader) hasStreamings() bool {
 	return len(d.streamings) > 0
 }
 
+// IsActive returns true if the torrent is currently being downloaded or streamed.
+func (d *Downloader) IsActive(hash metainfo.Hash) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, isDownloading := d.downloading[hash]
+	return isDownloading || d.streamings[hash] > 0
+}
+
 // Start starts the background downloader.
 func (d *Downloader) Start() {
 	d.mu.Lock()

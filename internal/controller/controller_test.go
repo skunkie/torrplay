@@ -33,6 +33,7 @@ import (
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/utils"
+	"github.com/torrplay/torrplay/pkg/stream"
 )
 
 var (
@@ -160,6 +161,7 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 			os.Remove(postersDBPath)
 		})
 	}
+	t.Cleanup(cleanup)
 
 	return ctrl, cleanup
 }
@@ -231,6 +233,9 @@ func TestAddTorrentFromFile(t *testing.T) {
 	var result api.Torrent
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
 	assert.Equal(t, metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10"), result.Hash)
+
+	_, ok := ctrl.client.Torrent(result.Hash)
+	assert.False(t, ok, "torrent should be dropped from client when not streaming")
 }
 
 func TestAddInvalidTorrent(t *testing.T) {
@@ -725,8 +730,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 		},
 	}
 
-	dummyReq := httptest.NewRequest(http.MethodPatch, "/", nil)
-	err := ctrl.updateTorrent(dummyReq, ih, updateReq)
+	err := ctrl.updateTorrent(ih, updateReq)
 	require.NoError(t, err)
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -753,7 +757,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 		},
 	}
 
-	err = ctrl.updateTorrent(dummyReq, ih, updateReq)
+	err = ctrl.updateTorrent(ih, updateReq)
 	require.NoError(t, err)
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -775,7 +779,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 		},
 	}
 
-	err = ctrl.updateTorrent(dummyReq, ih, updateReq)
+	err = ctrl.updateTorrent(ih, updateReq)
 	require.NoError(t, err)
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
@@ -1053,8 +1057,10 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, dbTorrent.InfoBytes, "InfoBytes should be saved for new torrent with file storage")
 
-	err = ctrl.db.DeleteTorrent(resp.Hash)
-	require.NoError(t, err)
+	delReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/torrents/%s", resp.Hash.HexString()), nil)
+	delW := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(delW, delReq)
+	require.Equal(t, http.StatusNoContent, delW.Code)
 
 	body, writer = createMultipartForm(t, sintelTorrentFile, map[string]string{
 		"storage": string(api.Memory),
@@ -1121,7 +1127,6 @@ func TestNewController(t *testing.T) {
 
 		assert.Equal(t, "TorrPlay", *ctrl.settings.FriendlyName)
 		assert.Equal(t, 8090, *ctrl.settings.HTTPServerPort)
-		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
 		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
@@ -1165,8 +1170,6 @@ func TestNewController(t *testing.T) {
 
 		assert.Equal(t, "CustomTorrPlay", *ctrl.settings.FriendlyName)
 		assert.Equal(t, 9999, *ctrl.settings.HTTPServerPort)
-		// Missing fields filled from defaults
-		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
 		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
@@ -1213,4 +1216,149 @@ func TestUpdateSettingsPreservesSecrets(t *testing.T) {
 	udnAfter, err := ctrl.db.GetDLNAUDN()
 	require.NoError(t, err)
 	assert.Equal(t, udnBefore, udnAfter)
+}
+
+func TestController_Shutdown(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	// Calling Shutdown multiple times should not panic
+	require.NotPanics(t, func() {
+		ctrl.Shutdown()
+		ctrl.Shutdown()
+	})
+}
+
+func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	primeSampleMetadata(t, ctrl, ih)
+	magnet := samples[ih]
+	req := api.TorrentAdd{Magnet: &magnet}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// Mark the torrent expired in the tracker
+	ctrl.torrentTracker.mu.Lock()
+	ctrl.torrentTracker.torrents[ih] = torrentInfo{
+		lastUsedAt:  time.Now().Add(-4 * time.Hour),
+		storageType: api.Memory,
+	}
+	ctrl.torrentTracker.mu.Unlock()
+
+	// Simulate an active streaming reader in streamPool
+	primeSampleMetadata(t, ctrl, ih)
+	to, err := ctrl.addTorrentByHash(ih)
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	file := to.Files()[0]
+	ctrl.streamPool.SetReadaheadBudget(1024 * 1024)
+	_, release, err := ctrl.streamPool.Acquire(file, stream.MemoryStorage)
+	require.NoError(t, err)
+	defer release()
+
+	// Trigger cleanup
+	ctrl.cleanupExpiredTorrents()
+
+	// The torrent should NOT have been removed because of the active reader
+	ctrl.torrentTracker.mu.RLock()
+	info, exists := ctrl.torrentTracker.torrents[ih]
+	ctrl.torrentTracker.mu.RUnlock()
+
+	assert.True(t, exists, "active torrent should not be dropped during cleanup")
+	assert.True(t, time.Since(info.lastUsedAt) < 1*time.Minute, "lastUsedAt should have been refreshed")
+}
+
+func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = nil
+	})
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	primeSampleMetadata(t, ctrl, ih)
+	magnet := samples[ih]
+	req := api.TorrentAdd{Magnet: &magnet}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// Attempt to switch to File storage with unconfigured path
+	updateReq := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+	rr = testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Verify that controller is not deadlocked and can handle subsequent requests
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUpdateTorrentUnlocksWhenStorageSwitchTimesOut(t *testing.T) {
+	runtimeConfig := testControllerRuntimeConfig()
+	runtimeConfig.gotInfoTimeout = 100 * time.Millisecond
+
+	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig, func(c *Controller) {
+		c.settings.FileStoragePath = utils.Ptr(t.TempDir())
+	})
+	defer cleanup()
+
+	// Add a dummy torrent directly into the database with an unresolvable magnet link (empty InfoBytes)
+	deadHash := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+	deadMagnet := "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=DeadTorrent"
+	err := ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash:    deadHash,
+			Name:    "DeadTorrent",
+			Magnet:  deadMagnet,
+			Storage: utils.Ptr(api.Memory),
+		},
+	})
+	require.NoError(t, err)
+
+	// Attempt to update storage from Memory to File - this will trigger loadTorrent and time out on <-to.GotInfo()
+	updateReq := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+	rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", deadHash)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
+
+	// Verify that controller is not deadlocked and can handle subsequent requests
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	rr = testutil.NewRequest().Get("/api/v1/torrents").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestCalcReadaheadPct(t *testing.T) {
+	tests := []struct {
+		name      string
+		maxMemory int64
+		want      int
+	}{
+		{"below 64MB", 32 * 1024 * 1024, 50},
+		{"exactly 64MB", 64 * 1024 * 1024, 50},
+		{"midway 64-128MB (96MB)", 96 * 1024 * 1024, 55},
+		{"boundary 128MB - 1", 128*1024*1024 - 1, 59},
+		{"exactly 128MB", 128 * 1024 * 1024, 60},
+		{"midway 128-256MB (192MB)", 192 * 1024 * 1024, 65},
+		{"boundary 256MB - 1", 256*1024*1024 - 1, 69},
+		{"exactly 256MB", 256 * 1024 * 1024, 70},
+		{"midway 256-512MB (384MB)", 384 * 1024 * 1024, 72},
+		{"boundary 512MB - 1", 512*1024*1024 - 1, 74},
+		{"exactly 512MB", 512 * 1024 * 1024, 75},
+		{"1GB", 1024 * 1024 * 1024, 75},
+		{"2GB", 2048 * 1024 * 1024, 75},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calcReadaheadPct(tt.maxMemory)
+			assert.Equal(t, tt.want, got, "maxMemory = %d", tt.maxMemory)
+		})
+	}
 }
