@@ -60,8 +60,10 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 			_, err = c.createTorrentInDBLocked(to, req)
 			c.mu.Unlock()
 
-			to.Drop()
-			<-to.Closed()
+			if !c.hasTorrentReaders(to.InfoHash()) {
+				to.Drop()
+				<-to.Closed()
+			}
 
 			if err != nil {
 				var apiErr api.Error
@@ -127,8 +129,10 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 				_, err = c.createTorrentInDBLocked(to, req)
 				c.mu.Unlock()
 
-				to.Drop()
-				<-to.Closed()
+				if !c.hasTorrentReaders(to.InfoHash()) {
+					to.Drop()
+					<-to.Closed()
+				}
 
 				if err != nil {
 					var apiErr api.Error

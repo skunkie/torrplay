@@ -59,18 +59,35 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		api.HTTPError(w, "torrent has no pieces cached yet", http.StatusBadRequest)
 		return
 	}
-	resp := api.TSCacheResponse{
-		Capacity:     info.TrackedBytes,
-		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
-		PiecesCount:  info.TotalPieces,
-		PiecesLength: info.Pieces[0].SizeBytes,
-		Readers: []api.TSReaderInfo{
+	c.mu.RLock()
+	pool := c.streamPool
+	c.mu.RUnlock()
+
+	var apiReaders []api.TSReaderInfo
+	if pool != nil {
+		readers := pool.ReaderPositions(ih)
+		apiReaders = make([]api.TSReaderInfo, len(readers))
+		for i, ri := range readers {
+			apiReaders[i] = api.TSReaderInfo{Start: ri.Start, Reader: ri.Position, End: ri.End}
+		}
+	}
+	if len(apiReaders) == 0 {
+		// Fallback: if no active readers, use the full piece range.
+		apiReaders = []api.TSReaderInfo{
 			{
 				Reader: info.Pieces[0].Index,
 				Start:  info.Pieces[0].Index,
 				End:    info.Pieces[len(info.Pieces)-1].Index,
 			},
-		},
+		}
+	}
+
+	resp := api.TSCacheResponse{
+		Capacity:     info.TrackedBytes,
+		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
+		PiecesCount:  info.TotalPieces,
+		PiecesLength: info.Pieces[0].SizeBytes,
+		Readers:      apiReaders,
 	}
 
 	for _, piece := range info.Pieces {
@@ -134,7 +151,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 			api.HTTPError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		magnetStr = magnetURIfromHash(ih)
+		magnetStr = utils.MagnetURIFromHash(ih)
 	}
 
 	if ih.IsZero() {
@@ -157,6 +174,8 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 		select {
 		case <-to.GotInfo():
 		case <-time.After(gotInfoTimeout):
+			to.Drop()
+			<-to.Closed()
 			return
 		}
 
@@ -173,6 +192,8 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 		select {
 		case <-to.GotInfo():
 		case <-time.After(gotInfoTimeout):
+			to.Drop()
+			<-to.Closed()
 			api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 			return
 		}
@@ -209,7 +230,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 				api.HTTPError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			magnet = utils.Ptr(magnetURIfromHash(ih))
+			magnet = utils.Ptr(utils.MagnetURIFromHash(ih))
 		}
 	}
 
@@ -242,11 +263,13 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == api.TSTorrentRequestActionAdd {
-		var code int
-		magnet, code, err = c.parseLink(r.Context(), req.Link)
-		if err != nil {
-			api.HTTPError(w, err.Error(), code)
-			return
+		if utils.Val(req.Link) != "" {
+			var code int
+			magnet, code, err = c.parseLink(r.Context(), req.Link)
+			if err != nil {
+				api.HTTPError(w, err.Error(), code)
+				return
+			}
 		}
 	}
 
@@ -266,13 +289,13 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-to.GotInfo():
 		case <-time.After(gotInfoTimeout):
+			to.Drop()
+			<-to.Closed()
 			api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 			return
 		}
 
-		var needsDrop bool
 		if req.Action == api.TSTorrentRequestActionAdd && utils.Val(req.SaveToDB) {
-			needsDrop = true
 			addTorrentReq := api.TorrentAdd{
 				Category: req.Category,
 				Magnet:   magnet,
@@ -303,10 +326,12 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 
 		resp := c.buildTSTorrentResponse(t, to)
 
-		if needsDrop {
-			to.Drop()
-			<-to.Closed()
-			c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+		if req.Action == api.TSTorrentRequestActionAdd && utils.Val(req.SaveToDB) {
+			if !c.hasTorrentReaders(to.InfoHash()) {
+				to.Drop()
+				<-to.Closed()
+				c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -373,6 +398,8 @@ func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
 	select {
 	case <-to.GotInfo():
 	case <-time.After(gotInfoTimeout):
+		to.Drop()
+		<-to.Closed()
 		api.HandleError(w, api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout))
 		return
 	}
@@ -435,7 +462,7 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := c.updateTorrent(r, ih, api.TorrentUpdate{
+		if err := c.updateTorrent(ih, api.TorrentUpdate{
 			Files: &[]api.TorrentFileUpdate{
 				{
 					Path:   t.Files[index].Path,
@@ -543,7 +570,7 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 
 func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int, error) {
 	err := errors.New("invalid link")
-	if link == nil || *link == "" {
+	if utils.Val(link) == "" {
 		return nil, http.StatusBadRequest, err
 	}
 	var magnet string
@@ -559,7 +586,7 @@ func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int,
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		magnet = magnetURIfromHash(ih)
+		magnet = utils.MagnetURIFromHash(ih)
 	case "http", "https":
 		resp, err := c.httpClient.Get(ctx, *link)
 		if err != nil {
@@ -678,7 +705,6 @@ func tSUploadTorrentMiddleware(next http.Handler) http.Handler {
 				if err != nil {
 					continue
 				}
-				defer file.Close()
 
 				h := make(textproto.MIMEHeader)
 				disposition := fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileHeader.Filename)
@@ -687,10 +713,12 @@ func tSUploadTorrentMiddleware(next http.Handler) http.Handler {
 
 				part, err := writer.CreatePart(h)
 				if err != nil {
+					_ = file.Close()
 					continue
 				}
 
 				_, _ = io.Copy(part, file)
+				_ = file.Close()
 			}
 		}
 

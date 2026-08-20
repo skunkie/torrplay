@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -99,4 +100,10 @@ func TestAddTrackersToSpec(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMagnetURIFromHash(t *testing.T) {
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	expected := "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10"
+	assert.Equal(t, expected, MagnetURIFromHash(ih))
 }
