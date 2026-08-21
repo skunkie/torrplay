@@ -44,6 +44,7 @@ import (
 	"github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 	"github.com/torrplay/torrplay/web"
 	"golang.org/x/time/rate"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -114,6 +115,7 @@ type Controller struct {
 	settings            *api.Settings
 	startedAt           time.Time
 	storageClient       *memstorage.Client
+	streamPool          *stream.Pool
 	torrentTracker      torrentTracker
 	trackers            [][]string
 
@@ -536,6 +538,9 @@ func (c *Controller) Shutdown() {
 	close(c.posterCleanupDone)
 
 	_ = c.dlna.Stop()
+	if c.streamPool != nil {
+		c.streamPool.Close()
+	}
 	_ = c.storageClient.Close()
 	if c.pieceCompletion != nil {
 		_ = c.pieceCompletion.Close()
@@ -641,6 +646,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	c.mu.RLock()
 	oldClient := c.client
 	oldStorageClient := c.storageClient
+	oldPool := c.streamPool
 	settings := c.settings
 	logger := c.logger
 	isReconfiguring := c.downloader != nil
@@ -670,6 +676,11 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	if oldStorageClient != nil {
 		_ = oldStorageClient.Close()
 		<-oldStorageClient.Closed()
+	}
+
+	// Close old stream pool.
+	if oldPool != nil {
+		oldPool.Close()
 	}
 
 	clientConfig := torrent.NewDefaultClientConfig()
@@ -702,9 +713,25 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 		return fmt.Errorf("failed to initiate torrent client: %w", err)
 	}
 
+	// Create new stream pool.
+	// Registry: storageClient protects actively-read pieces from eviction
+	// by registering readahead windows with the storage layer.
+	pool := stream.New(stream.Config{
+		Registry:             storageClient,
+		Logger:               logger,
+		IdleTimeout:          30 * time.Second,
+		MaxIdleTime:          5 * time.Minute,
+		FileStorageReadahead: fileStorageReadahead,
+		MemoryPressureFunc: func() float64 {
+			stats := storageClient.GetMemoryStats()
+			return float64(stats.UsedMemory) / float64(stats.MaxMemory)
+		},
+	})
+
 	c.mu.Lock()
 	c.client = client
 	c.storageClient = storageClient
+	c.streamPool = pool
 	if isReconfiguring {
 		c.downloader.Stop()
 		c.trackers = newTrackers

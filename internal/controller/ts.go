@@ -59,18 +59,35 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		api.HTTPError(w, "torrent has no pieces cached yet", http.StatusBadRequest)
 		return
 	}
-	resp := api.TSCacheResponse{
-		Capacity:     info.TotalSize,
-		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
-		PiecesCount:  info.TotalPieces,
-		PiecesLength: info.Pieces[0].Size,
-		Readers: []api.TSReaderInfo{
+	c.mu.RLock()
+	pool := c.streamPool
+	c.mu.RUnlock()
+
+	var apiReaders []api.TSReaderInfo
+	if pool != nil {
+		readers := pool.ReaderPositions(ih)
+		apiReaders = make([]api.TSReaderInfo, len(readers))
+		for i, ri := range readers {
+			apiReaders[i] = api.TSReaderInfo{Start: ri.Start, Reader: ri.Position, End: ri.End}
+		}
+	}
+	if len(apiReaders) == 0 {
+		// Fallback: if no active readers, use the full piece range.
+		apiReaders = []api.TSReaderInfo{
 			{
 				Reader: info.Pieces[0].Index,
 				Start:  info.Pieces[0].Index,
 				End:    info.Pieces[len(info.Pieces)-1].Index,
 			},
-		},
+		}
+	}
+
+	resp := api.TSCacheResponse{
+		Capacity:     info.TotalSize,
+		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
+		PiecesCount:  info.TotalPieces,
+		PiecesLength: info.Pieces[0].Size,
+		Readers:      apiReaders,
 	}
 
 	for _, piece := range info.Pieces {

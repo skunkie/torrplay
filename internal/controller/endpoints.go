@@ -25,7 +25,6 @@ import (
 	"sync"
 	"time"
 
-	gotorrentfs "github.com/ajnavarro/go-torrent-fs"
 	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -1134,6 +1133,19 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalSize = storageStats.TotalSize
 	}
 
+	if pool := c.streamPool; pool != nil {
+		readers := pool.ReaderPositions(to.InfoHash())
+		apiReaders := make([]api.ReaderInfo, len(readers))
+		for i, ri := range readers {
+			apiReaders[i] = api.ReaderInfo{
+				End:      ri.End,
+				Position: ri.Position,
+				Start:    ri.Start,
+			}
+		}
+		resp.Readers = &apiReaders
+	}
+
 	return resp, nil
 }
 
@@ -1408,6 +1420,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	to.AllowDataDownload()
 
 	select {
 	case <-to.GotInfo():
@@ -1456,24 +1469,15 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		}()
 	}
 
-	reader := file.NewReader()
-	defer reader.Close()
-
 	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
 
-	if isFileStorage {
-		reader.SetReadahead(fileStorageReadahead)
-	} else {
-		c.mu.RLock()
-		readahead := int64(*c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100)
-		c.mu.RUnlock()
-		reader.SetReadahead(readahead)
-	}
+	c.mu.RLock()
+	totalPool := int64(*c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100)
+	pool := c.streamPool
+	c.mu.RUnlock()
 
-	fs := gotorrentfs.New(to)
-
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = file.Path()
+	reader, release := pool.Acquire(context.Background(), ih, file, isFileStorage, totalPool)
+	defer release()
 
 	dlna.AddHeader(w, r)
 
@@ -1503,7 +1507,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
 
-	http.FileServerFS(fs).ServeHTTP(w, r2)
+	http.ServeContent(w, r, path.Base(file.Path()), time.Time{}, reader)
 }
 
 func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.TorrentUpdate) error {
