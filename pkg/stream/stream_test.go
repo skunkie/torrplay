@@ -866,3 +866,68 @@ func TestPool_MaxReadersPerTorrent_SingleEvictionLoop(t *testing.T) {
 		t.Fatalf("expected 2 readers (cap soft when no idle), got %d", count)
 	}
 }
+
+func TestPool_ReadaheadRebalance_OnRelease(t *testing.T) {
+	p := New(Config{
+		Logger: testLogger(),
+	})
+	ih := metainfo.Hash{5}
+
+	sr1 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 1, rah: 500, isFileStorage: false, readaheadPool: 1000}
+	sr2 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 2, rah: 500, isFileStorage: false, readaheadPool: 1000}
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr1
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 2}] = sr2
+
+	p.refreshReadaheadLocked(1000)
+
+	if sr1.rah != 500 || sr2.rah != 500 {
+		t.Fatalf("expected both readers at 500, got sr1=%d sr2=%d", sr1.rah, sr2.rah)
+	}
+
+	sr1.active = false
+	p.refreshReadaheadLocked(1000)
+
+	if sr2.rah != 1000 {
+		t.Fatalf("expected sr2 to get full pool=1000 after sr1 released, got %d", sr2.rah)
+	}
+	if sr1.rah != 500 {
+		t.Fatalf("expected sr1 readahead unchanged at 500 (idle), got %d", sr1.rah)
+	}
+}
+
+func TestPool_ReadaheadRebalance_FileStorageExcluded(t *testing.T) {
+	p := New(Config{
+		Logger: testLogger(),
+	})
+	ih := metainfo.Hash{6}
+
+	sr1 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 1, rah: 0, isFileStorage: true, readaheadPool: 1000}
+	sr2 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 2, rah: 0, isFileStorage: false, readaheadPool: 1000}
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr1
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 2}] = sr2
+
+	p.refreshReadaheadLocked(1000)
+
+	if sr2.rah != 1000 {
+		t.Fatalf("expected sr2 to get full pool=1000 (file-storage excluded), got %d", sr2.rah)
+	}
+	if sr1.rah != 0 {
+		t.Fatalf("expected sr1 readahead unchanged at 0, got %d", sr1.rah)
+	}
+}
+
+func TestPool_ReadaheadRebalance_NoRebalanceWhenZero(t *testing.T) {
+	p := New(Config{
+		Logger: testLogger(),
+	})
+	ih := metainfo.Hash{7}
+
+	sr := &streamReader{active: true, hash: ih, filePath: "f", readerID: 1, rah: 500, isFileStorage: false, readaheadPool: 0}
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr
+
+	p.release(ih, "f", 1)
+
+	if sr.rah != 500 {
+		t.Fatalf("expected readahead unchanged at 500 when ReadaheadPool is 0, got %d", sr.rah)
+	}
+}

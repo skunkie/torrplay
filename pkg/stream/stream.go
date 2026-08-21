@@ -150,11 +150,12 @@ type streamReader struct {
 	// lastOffset is the last byte offset reported by the onOffsetChange
 	// callback. Updated under pool.mu only, so code holding pool.mu can
 	// read it without acquiring wrapper.mu.
-	lastOffset int64
-	rah        int64 // current readahead in bytes (updated by RefreshReadahead)
-	reader     torrent.Reader
-	readerID   uint64
-	wrapper    *readAtWrapper
+	lastOffset    int64
+	rah           int64 // current readahead in bytes (updated by RefreshReadahead)
+	readaheadPool int64 // total pool budget used to compute this reader's readahead
+	reader        torrent.Reader
+	readerID      uint64
+	wrapper       *readAtWrapper
 }
 
 // Pool manages a pool of stream readers keyed by (infohash, filePath, readerID).
@@ -231,6 +232,7 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 			}
 			sr.reader.SetReadahead(rah)
 			sr.rah = rah
+			sr.readaheadPool = totalReadaheadPool
 
 			// Reset lastOffset so RefreshReadahead/ReaderPositions don't
 			// read a stale offset from a previous activation.
@@ -302,6 +304,7 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 		hash:          ih,
 		isFileStorage: isFileStorage,
 		rah:           rah,
+		readaheadPool: totalReadaheadPool,
 		reader:        reader,
 		readerID:      readerID,
 		wrapper:       wrapper,
@@ -349,6 +352,10 @@ func (p *Pool) release(ih metainfo.Hash, filePath string, readerID uint64) {
 		slog.String("hash", ih.HexString()),
 		slog.String("file", filePath),
 		slog.Uint64("readerID", readerID))
+
+	if sr.readaheadPool > 0 {
+		p.refreshReadaheadLocked(sr.readaheadPool)
+	}
 }
 
 // evictOldestIdleLocked removes the idle reader with the oldest idleSince
@@ -398,12 +405,10 @@ func (p *Pool) countReadersLocked(ih metainfo.Hash, filePath string) int {
 	return count
 }
 
-// RefreshReadahead recalculates and applies readahead for all active readers.
+// refreshReadaheadLocked recalculates and applies readahead for all active readers.
 // File-storage readers keep their fixed readahead and are never divided.
-func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+// Must be called with p.mu held.
+func (p *Pool) refreshReadaheadLocked(totalReadaheadPool int64) {
 	rah := p.computeReadahead(totalReadaheadPool)
 
 	for key, sr := range p.readers {
@@ -423,6 +428,14 @@ func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
 	p.logger.Debug("refreshed readahead",
 		slog.Int64("totalPool", totalReadaheadPool),
 		slog.Int64("perReader", rah))
+}
+
+// RefreshReadahead recalculates and applies readahead for all active readers.
+// File-storage readers keep their fixed readahead and are never divided.
+func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshReadaheadLocked(totalReadaheadPool)
 }
 
 // computeReadahead divides the total pool by the number of active memory
