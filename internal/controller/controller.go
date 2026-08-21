@@ -41,6 +41,7 @@ import (
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/piececompletion"
+	"github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/web"
@@ -149,11 +150,24 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	dbSettings, err := dbClient.GetSettings()
 	if err != nil {
-		return nil, err
+		if errors.Is(err, database.ErrSettingsNotFound) {
+			def := settings.Default()
+			dbSettings = database.FromAPISettings(&def)
+			if err := dbClient.UpdateSettings(dbSettings); err != nil {
+				return nil, fmt.Errorf("failed to save default settings: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("failed to get settings: %w", err)
+		}
 	}
 
-	settings := database.ToAPISettings(dbSettings)
-	logging.DefaultStore.Resize(utils.Val(settings.LogStoreSize))
+	appSettings := database.ToAPISettings(dbSettings)
+	if settings.Merge(appSettings, settings.Default()) {
+		if err := dbClient.UpdateSettings(database.FromAPISettings(appSettings)); err != nil {
+			return nil, fmt.Errorf("failed to update default settings: %w", err)
+		}
+	}
+	logging.DefaultStore.Resize(utils.Val(appSettings.LogStoreSize))
 
 	c := &Controller{
 		dataDir:           dataDir,
@@ -167,7 +181,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
-		settings:          settings,
+		settings:          appSettings,
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
 			cleanupDone: make(chan struct{}),
@@ -176,10 +190,10 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		},
 	}
 
-	c.logger = c.configureLogger(*settings.LogLevel, settings)
+	c.logger = c.configureLogger(*appSettings.LogLevel, appSettings)
 
 	var pc piececompletion.DeletablePieceCompletion
-	if fsp := utils.Val(settings.FileStoragePath); fsp != "" {
+	if fsp := utils.Val(appSettings.FileStoragePath); fsp != "" {
 		if _, err := os.Stat(fsp); os.IsNotExist(err) {
 			if err := os.MkdirAll(fsp, 0755); err != nil {
 				return nil, fmt.Errorf("failed to create file storage directory: %w", err)
@@ -208,8 +222,8 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.logger.Info(fmt.Sprintf("initializing TorrPlay with data directory: %s", c.dataDir))
 
-	if settings.TorrentTrackers != nil && len(*settings.TorrentTrackers) > 0 {
-		for _, tracker := range *settings.TorrentTrackers {
+	if c.settings.TorrentTrackers != nil && len(*c.settings.TorrentTrackers) > 0 {
+		for _, tracker := range *c.settings.TorrentTrackers {
 			c.trackers = append(c.trackers, strings.Split(tracker, ","))
 		}
 	}
@@ -229,14 +243,14 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(c.settings.FileStoragePath), c.trackers)
 
-	if *settings.EnableDlna {
+	if *c.settings.EnableDlna {
 		err = c.dlna.Start(*c.settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if *settings.EnableDownloader {
+	if *c.settings.EnableDownloader {
 		c.downloader.Start()
 	}
 
@@ -376,16 +390,16 @@ func (c *Controller) SetupRouter() *chi.Mux {
 func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 	return func(ctx context.Context, input *openapi3filter.AuthenticationInput) error {
 		c.mu.RLock()
-		settings := c.settings
+		currentSettings := c.settings
 		c.mu.RUnlock()
 
-		if !utils.Val(settings.Auth.Enabled) {
+		if !utils.Val(currentSettings.Auth.Enabled) {
 			return nil
 		}
 
-		authType := utils.Val(settings.Auth.Type)
-		username := utils.Val(settings.Auth.Username)
-		password := utils.Val(settings.Auth.Password)
+		authType := utils.Val(currentSettings.Auth.Type)
+		username := utils.Val(currentSettings.Auth.Username)
+		password := utils.Val(currentSettings.Auth.Password)
 
 		if username == "" || password == "" {
 			return errors.New("authentication not configured correctly")
@@ -655,15 +669,15 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	c.mu.RLock()
 	oldClient := c.client
 	oldStorageClient := c.storageClient
-	settings := c.settings
+	currentSettings := c.settings
 	logger := c.logger
 	isReconfiguring := c.downloader != nil
 	c.mu.RUnlock()
 
 	var newTrackers [][]string
 	if isReconfiguring {
-		if settings.TorrentTrackers != nil && len(*settings.TorrentTrackers) > 0 {
-			for _, tracker := range *settings.TorrentTrackers {
+		if currentSettings.TorrentTrackers != nil && len(*currentSettings.TorrentTrackers) > 0 {
+			for _, tracker := range *currentSettings.TorrentTrackers {
 				newTrackers = append(newTrackers, strings.Split(tracker, ","))
 			}
 		}
@@ -689,31 +703,31 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	}
 
 	clientConfig := torrent.NewDefaultClientConfig()
-	if settings.TorrentClient != nil {
-		clientConfig.NoDHT = utils.Val(settings.TorrentClient.DisableDHT)
-		clientConfig.DisableIPv6 = utils.Val(settings.TorrentClient.DisableIPv6)
-		clientConfig.DisablePEX = utils.Val(settings.TorrentClient.DisablePEX)
-		clientConfig.DisableTCP = utils.Val(settings.TorrentClient.DisableTCP)
-		clientConfig.DisableUTP = utils.Val(settings.TorrentClient.DisableUTP)
-		if limit := utils.Val(settings.TorrentClient.DownloadRateLimit); limit > 0 {
+	if currentSettings.TorrentClient != nil {
+		clientConfig.NoDHT = utils.Val(currentSettings.TorrentClient.DisableDHT)
+		clientConfig.DisableIPv6 = utils.Val(currentSettings.TorrentClient.DisableIPv6)
+		clientConfig.DisablePEX = utils.Val(currentSettings.TorrentClient.DisablePEX)
+		clientConfig.DisableTCP = utils.Val(currentSettings.TorrentClient.DisableTCP)
+		clientConfig.DisableUTP = utils.Val(currentSettings.TorrentClient.DisableUTP)
+		if limit := utils.Val(currentSettings.TorrentClient.DownloadRateLimit); limit > 0 {
 			clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(limit), 0)
 		}
-		clientConfig.EstablishedConnsPerTorrent = utils.Val(settings.TorrentClient.EstablishedConnsPerTorrent)
-		clientConfig.HeaderObfuscationPolicy.RequirePreferred = utils.Val(settings.TorrentClient.PreferHeaderObfuscation)
-		clientConfig.Seed = utils.Val(settings.TorrentClient.Seed)
-		clientConfig.TorrentPeersHighWater = utils.Val(settings.TorrentClient.TorrentPeersHighWater)
-		if limit := utils.Val(settings.TorrentClient.UploadRateLimit); limit > 0 {
+		clientConfig.EstablishedConnsPerTorrent = utils.Val(currentSettings.TorrentClient.EstablishedConnsPerTorrent)
+		clientConfig.HeaderObfuscationPolicy.RequirePreferred = utils.Val(currentSettings.TorrentClient.PreferHeaderObfuscation)
+		clientConfig.Seed = utils.Val(currentSettings.TorrentClient.Seed)
+		clientConfig.TorrentPeersHighWater = utils.Val(currentSettings.TorrentClient.TorrentPeersHighWater)
+		if limit := utils.Val(currentSettings.TorrentClient.UploadRateLimit); limit > 0 {
 			clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(limit), 0)
 		}
 	}
 	clientConfig.ExtendedHandshakeClientVersion = "qBittorrent/5.1.4"
 	clientConfig.ListenPort = 0
-	clientConfig.Slogger = c.configureLogger(clientLevel, settings)
+	clientConfig.Slogger = c.configureLogger(clientLevel, currentSettings)
 	if c.runtimeConfig.configureClient != nil {
 		c.runtimeConfig.configureClient(clientConfig)
 	}
 
-	storageClient := memstorage.NewClient(*settings.MaxMemory, logger)
+	storageClient := memstorage.NewClient(*currentSettings.MaxMemory, logger)
 	clientConfig.DefaultStorage = storageClient
 
 	client, err := torrent.NewClient(clientConfig)
@@ -727,8 +741,8 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	if isReconfiguring {
 		c.downloader.Stop()
 		c.trackers = newTrackers
-		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(settings.FileStoragePath), c.trackers)
-		if utils.Val(settings.EnableDownloader) {
+		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers)
+		if utils.Val(currentSettings.EnableDownloader) {
 			c.downloader.Start()
 		}
 	}
@@ -737,7 +751,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	return nil
 }
 
-func (c *Controller) configureLogger(level slog.Level, settings *api.Settings) *slog.Logger {
+func (c *Controller) configureLogger(level slog.Level, st *api.Settings) *slog.Logger {
 	var writer io.Writer = os.Stdout
 
 	if _, isService := os.LookupEnv("TORRPLAY_RUNNING_AS_SERVICE"); isService {
@@ -764,7 +778,7 @@ func (c *Controller) configureLogger(level slog.Level, settings *api.Settings) *
 		}
 	}
 
-	if *settings.LogFormat == api.JSON {
+	if *st.LogFormat == api.JSON {
 		handler = slog.NewJSONHandler(writer, slogOpts)
 	} else {
 		handler = slog.NewTextHandler(writer, slogOpts)

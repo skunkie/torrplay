@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -31,38 +30,8 @@ var _ DatabaseInterface = (*BBoltDB)(nil)
 var (
 	ErrTorrentExists    = errors.New("torrent already exists")
 	ErrTorrentNotFound  = errors.New("torrent not found")
+	ErrSettingsNotFound = errors.New("settings not found")
 	errBucketNotFound   = errors.New("bucket not found")
-	errSettingsNotFound = errors.New("settings not found")
-
-	defaultSettings = Settings{
-		Settings: api.Settings{
-			Auth:                &api.Auth{Enabled: utils.Ptr(false)},
-			EnableDlna:          utils.Ptr(false),
-			EnableDownloader:    utils.Ptr(false),
-			FileStoragePath:     utils.Ptr(""),
-			FriendlyName:        utils.Ptr("TorrPlay"),
-			HTTPServerPort:      utils.Ptr(8090),
-			LogFormat:           utils.Ptr(api.Text),
-			LogLevel:            utils.Ptr(slog.LevelInfo),
-			LogStoreSize:        utils.Ptr(100),
-			MaxMemory:           utils.Ptr(int64(64 * 1024 * 1024)),
-			ReadaheadPercentage: utils.Ptr(90),
-			TorrentClient: &api.TorrentClient{
-				DisableDHT:                 utils.Ptr(false),
-				DisableIPv6:                utils.Ptr(true),
-				DisablePEX:                 utils.Ptr(false),
-				DisableTCP:                 utils.Ptr(false),
-				DisableUTP:                 utils.Ptr(false),
-				DownloadRateLimit:          utils.Ptr(0),
-				EstablishedConnsPerTorrent: utils.Ptr(50),
-				PreferHeaderObfuscation:    utils.Ptr(false),
-				Seed:                       utils.Ptr(false),
-				TorrentPeersHighWater:      utils.Ptr(500),
-				UploadRateLimit:            utils.Ptr(0),
-			},
-			TorrentTrackers: utils.Ptr([]string{}),
-		},
-	}
 )
 
 type BBoltDB struct {
@@ -241,8 +210,8 @@ func (b *BBoltDB) getSettings(tx *bbolt.Tx) (*Settings, error) {
 	}
 
 	v := bucket.Get([]byte("settings"))
-	if v == nil {
-		return nil, errSettingsNotFound
+	if len(v) == 0 {
+		return nil, ErrSettingsNotFound
 	}
 
 	if err := json.Unmarshal(v, &s); err != nil {
@@ -253,134 +222,21 @@ func (b *BBoltDB) getSettings(tx *bbolt.Tx) (*Settings, error) {
 
 func (b *BBoltDB) GetSettings() (*Settings, error) {
 	var s *Settings
-	var needsUpdate bool
-
-	err := b.db.Update(func(tx *bbolt.Tx) error {
+	err := b.db.View(func(tx *bbolt.Tx) error {
 		var err error
 		s, err = b.getSettings(tx)
-		if err != nil {
-			if errors.Is(err, errSettingsNotFound) {
-				s = &defaultSettings
-				needsUpdate = true
-				return nil
-			}
-			return err
-		}
-
-		// Merge with default settings to ensure no nil pointers on missing values.
-		if s.Settings.Auth == nil {
-			needsUpdate = true
-			s.Settings.Auth = defaultSettings.Auth
-		}
-		if s.Settings.EnableDlna == nil {
-			needsUpdate = true
-			s.Settings.EnableDlna = defaultSettings.Settings.EnableDlna
-		}
-		if s.Settings.EnableDownloader == nil {
-			needsUpdate = true
-			s.Settings.EnableDownloader = defaultSettings.Settings.EnableDownloader
-		}
-		if s.Settings.FileStoragePath == nil {
-			needsUpdate = true
-			s.Settings.FileStoragePath = defaultSettings.Settings.FileStoragePath
-		}
-		if s.Settings.FriendlyName == nil {
-			needsUpdate = true
-			s.Settings.FriendlyName = defaultSettings.Settings.FriendlyName
-		}
-		if s.Settings.HTTPServerPort == nil {
-			needsUpdate = true
-			s.Settings.HTTPServerPort = defaultSettings.Settings.HTTPServerPort
-		}
-		if s.Settings.LogFormat == nil {
-			needsUpdate = true
-			s.Settings.LogFormat = defaultSettings.Settings.LogFormat
-		}
-		if s.Settings.LogLevel == nil {
-			needsUpdate = true
-			s.Settings.LogLevel = defaultSettings.Settings.LogLevel
-		}
-		if s.Settings.LogStoreSize == nil {
-			needsUpdate = true
-			s.Settings.LogStoreSize = defaultSettings.Settings.LogStoreSize
-		}
-		if s.Settings.MaxMemory == nil {
-			needsUpdate = true
-			s.Settings.MaxMemory = defaultSettings.Settings.MaxMemory
-		}
-		if s.Settings.ReadaheadPercentage == nil {
-			needsUpdate = true
-			s.Settings.ReadaheadPercentage = defaultSettings.Settings.ReadaheadPercentage
-		}
-		if s.Settings.TorrentClient == nil {
-			needsUpdate = true
-			s.Settings.TorrentClient = defaultSettings.Settings.TorrentClient
-		} else {
-			if s.Settings.TorrentClient.DisableDHT == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.DisableDHT = defaultSettings.Settings.TorrentClient.DisableDHT
-			}
-			if s.Settings.TorrentClient.DisableIPv6 == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.DisableIPv6 = defaultSettings.Settings.TorrentClient.DisableIPv6
-			}
-			if s.Settings.TorrentClient.DisablePEX == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.DisablePEX = defaultSettings.Settings.TorrentClient.DisablePEX
-			}
-			if s.Settings.TorrentClient.DisableTCP == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.DisableTCP = defaultSettings.Settings.TorrentClient.DisableTCP
-			}
-			if s.Settings.TorrentClient.DisableUTP == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.DisableUTP = defaultSettings.Settings.TorrentClient.DisableUTP
-			}
-			if s.Settings.TorrentClient.DownloadRateLimit == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.DownloadRateLimit = defaultSettings.Settings.TorrentClient.DownloadRateLimit
-			}
-			if s.Settings.TorrentClient.EstablishedConnsPerTorrent == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.EstablishedConnsPerTorrent = defaultSettings.Settings.TorrentClient.EstablishedConnsPerTorrent
-			}
-			if s.Settings.TorrentClient.PreferHeaderObfuscation == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.PreferHeaderObfuscation = defaultSettings.Settings.TorrentClient.PreferHeaderObfuscation
-			}
-			if s.Settings.TorrentClient.Seed == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.Seed = defaultSettings.Settings.TorrentClient.Seed
-			}
-			if s.Settings.TorrentClient.TorrentPeersHighWater == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.TorrentPeersHighWater = defaultSettings.Settings.TorrentClient.TorrentPeersHighWater
-			}
-			if s.Settings.TorrentClient.UploadRateLimit == nil {
-				needsUpdate = true
-				s.Settings.TorrentClient.UploadRateLimit = defaultSettings.Settings.TorrentClient.UploadRateLimit
-			}
-		}
-		if s.Settings.TorrentTrackers == nil {
-			needsUpdate = true
-			s.Settings.TorrentTrackers = defaultSettings.Settings.TorrentTrackers
-		}
-
-		if needsUpdate {
-			return b.updateSettings(tx, &s.Settings)
-		}
-
-		return nil
+		return err
 	})
-
 	if err != nil {
 		return nil, err
 	}
-
 	return s, nil
 }
 
 func (b *BBoltDB) UpdateSettings(s *Settings) error {
+	if s == nil {
+		return errors.New("settings cannot be nil")
+	}
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		return b.updateSettings(tx, &s.Settings)
 	})
@@ -392,13 +248,16 @@ func (b *BBoltDB) UpdateSettings(s *Settings) error {
 // and then overwriting the api.Settings part with the new values.
 // This preserves database-specific fields like DLNAUDN and JWTSecret.
 func (b *BBoltDB) updateSettings(tx *bbolt.Tx, s *api.Settings) error {
+	if s == nil {
+		return errors.New("settings cannot be nil")
+	}
 	bucket := tx.Bucket([]byte(settingsBucket))
 	if bucket == nil {
 		return errBucketNotFound
 	}
 
 	is, err := b.getSettings(tx)
-	if err != nil && !errors.Is(err, errSettingsNotFound) {
+	if err != nil && !errors.Is(err, ErrSettingsNotFound) {
 		return err
 	}
 
@@ -420,12 +279,12 @@ func (b *BBoltDB) GetDLNAUDN() (string, error) {
 	var udn string
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		s, err := b.getSettings(tx)
-		if err != nil && !errors.Is(err, errSettingsNotFound) {
+		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
 			return err
 		}
 
 		if s == nil {
-			s = &defaultSettings
+			s = &Settings{}
 		}
 
 		if s.DLNAUDN != "" {
@@ -454,12 +313,12 @@ func (b *BBoltDB) GetJWTSecret() (string, error) {
 	var secret string
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		s, err := b.getSettings(tx)
-		if err != nil && !errors.Is(err, errSettingsNotFound) {
+		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
 			return err
 		}
 
 		if s == nil {
-			s = &defaultSettings
+			s = &Settings{}
 		}
 
 		if s.JWTSecret != "" {
