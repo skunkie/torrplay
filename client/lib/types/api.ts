@@ -109,6 +109,12 @@ interface TorrentAdd {
   title?: string
 }
 
+interface ReaderInfo {
+  end: number,
+  position: number,
+  start: number
+}
+
 interface TorrentAddWithFile {
   file: File,
   poster?: string,
@@ -143,6 +149,7 @@ interface TorrentStats {
   memoryStats: MemoryStats,
   memoryUsagePercentage: number,
   pieces: PieceInfo[],
+  readers?: ReaderInfo[],
   totalPieces: number,
   totalSize: number
 }
@@ -165,6 +172,7 @@ export type {
   Auth,
   MemoryStats,
   PieceInfo,
+  ReaderInfo,
   Settings,
   SystemInfo,
   SystemMetrics,
