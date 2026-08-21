@@ -1491,6 +1491,11 @@ components:
           description: Array of all managed pieces with their current status.
           items:
             $ref: "#/components/schemas/PieceInfo"
+        readers:
+          type: array
+          items:
+            $ref: "#/components/schemas/ReaderInfo"
+          description: Active read stream positions for this torrent.
         total_pieces:
           type: integer
           format: int
@@ -1503,6 +1508,30 @@ components:
           description: Total size of all managed pieces in bytes.
           minimum: 0
           example: 104857600
+
+    ReaderInfo:
+      type: object
+      description: Active reader information.
+      required:
+        - position
+        - start
+        - end
+      properties:
+        position:
+          type: integer
+          description: Current reader piece index position.
+          minimum: 0
+          example: 12
+        start:
+          type: integer
+          description: Start piece index of the read window.
+          minimum: 0
+          example: 10
+        end:
+          type: integer
+          description: End piece index of the read window.
+          minimum: 0
+          example: 20
 
     TorrentStorage:
       type: string
