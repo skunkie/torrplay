@@ -14,17 +14,16 @@ import (
 // Default returns a new api.Settings populated with default application values.
 func Default() api.Settings {
 	return api.Settings{
-		Auth:                &api.Auth{Enabled: utils.Ptr(false)},
-		EnableDlna:          utils.Ptr(false),
-		EnableDownloader:    utils.Ptr(false),
-		FileStoragePath:     utils.Ptr(""),
-		FriendlyName:        utils.Ptr("TorrPlay"),
-		HTTPServerPort:      utils.Ptr(8090),
-		LogFormat:           utils.Ptr(api.Text),
-		LogLevel:            utils.Ptr(slog.LevelInfo),
-		LogStoreSize:        utils.Ptr(100),
-		MaxMemory:           utils.Ptr(int64(64 * 1024 * 1024)),
-		ReadaheadPercentage: utils.Ptr(90),
+		Auth:             &api.Auth{Enabled: utils.Ptr(false)},
+		EnableDlna:       utils.Ptr(false),
+		EnableDownloader: utils.Ptr(false),
+		FileStoragePath:  utils.Ptr(""),
+		FriendlyName:     utils.Ptr("TorrPlay"),
+		HTTPServerPort:   utils.Ptr(8090),
+		LogFormat:        utils.Ptr(api.Text),
+		LogLevel:         utils.Ptr(slog.LevelInfo),
+		LogStoreSize:     utils.Ptr(100),
+		MaxMemory:        utils.Ptr(int64(64 * 1024 * 1024)),
 		TorrentClient: &api.TorrentClient{
 			DisableDHT:                 utils.Ptr(false),
 			DisableIPv6:                utils.Ptr(true),
@@ -94,10 +93,6 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 	}
 	if target.MaxMemory == nil {
 		target.MaxMemory = defaults.MaxMemory
-		changed = true
-	}
-	if target.ReadaheadPercentage == nil {
-		target.ReadaheadPercentage = defaults.ReadaheadPercentage
 		changed = true
 	}
 	if target.TorrentTrackers == nil {

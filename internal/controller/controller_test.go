@@ -1220,7 +1220,6 @@ func TestNewController_SettingsBootstrapping(t *testing.T) {
 
 		assert.Equal(t, "TorrPlay", *ctrl.settings.FriendlyName)
 		assert.Equal(t, 8090, *ctrl.settings.HTTPServerPort)
-		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
 		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
@@ -1264,8 +1263,6 @@ func TestNewController_SettingsBootstrapping(t *testing.T) {
 
 		assert.Equal(t, "CustomTorrPlay", *ctrl.settings.FriendlyName)
 		assert.Equal(t, 9999, *ctrl.settings.HTTPServerPort)
-		// Missing fields filled from defaults
-		assert.Equal(t, 90, *ctrl.settings.ReadaheadPercentage)
 		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()

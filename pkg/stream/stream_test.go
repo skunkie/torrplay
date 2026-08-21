@@ -693,3 +693,176 @@ func TestReadAtWrapper_ConcurrentReadAt(t *testing.T) {
 		}
 	}
 }
+
+func TestPool_MaxReadersPerTorrent_DefaultsToTen(t *testing.T) {
+	p := New(Config{Logger: testLogger()})
+
+	if p.cfg.MaxReadersPerTorrent != 10 {
+		t.Fatalf("expected default 10, got %d", p.cfg.MaxReadersPerTorrent)
+	}
+}
+
+func TestPool_MaxReadersPerTorrent_EvictsIdle(t *testing.T) {
+	reg := &stubRegistry{}
+	p := New(Config{
+		Logger:               testLogger(),
+		Registry:             reg,
+		MaxReadersPerTorrent: 2,
+	})
+	ih := metainfo.Hash{1}
+
+	// Insert two idle readers for the same (hash, filePath).
+	for i := uint64(1); i <= 2; i++ {
+		key := readerKey{hash: ih, filePath: "f", readerID: i}
+		p.readers[key] = &streamReader{
+			active:    false,
+			hash:      ih,
+			filePath:  "f",
+			file:      &torrent.File{},
+			readerID:  i,
+			idleSince: time.Now().Add(time.Duration(i) * time.Minute),
+		}
+	}
+
+	// Force eviction — should remove readerID=1 (oldest idle).
+	p.evictOldestIdleLocked(ih, "f")
+
+	if _, ok := p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}]; ok {
+		t.Fatal("expected oldest idle reader (ID 1) to be evicted")
+	}
+	if _, ok := p.readers[readerKey{hash: ih, filePath: "f", readerID: 2}]; !ok {
+		t.Fatal("expected younger idle reader (ID 2) to remain")
+	}
+	if reg.clears != 1 {
+		t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clears)
+	}
+}
+
+func TestPool_MaxReadersPerTorrent_NoEvictionWhenOnlyActiveExist(t *testing.T) {
+	reg := &stubRegistry{}
+	p := New(Config{
+		Logger:               testLogger(),
+		Registry:             reg,
+		MaxReadersPerTorrent: 2,
+	})
+	ih := metainfo.Hash{2}
+
+	// Insert two *active* readers — no idle readers exist.
+	for i := uint64(10); i <= 11; i++ {
+		key := readerKey{hash: ih, filePath: "f", readerID: i}
+		p.readers[key] = &streamReader{
+			active:   true,
+			hash:     ih,
+			filePath: "f",
+			file:     &torrent.File{},
+			readerID: i,
+		}
+	}
+
+	// Force eviction — should return false since no idle readers exist.
+	evicted := p.evictOldestIdleLocked(ih, "f")
+
+	if evicted {
+		t.Fatal("expected false when no idle readers exist")
+	}
+	if len(p.readers) != 2 {
+		t.Fatal("expected no readers to be evicted (active readers are never killed)")
+	}
+	if reg.clears != 0 {
+		t.Fatalf("expected 0 ClearActiveRange calls, got %d", reg.clears)
+	}
+}
+
+func TestPool_MaxReadersPerTorrent_NoEvictWhenUnderCap(t *testing.T) {
+	reg := &stubRegistry{}
+	p := New(Config{
+		Logger:               testLogger(),
+		Registry:             reg,
+		MaxReadersPerTorrent: 5,
+	})
+	ih := metainfo.Hash{3}
+
+	// Insert 2 idle readers — eviction should work even when under cap.
+	for i := uint64(1); i <= 2; i++ {
+		key := readerKey{hash: ih, filePath: "f", readerID: i}
+		p.readers[key] = &streamReader{
+			active:    false,
+			hash:      ih,
+			filePath:  "f",
+			file:      &torrent.File{},
+			readerID:  i,
+			idleSince: time.Now().Add(time.Duration(i) * time.Minute),
+		}
+	}
+
+	p.evictOldestIdleLocked(ih, "f")
+
+	if len(p.readers) != 1 {
+		t.Fatalf("expected 1 reader after eviction, got %d", len(p.readers))
+	}
+	if reg.clears != 1 {
+		t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clears)
+	}
+}
+
+func TestPool_MaxReadersPerTorrent_ZeroUsesDefault(t *testing.T) {
+	p := New(Config{
+		Logger:               testLogger(),
+		MaxReadersPerTorrent: 0,
+	})
+
+	if p.cfg.MaxReadersPerTorrent != 10 {
+		t.Fatalf("expected 0 to default to 10, got %d", p.cfg.MaxReadersPerTorrent)
+	}
+}
+
+func TestPool_MaxReadersPerTorrent_NegativeDisablesCap(t *testing.T) {
+	p := New(Config{
+		Logger:               testLogger(),
+		MaxReadersPerTorrent: -1,
+	})
+
+	if p.cfg.MaxReadersPerTorrent != 0 {
+		t.Fatalf("expected -1 to disable the cap (0), got %d", p.cfg.MaxReadersPerTorrent)
+	}
+}
+
+func TestPool_MaxReadersPerTorrent_SingleEvictionLoop(t *testing.T) {
+	p := New(Config{
+		Logger:               testLogger(),
+		MaxReadersPerTorrent: 2,
+	})
+	ih := metainfo.Hash{4}
+
+	// Insert 1 idle + 2 active readers — cap is 2.
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = &streamReader{
+		active:    false,
+		hash:      ih,
+		filePath:  "f",
+		file:      &torrent.File{},
+		readerID:  1,
+		idleSince: time.Now(),
+	}
+	for i := uint64(2); i <= 3; i++ {
+		p.readers[readerKey{hash: ih, filePath: "f", readerID: i}] = &streamReader{
+			active:   true,
+			hash:     ih,
+			filePath: "f",
+			file:     &torrent.File{},
+			readerID: i,
+		}
+	}
+
+	// Evict loop: first iteration evicts idle reader, second iteration
+	// finds no idle readers and breaks (soft cap).
+	for p.countReadersLocked(ih, "f") >= p.cfg.MaxReadersPerTorrent {
+		if !p.evictOldestIdleLocked(ih, "f") {
+			break
+		}
+	}
+
+	count := p.countReadersLocked(ih, "f")
+	if count != 2 {
+		t.Fatalf("expected 2 readers (cap soft when no idle), got %d", count)
+	}
+}

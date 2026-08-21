@@ -722,6 +722,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 		IdleTimeout:          30 * time.Second,
 		MaxIdleTime:          5 * time.Minute,
 		FileStorageReadahead: fileStorageReadahead,
+		MaxReadersPerTorrent: 10,
 		MemoryPressureFunc: func() float64 {
 			stats := storageClient.GetMemoryStats()
 			return float64(stats.UsedMemory) / float64(stats.MaxMemory)

@@ -61,9 +61,10 @@
 //	func main() {
 //		pool := stream.New(stream.Config{
 //			FileStorageReadahead: 50 * 1024 * 1024, // 50 MB
-//			IdleTimeout:         30 * time.Second,
-//			Logger:              slog.Default(),
-//			Registry:            nil, // pass a storage.Client here to enable eviction protection
+//			IdleTimeout:          30 * time.Second,
+//			Logger:               slog.Default(),
+//			MaxReadersPerTorrent: 10,
+//			Registry:             nil, // pass a storage.Client here to enable eviction protection
 //		})
 //		defer pool.Close()
 //

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -771,9 +772,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reqSettings.FileStoragePath != nil {
 		newSettings.FileStoragePath = reqSettings.FileStoragePath
 	}
-	if reqSettings.ReadaheadPercentage != nil {
-		newSettings.ReadaheadPercentage = reqSettings.ReadaheadPercentage
-	}
 	if reqSettings.TorrentTrackers != nil {
 		newSettings.TorrentTrackers = reqSettings.TorrentTrackers
 	}
@@ -871,9 +869,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 		reconfigureTorrentClient = true
 		restartHTTPServer = true
-		saveSettings = true
-	}
-	if utils.Differ(oldSettings.ReadaheadPercentage, newSettings.ReadaheadPercentage) {
 		saveSettings = true
 	}
 	if !slices.Equal(utils.Val(oldSettings.TorrentTrackers), utils.Val(newSettings.TorrentTrackers)) {
@@ -1472,9 +1467,12 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
 
 	c.mu.RLock()
-	totalPool := int64(*c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100)
+	maxMemory := *c.settings.MaxMemory
 	pool := c.streamPool
 	c.mu.RUnlock()
+
+	readaheadPct := 70 + int(math.Min(20, float64(maxMemory)/1024/1024/1024*10))
+	totalPool := int64(maxMemory) * int64(readaheadPct) / 100
 
 	reader, release := pool.Acquire(context.Background(), ih, file, isFileStorage, totalPool)
 	defer release()

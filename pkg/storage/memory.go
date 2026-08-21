@@ -307,58 +307,91 @@ func (c *Client) GetPiecesInMemory(hash metainfo.Hash) []int {
 
 // GetTorrentMemoryStats returns statistics only about a torrent that the storage is actively managing.
 // This includes pieces that have been created (via ReadAt or WriteAt) and are being tracked.
+//
+// The returned stats are eventually consistent rather than atomic: maxMemory, usedMemory, and
+// piece-level fields (InMemorySize, TotalSize, etc.) are captured under separate lock acquisitions
+// to avoid holding c.mu.RLock() for the duration of piece iteration (which could starve writers
+// on torrents with thousands of pieces). Callers should treat the fields as a rough snapshot
+// suitable for progress bars and UI displays, not for assertions like InMemorySize <= UsedMemory.
+//
 // Returns error if the torrent doesn't exist.
 func (c *Client) GetTorrentMemoryStats(hash metainfo.Hash) (*TorrentMemoryStats, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 
 	// Check if torrent exists.
 	torrentState, exists := c.torrents[hash]
 	if !exists {
+		c.mu.RUnlock()
 		return nil, fmt.Errorf("torrent %s is not managed by storage", hash)
 	}
 
+	// Read torrentState fields under its own lock for consistent discipline.
+	// pieceHashes is write-once at OpenTorrent time and never mutated after,
+	// but we lock torrentState.mu here to match the pattern used by
+	// GetCompletedProgress and other callers, preventing future bugs if the
+	// invariant changes.
 	torrentState.mu.RLock()
-	defer torrentState.mu.RUnlock()
+	totalPieces := len(torrentState.pieceHashes)
+	torrentState.mu.RUnlock()
+
+	maxMemory := c.maxMemory
+	usedMemory := c.used
+
+	// Collect piece keys belonging to this torrent, then release the global lock
+	// before reading per-piece data. This prevents write starvation from
+	// allocateMemory, evictDownTo, touchPiece, and freeMemory.
+	pieceKeys := make([]pieceKey, 0, totalPieces)
+	for key := range c.pieces {
+		if key.hash == hash {
+			pieceKeys = append(pieceKeys, key)
+		}
+	}
+	c.mu.RUnlock()
 
 	info := &TorrentMemoryStats{
-		Pieces:      make([]PieceInfo, 0),
-		TotalPieces: len(torrentState.pieceHashes),
+		Pieces:      make([]PieceInfo, 0, len(pieceKeys)),
+		TotalPieces: totalPieces,
 	}
+	info.MemoryStats.MaxMemory = maxMemory
+	info.MemoryStats.UsedMemory = usedMemory
 
-	// Get memory stats.
-	info.MemoryStats.MaxMemory = c.maxMemory
-	info.MemoryStats.UsedMemory = c.used
-
-	// Iterate through all pieces and collect only those belonging to this torrent.
-	for key, pd := range c.pieces {
-		if key.hash == hash {
-			pd.mu.RLock()
-
-			pieceInfo := PieceInfo{
-				Index:    key.index,
-				Size:     pd.pieceSize,
-				Complete: pd.complete,
-				InMemory: pd.data != nil,
-			}
-
-			// Add to pieces list.
-			info.Pieces = append(info.Pieces, pieceInfo)
-
-			// Update totals.
-			info.TotalSize += pd.pieceSize
-
-			if pd.complete {
-				info.CompletedSize += pd.pieceSize
-			}
-
-			if pd.data != nil {
-				info.InMemory++
-				info.InMemorySize += int64(len(pd.data))
-			}
-
-			pd.mu.RUnlock()
+	// Acquire c.mu.RLock and pd.mu.RLock per-piece to read piece fields.
+	// The pd pointer remains valid even if the piece was concurrently evicted
+	// (Go's GC keeps the struct alive), and pd.mu.RLock() prevents a torn
+	// read of that piece's fields — though the piece may already be evicted
+	// by the time we read it, which is consistent with the eventually-consistent
+	// semantics documented on this function.
+	for _, key := range pieceKeys {
+		c.mu.RLock()
+		pd, ok := c.pieces[key]
+		if !ok {
+			c.mu.RUnlock()
+			continue
 		}
+		c.mu.RUnlock()
+
+		pd.mu.RLock()
+
+		pieceInfo := PieceInfo{
+			Index:    key.index,
+			Size:     pd.pieceSize,
+			Complete: pd.complete,
+			InMemory: pd.data != nil,
+		}
+
+		info.Pieces = append(info.Pieces, pieceInfo)
+		info.TotalSize += pd.pieceSize
+
+		if pd.complete {
+			info.CompletedSize += pd.pieceSize
+		}
+
+		if pd.data != nil {
+			info.InMemory++
+			info.InMemorySize += int64(len(pd.data))
+		}
+
+		pd.mu.RUnlock()
 	}
 
 	// Sort pieces by index for consistent output.

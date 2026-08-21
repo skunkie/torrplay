@@ -43,6 +43,13 @@ type Config struct {
 	// MaxIdleTime is the maximum time a reader may remain parked before it is
 	// closed and removed from the pool. Zero means no limit.
 	MaxIdleTime time.Duration
+	// MaxReadersPerTorrent limits the total number of torrent readers
+	// (active + idle) allowed per (hash, filePath) pair. A value of 0 uses
+	// the default of 10. Set a negative value to disable the cap entirely.
+	// When the limit is reached, the oldest idle reader is evicted to make
+	// room. If no idle readers exist at the cap, a new reader is created
+	// anyway (the cap is best-effort, not strict).
+	MaxReadersPerTorrent int
 	// MemoryPressureFunc returns the current memory usage ratio (0.0–1.0).
 	// When set, idle readers are parked faster under memory pressure to
 	// prevent pieces from being downloaded and immediately evicted.
@@ -105,22 +112,13 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 	}
 
 	n := 0
+	var readErr error
 	for n < len(p) {
 		nn, e := rw.reader.Read(p[n:])
 		n += nn
 		if e != nil {
-			_, _ = rw.reader.Seek(pos, io.SeekStart)
-			rw.offset = off + int64(n)
-			cb := rw.onOffsetChange
-			offset := rw.offset
-			rw.mu.Unlock()
-			if cb != nil {
-				cb(offset)
-			}
-			if n >= len(p) {
-				return n, nil
-			}
-			return n, e
+			readErr = e
+			break
 		}
 	}
 
@@ -132,6 +130,12 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 	if cb != nil {
 		cb(offset)
 	}
+	if readErr != nil {
+		if n >= len(p) {
+			return n, nil
+		}
+		return n, readErr
+	}
 	return n, nil
 }
 
@@ -139,6 +143,7 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 type streamReader struct {
 	active        bool
 	file          *torrent.File
+	filePath      string
 	hash          metainfo.Hash
 	idleSince     time.Time
 	isFileStorage bool
@@ -174,6 +179,11 @@ func New(cfg Config) *Pool {
 	}
 	if cfg.FileStorageReadahead == 0 {
 		cfg.FileStorageReadahead = 50 * 1024 * 1024
+	}
+	if cfg.MaxReadersPerTorrent == 0 {
+		cfg.MaxReadersPerTorrent = 10
+	} else if cfg.MaxReadersPerTorrent < 0 {
+		cfg.MaxReadersPerTorrent = 0
 	}
 
 	p := &Pool{
@@ -255,6 +265,18 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 	}
 
 	// No idle reader found.
+	if p.cfg.MaxReadersPerTorrent > 0 {
+		max := p.cfg.MaxReadersPerTorrent
+		count := p.countReadersLocked(ih, file.Path())
+		for count >= max {
+			if !p.evictOldestIdleLocked(ih, file.Path()) {
+				// No idle readers to evict — cap is soft, allow count > cap.
+				break
+			}
+			count--
+		}
+	}
+
 	p.nextID++
 	readerID := p.nextID
 	key := readerKey{hash: ih, filePath: file.Path(), readerID: readerID}
@@ -329,6 +351,53 @@ func (p *Pool) release(ih metainfo.Hash, filePath string, readerID uint64) {
 		slog.Uint64("readerID", readerID))
 }
 
+// evictOldestIdleLocked removes the idle reader with the oldest idleSince
+// for the given (hash, filePath). Returns true if a reader was evicted.
+// Only idle readers are evicted — active readers are never killed mid-stream.
+// This means the MaxReadersPerTorrent cap is soft when no idle readers exist.
+// Must be called with p.mu held.
+func (p *Pool) evictOldestIdleLocked(ih metainfo.Hash, filePath string) bool {
+	var oldest *streamReader
+	var oldestKey readerKey
+	for key, sr := range p.readers {
+		if sr.hash == ih && sr.filePath == filePath && !sr.active {
+			if oldest == nil || sr.idleSince.Before(oldest.idleSince) {
+				oldest = sr
+				oldestKey = key
+			}
+		}
+	}
+	if oldest != nil {
+		if p.cfg.Registry != nil {
+			p.cfg.Registry.ClearActiveRange(oldest.hash, oldest.readerID)
+		}
+		r := oldest.reader
+		oldest.reader = nil
+		if r != nil {
+			_ = r.Close()
+		}
+		delete(p.readers, oldestKey)
+		p.logger.Debug("evicted idle reader to make room",
+			slog.String("hash", ih.HexString()),
+			slog.String("file", filePath),
+			slog.Uint64("readerID", oldest.readerID))
+		return true
+	}
+	return false
+}
+
+// countReadersLocked returns the number of readers for the given (hash, filePath).
+// Must be called with p.mu held.
+func (p *Pool) countReadersLocked(ih metainfo.Hash, filePath string) int {
+	count := 0
+	for _, sr := range p.readers {
+		if sr.hash == ih && sr.filePath == filePath {
+			count++
+		}
+	}
+	return count
+}
+
 // RefreshReadahead recalculates and applies readahead for all active readers.
 // File-storage readers keep their fixed readahead and are never divided.
 func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
@@ -360,6 +429,11 @@ func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
 // readers. File-storage readers are excluded because they use a fixed
 // readahead and never compete for the pool budget.
 // Must be called with p.mu held.
+//
+// Note: the caller is not yet in p.readers when this is called during Acquire,
+// so activeCount does not include the new reader. This means the new reader
+// gets totalPool/count(existing) rather than totalPool/count(all), temporarily
+// over-committing until the next RefreshReadahead rebalances.
 func (p *Pool) computeReadahead(totalPool int64) int64 {
 	activeCount := 0
 	for _, sr := range p.readers {

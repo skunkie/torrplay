@@ -47,12 +47,11 @@ type mockDB struct {
 func (m *mockDB) GetSettings() (*database.Settings, error) {
 	return &database.Settings{
 		Settings: api.Settings{
-			EnableDlna:          utils.Ptr(true),
-			FriendlyName:        utils.Ptr("test-server"),
-			HTTPServerPort:      utils.Ptr(8080),
-			LogLevel:            utils.Ptr(slog.LevelInfo),
-			MaxMemory:           utils.Ptr(int64(1024 * 1024 * 1024)),
-			ReadaheadPercentage: utils.Ptr(20),
+			EnableDlna:     utils.Ptr(true),
+			FriendlyName:   utils.Ptr("test-server"),
+			HTTPServerPort: utils.Ptr(8080),
+			LogLevel:       utils.Ptr(slog.LevelInfo),
+			MaxMemory:      utils.Ptr(int64(1024 * 1024 * 1024)),
 			TorrentClient: &api.TorrentClient{
 				DisableIPv6:                utils.Ptr(false),
 				EstablishedConnsPerTorrent: utils.Ptr(50),

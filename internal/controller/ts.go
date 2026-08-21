@@ -695,7 +695,6 @@ func tSUploadTorrentMiddleware(next http.Handler) http.Handler {
 				if err != nil {
 					continue
 				}
-				defer file.Close()
 
 				h := make(textproto.MIMEHeader)
 				disposition := fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileHeader.Filename)
@@ -704,10 +703,12 @@ func tSUploadTorrentMiddleware(next http.Handler) http.Handler {
 
 				part, err := writer.CreatePart(h)
 				if err != nil {
+					file.Close()
 					continue
 				}
 
 				_, _ = io.Copy(part, file)
+				file.Close()
 			}
 		}
 

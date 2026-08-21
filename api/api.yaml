@@ -1626,12 +1626,6 @@ components:
           minimum: 33554432
           maximum: 2147483648
           example: 67108864
-        readahead_percentage:
-          type: integer
-          description: Readahead percentage value (50-100).
-          minimum: 50
-          maximum: 100
-          example: 90
         torrent_trackers:
           type: array
           description: |
@@ -1987,18 +1981,19 @@ components:
       properties:
         reader:
           type: integer
-          description: Reader identifier.
-          example: 12345
+          description: Current reader piece index position.
+          minimum: 0
+          example: 12
         start:
           type: integer
-          description: Start position in bytes.
+          description: Start piece index of the read window.
           minimum: 0
-          example: 0
+          example: 10
         end:
           type: integer
-          description: End position in bytes.
+          description: End piece index of the read window.
           minimum: 0
-          example: 1048576
+          example: 20
 
     TSTorrentAddFile:
       type: object

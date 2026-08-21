@@ -47,9 +47,6 @@ func TestDefault(t *testing.T) {
 	require.NotNil(t, d.MaxMemory)
 	assert.Equal(t, int64(64*1024*1024), *d.MaxMemory)
 
-	require.NotNil(t, d.ReadaheadPercentage)
-	assert.Equal(t, 90, *d.ReadaheadPercentage)
-
 	require.NotNil(t, d.TorrentClient)
 	assert.False(t, *d.TorrentClient.DisableDHT)
 	assert.True(t, *d.TorrentClient.DisableIPv6)
@@ -101,7 +98,6 @@ func TestMerge(t *testing.T) {
 		assert.Equal(t, 1024, *target.TorrentClient.DownloadRateLimit)
 		// Missing sub-fields filled from defaults
 		assert.Equal(t, 50, *target.TorrentClient.EstablishedConnsPerTorrent)
-		assert.Equal(t, 90, *target.ReadaheadPercentage)
 	})
 
 	t.Run("fully populated target remains unchanged", func(t *testing.T) {
