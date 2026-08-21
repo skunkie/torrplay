@@ -16,6 +16,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
@@ -473,4 +474,314 @@ func TestRaceWithMapIteration(t *testing.T) {
 	}()
 
 	wg.Wait()
+}
+
+// TestSetActiveRange_PieceProtected verifies that pieces inside an active range
+// survive eviction even when they are the least-recently-used.
+func TestSetActiveRange_PieceProtected(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 4)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		p := torrentImpl.Piece(info.Piece(i))
+		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
+		require.NoError(t, err)
+	}
+
+	client.SetActiveRange(infoHash, 1, 1, 1)
+
+	// Write another piece to trigger eviction. Piece 0 is LRU and unprotected.
+	p2 := torrentImpl.Piece(info.Piece(2))
+	_, err = p2.WriteAt([]byte("piece_2"), 0)
+	require.NoError(t, err)
+
+	inMemory := client.GetPiecesInMemory(infoHash)
+	assert.Contains(t, inMemory, 1, "protected piece should still be in memory")
+	assert.Contains(t, inMemory, 2, "newly written piece should be in memory")
+	assert.NotContains(t, inMemory, 0, "unprotected LRU piece should have been evicted")
+}
+
+// TestClearActiveRange_AllowsEviction verifies that clearing an active range
+// allows previously protected pieces to be evicted.
+func TestClearActiveRange_AllowsEviction(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 4)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		p := torrentImpl.Piece(info.Piece(i))
+		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
+		require.NoError(t, err)
+	}
+
+	client.SetActiveRange(infoHash, 1, 1, 1)
+	client.ClearActiveRange(infoHash, 1)
+
+	// Trigger eviction; piece 1 is no longer protected.
+	p2 := torrentImpl.Piece(info.Piece(2))
+	_, err = p2.WriteAt([]byte("piece_2"), 0)
+	require.NoError(t, err)
+
+	inMemory := client.GetPiecesInMemory(infoHash)
+	assert.Contains(t, inMemory, 2, "newly written piece should be in memory")
+	assert.LessOrEqual(t, len(inMemory), 2, "at most 2 pieces should be in memory")
+}
+
+// TestSetActiveRange_MultipleReaders verifies that multiple active ranges
+// from different readers are tracked independently.
+func TestSetActiveRange_MultipleReaders(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 8)
+
+	_, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	client.SetActiveRange(infoHash, 10, 0, 2)
+	client.SetActiveRange(infoHash, 20, 5, 7)
+
+	client.mu.RLock()
+	count := len(client.activeRanges)
+	client.mu.RUnlock()
+	assert.Equal(t, 2, count)
+
+	client.ClearActiveRange(infoHash, 10)
+
+	client.mu.RLock()
+	count = len(client.activeRanges)
+	client.mu.RUnlock()
+	assert.Equal(t, 1, count)
+
+	client.ClearActiveRange(infoHash, 20)
+
+	client.mu.RLock()
+	count = len(client.activeRanges)
+	client.mu.RUnlock()
+	assert.Equal(t, 0, count)
+}
+
+// TestCloseTorrent_ClearsActiveRanges verifies that closing a torrent
+// removes all associated active ranges.
+func TestCloseTorrent_ClearsActiveRanges(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 4)
+
+	_, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	client.SetActiveRange(infoHash, 1, 0, 2)
+	client.SetActiveRange(infoHash, 2, 1, 3)
+
+	err = client.closeTorrent(infoHash)
+	require.NoError(t, err)
+
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+	for key := range client.activeRanges {
+		assert.NotEqual(t, infoHash, key.hash, "no active ranges should remain for closed torrent")
+	}
+}
+
+// TestIsPieceInActiveRange verifies the piece-in-range check directly.
+func TestIsPieceInActiveRange(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 8)
+
+	_, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	client.SetActiveRange(infoHash, 1, 2, 5)
+
+	client.mu.RLock()
+	defer client.mu.RUnlock()
+
+	// Inside range.
+	assert.True(t, client.isPieceInActiveRangeLocked(pieceKey{hash: infoHash, index: 2}))
+	assert.True(t, client.isPieceInActiveRangeLocked(pieceKey{hash: infoHash, index: 3}))
+	assert.True(t, client.isPieceInActiveRangeLocked(pieceKey{hash: infoHash, index: 5}))
+
+	// Outside range.
+	assert.False(t, client.isPieceInActiveRangeLocked(pieceKey{hash: infoHash, index: 1}))
+	assert.False(t, client.isPieceInActiveRangeLocked(pieceKey{hash: infoHash, index: 6}))
+	assert.False(t, client.isPieceInActiveRangeLocked(pieceKey{hash: infoHash, index: 0}))
+}
+
+// TestConcurrentWriteSamePiece_NoMemoryDrift ensures that multiple goroutines
+// racing to write the same never-before-allocated piece don't cause c.used
+// to drift from actual allocated memory (regression test for the double
+// allocation race in ensureDataAllocated / freeMemory).
+func TestConcurrentWriteSamePiece_NoMemoryDrift(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 1)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	p := torrentImpl.Piece(info.Piece(0))
+
+	const numGoroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = p.WriteAt([]byte("x"), 0)
+		}()
+	}
+	wg.Wait()
+
+	client.mu.RLock()
+	used := client.used
+	client.mu.RUnlock()
+
+	// Only one 256-byte piece was ever allocated, regardless of how many
+	// goroutines raced to allocate it.
+	assert.Equal(t, int64(256), used, "c.used should match actual allocated memory")
+}
+
+// TestConcurrentWriteSamePiece_DataIntegrity verifies that concurrent writes
+// to the same piece don't corrupt the underlying data slice. Each goroutine
+// writes a unique byte value to a distinct offset; after all writes complete,
+// every byte is checked for correctness.
+func TestConcurrentWriteSamePiece_DataIntegrity(t *testing.T) {
+	client := newTestClient(4096)
+	info, infoHash := newTestInfo(256, 1)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	p := torrentImpl.Piece(info.Piece(0))
+
+	const numGoroutines = 20
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			buf := make([]byte, 1)
+			buf[0] = byte(idx)
+			_, _ = p.WriteAt(buf, int64(idx%256))
+		}(i)
+	}
+	wg.Wait()
+
+	// Verify every written byte landed at the correct offset.
+	buf := make([]byte, 256)
+	n, err := p.ReadAt(buf, 0)
+	assert.NoError(t, err)
+	assert.Equal(t, 256, n)
+	for idx := 0; idx < numGoroutines; idx++ {
+		assert.Equal(t, byte(idx), buf[idx%256],
+			"byte written by goroutine %d was lost or corrupted", idx)
+	}
+}
+
+// TestMemoryAllocationFailure_NoUsedDrift ensures that a failed allocation
+// leaves c.used unchanged (no partial state leaked).
+func TestMemoryAllocationFailure_NoUsedDrift(t *testing.T) {
+	client := newTestClient(128)
+	info, infoHash := newTestInfo(256, 2)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	// maxMemory (128) is smaller than a single piece (256), so the very first
+	// allocation attempt must fail — verifying it leaves no partial c.used state.
+	p := torrentImpl.Piece(info.Piece(0))
+	_, err = p.WriteAt([]byte("data"), 0)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, ErrInsufficientMemory)
+
+	// c.used must not have increased.
+	client.mu.RLock()
+	used := client.used
+	client.mu.RUnlock()
+	assert.Equal(t, int64(0), used, "c.used should be 0 after failed allocation")
+}
+
+// TestAllocateMemory_ActiveRangeExceedsBudget verifies that when protected
+// pieces alone exceed maxMemory, the allocator returns ErrInsufficientMemory
+// without deadlocking or panicking.
+func TestAllocateMemory_ActiveRangeExceedsBudget(t *testing.T) {
+	client := newTestClient(256) // room for exactly 1 piece
+	info, infoHash := newTestInfo(256, 2)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	// Write piece 0 — uses all 256 bytes.
+	p0 := torrentImpl.Piece(info.Piece(0))
+	_, err = p0.WriteAt([]byte("data"), 0)
+	require.NoError(t, err)
+
+	client.SetActiveRange(infoHash, 1, 0, 0)
+
+	p1 := torrentImpl.Piece(info.Piece(1))
+	_, err = p1.WriteAt([]byte("data"), 0)
+	assert.ErrorIs(t, err, ErrInsufficientMemory)
+}
+
+// TestForceEvict_StopsGracefullyWithProtection verifies that eviction doesn't
+// loop forever when the target is below what's achievable due to active ranges.
+func TestForceEvict_StopsGracefullyWithProtection(t *testing.T) {
+	client := newTestClient(512) // 2 pieces
+	info, infoHash := newTestInfo(256, 4)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	// Fill memory with pieces 0 and 1.
+	for i := 0; i < 2; i++ {
+		p := torrentImpl.Piece(info.Piece(i))
+		_, err := p.WriteAt([]byte(fmt.Sprintf("p%d", i)), 0)
+		require.NoError(t, err)
+	}
+
+	client.SetActiveRange(infoHash, 1, 0, 1)
+
+	// ForceEvict must not deadlock when all pieces are protected.
+	done := make(chan struct{})
+	go func() {
+		client.ForceEvict(0)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ForceEvict hung with protected pieces exceeding target")
+	}
+
+	client.mu.RLock()
+	used := client.used
+	client.mu.RUnlock()
+	assert.Equal(t, int64(512), used, "protected pieces should survive eviction")
+}
+
+// TestSetMaxMemory_NegativeClampsToZero verifies that SetMaxMemory(-100)
+// clamps to 0 and triggers eviction.
+func TestSetMaxMemory_NegativeClampsToZero(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 2)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	_, err = torrentImpl.Piece(info.Piece(0)).WriteAt([]byte("data"), 0)
+	require.NoError(t, err)
+
+	client.SetMaxMemory(-100)
+
+	client.mu.RLock()
+	maxMem := client.maxMemory
+	used := client.used
+	client.mu.RUnlock()
+
+	assert.Equal(t, int64(0), maxMem, "negative value should be clamped to 0")
+	// With maxMemory=0, eviction deterministically removes all unprotected pieces.
+	assert.Equal(t, int64(0), used, "used should be 0 after eviction to maxMemory=0")
 }

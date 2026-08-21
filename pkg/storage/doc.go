@@ -31,6 +31,11 @@
 //  5. Self-Hashing: Implements the SelfHashing interface to verify piece integrity without external
 //     hashing mechanisms.
 //
+//  6. Active Range Protection: Satisfies the stream.ActiveRangeRegistry interface so that
+//     actively-read pieces are protected from LRU eviction. The stream package calls
+//     SetActiveRange to register a reader's readahead window and ClearActiveRange when the
+//     reader is released.
+//
 // # Usage Example
 //
 //	package main
@@ -91,6 +96,14 @@
 // - GetTorrentMemoryStats(): Per-torrent detailed statistics.
 // - GetPieceStatus(): Individual piece information.
 // - Various helper methods for tracking completion progress and memory usage.
+//
+// # Active Range Tracking
+//
+// The storage client maintains a map of active ranges keyed by (torrent hash, reader ID).
+// When SetActiveRange is called, the given piece-index window is marked as protected and
+// will not be evicted. ClearActiveRange removes the protection. This interface is consumed
+// by the stream pool to ensure pieces within the current readahead window stay in memory
+// during playback.
 //
 // # Error Handling
 //

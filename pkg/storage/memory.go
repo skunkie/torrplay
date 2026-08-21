@@ -27,25 +27,23 @@ var ErrPieceNotAvailable = errors.New("piece not available in memory")
 var ErrInsufficientMemory = errors.New("insufficient memory after eviction")
 
 // Client implements the storage.Client interface from anacrolix/torrent.
-// It provides a piece-level in-memory storage solution with a global memory limit
-// and an LRU eviction policy for multiple torrents.
 type Client struct {
-	mu        sync.RWMutex
-	maxMemory int64
-	// used is the total memory currently consumed by piece data.
-	used int64
-
-	// pieces stores the metadata and data for each piece across all torrents.
-	pieces map[pieceKey]*pieceData
-	// lru is the global least-recently-used list for all pieces.
-	lru *list.List
+	// activeRanges tracks byte-range windows that readers are actively consuming.
+	// Pieces inside these ranges are protected from eviction.
+	activeRanges map[activeRangeKey]activeRange
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
-
+	// lru is the global least-recently-used list for all pieces.
+	lru       *list.List
+	logger    *slog.Logger
+	maxMemory int64
+	mu        sync.RWMutex
+	// pieces stores the metadata and data for each piece across all torrents.
+	pieces map[pieceKey]*pieceData
 	// torrents tracks the state for each torrent being managed.
 	torrents map[metainfo.Hash]*torrentState
-
-	logger *slog.Logger
+	// used is the total memory currently consumed by piece data.
+	used int64
 }
 
 // MemoryStats represents global memory usage statistics.
@@ -91,6 +89,19 @@ type pieceData struct {
 	pieceSize int64 // The expected size of the piece.
 }
 
+// activeRangeKey uniquely identifies a reader's active range within a torrent.
+type activeRangeKey struct {
+	hash     metainfo.Hash
+	readerID uint64
+}
+
+// activeRange stores the piece-index window [startPiece, endPiece] (inclusive)
+// that a reader is actively consuming, protecting those pieces from eviction.
+type activeRange struct {
+	endPiece   int
+	startPiece int
+}
+
 // torrentState holds the state specific to a single torrent.
 type torrentState struct {
 	mu          sync.RWMutex
@@ -105,12 +116,13 @@ func NewClient(maxMemory int64, logger *slog.Logger) *Client {
 	}
 
 	c := &Client{
-		maxMemory: maxMemory,
-		pieces:    make(map[pieceKey]*pieceData),
-		torrents:  make(map[metainfo.Hash]*torrentState),
-		lru:       list.New(),
-		closeCh:   make(chan struct{}),
-		logger:    logger,
+		maxMemory:    maxMemory,
+		pieces:       make(map[pieceKey]*pieceData),
+		torrents:     make(map[metainfo.Hash]*torrentState),
+		activeRanges: make(map[activeRangeKey]activeRange),
+		lru:          list.New(),
+		closeCh:      make(chan struct{}),
+		logger:       logger,
 	}
 
 	return c
@@ -128,6 +140,7 @@ func (c *Client) Close() error {
 
 	c.pieces = make(map[pieceKey]*pieceData)
 	c.torrents = make(map[metainfo.Hash]*torrentState)
+	c.activeRanges = make(map[activeRangeKey]activeRange)
 	c.lru.Init()
 	c.used = 0
 
@@ -316,7 +329,6 @@ func (c *Client) GetTorrentMemoryStats(hash metainfo.Hash) (*TorrentMemoryStats,
 	// Get memory stats.
 	info.MemoryStats.MaxMemory = c.maxMemory
 	info.MemoryStats.UsedMemory = c.used
-	info.MemoryUsagePercentage = float64(info.InMemorySize) / float64(info.MemoryStats.MaxMemory) * 100
 
 	// Iterate through all pieces and collect only those belonging to this torrent.
 	for key, pd := range c.pieces {
@@ -353,6 +365,11 @@ func (c *Client) GetTorrentMemoryStats(hash metainfo.Hash) (*TorrentMemoryStats,
 	sort.Slice(info.Pieces, func(i, j int) bool {
 		return info.Pieces[i].Index < info.Pieces[j].Index
 	})
+
+	// Compute percentage after iterating pieces (InMemorySize is now populated).
+	if info.MemoryStats.MaxMemory > 0 {
+		info.MemoryUsagePercentage = float64(info.InMemorySize) / float64(info.MemoryStats.MaxMemory) * 100
+	}
 
 	return info, nil
 }
@@ -421,8 +438,13 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, hash metain
 
 // SetMaxMemory updates the maximum memory limit for the storage client.
 // If the new limit is lower than current usage, an eviction will be triggered
-// to bring memory usage within the new limit. This operation is thread-safe.
+// to bring memory usage within the new limit. Negative values are clamped to 0.
+// This operation is thread-safe.
 func (c *Client) SetMaxMemory(maxMemory int64) {
+	if maxMemory < 0 {
+		maxMemory = 0
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -436,6 +458,28 @@ func (c *Client) SetMaxMemory(maxMemory int64) {
 	c.logger.Debug("updated memory limit",
 		slog.Int64("newLimit", maxMemory),
 		slog.Int64("currentUsed", c.used))
+}
+
+// freeMemory releases a previously reserved amount of memory for a piece.
+// It must only be called when the memory was reserved but never actually used
+// (e.g. a redundant allocation from ensureDataAllocated's concurrent-writer race).
+func (c *Client) freeMemory(size int64, hash metainfo.Hash) {
+	c.mu.Lock()
+	c.used -= size
+	if c.used < 0 {
+		c.used = 0
+	}
+	torrentState, exists := c.torrents[hash]
+	c.mu.Unlock()
+
+	if exists {
+		torrentState.mu.Lock()
+		torrentState.pieceMemory -= size
+		if torrentState.pieceMemory < 0 {
+			torrentState.pieceMemory = 0
+		}
+		torrentState.mu.Unlock()
+	}
 }
 
 // allocateMemory reserves a given amount of memory for a piece. If the allocation
@@ -501,6 +545,13 @@ func (c *Client) closeTorrent(hash metainfo.Hash) error {
 		}
 	}
 
+	// Remove active ranges for this torrent.
+	for key := range c.activeRanges {
+		if key.hash == hash {
+			delete(c.activeRanges, key)
+		}
+	}
+
 	// Remove torrent state.
 	delete(c.torrents, hash)
 
@@ -520,6 +571,7 @@ func (c *Client) evictDownTo(target int64) {
 
 // evictDownToLocked evicts pieces from the LRU list until the total memory usage
 // is at or below the target. It must be called with the client's mutex held.
+// Pieces inside registered active ranges are skipped and protected from eviction.
 func (c *Client) evictDownToLocked(target int64) {
 	if c.used <= target {
 		return
@@ -534,6 +586,12 @@ func (c *Client) evictDownToLocked(target int64) {
 		next := e.Prev() // Save the next element before potential removal.
 
 		if pd, ok := c.pieces[key]; ok {
+			// Skip pieces that are inside any active reader range for this torrent.
+			if c.isPieceInActiveRangeLocked(key) {
+				e = next
+				continue
+			}
+
 			size := int64(len(pd.data))
 			c.evictPieceLocked(key, pd)
 			evicted += size
@@ -555,6 +613,47 @@ func (c *Client) evictDownToLocked(target int64) {
 		slog.Int64("newUsed", c.used))
 }
 
+// isPieceInActiveRangeLocked checks whether a piece falls inside any registered
+// active range for its torrent. Must be called with c.mu held.
+func (c *Client) isPieceInActiveRangeLocked(key pieceKey) bool {
+	for rk, ar := range c.activeRanges {
+		if rk.hash != key.hash {
+			continue
+		}
+		if key.index >= ar.startPiece && key.index <= ar.endPiece {
+			return true
+		}
+	}
+	return false
+}
+
+// SetActiveRange registers or refreshes a piece-index range [startPiece, endPiece]
+// (inclusive) that a reader is actively consuming. Pieces inside this range are
+// protected from eviction. readerID is a unique, caller-chosen identifier.
+// startPiece and endPiece are absolute piece indices within the torrent.
+func (c *Client) SetActiveRange(hash metainfo.Hash, readerID uint64, start, end int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.activeRanges[activeRangeKey{hash: hash, readerID: readerID}] = activeRange{
+		endPiece:   int(end),
+		startPiece: int(start),
+	}
+}
+
+// ClearActiveRange removes the active range for a specific reader, allowing its
+// pieces to become eviction candidates again.
+func (c *Client) ClearActiveRange(hash metainfo.Hash, readerID uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.activeRanges, activeRangeKey{hash: hash, readerID: readerID})
+
+	c.logger.Debug("cleared active range",
+		slog.String("hash", hash.HexString()),
+		slog.Uint64("readerID", readerID))
+}
+
 // evictPieceLocked removes a piece's data from memory and the LRU list.
 // It must be called with the client's mutex held. Acquires pd.mu to safely
 // nil out the data slice, preventing a data race with concurrent ReadAt calls.
@@ -566,6 +665,7 @@ func (c *Client) evictPieceLocked(key pieceKey, pd *pieceData) {
 		pd.data = nil
 	}
 	pd.mu.Unlock()
+
 	if pd.lruElem != nil {
 		c.lru.Remove(pd.lruElem)
 		pd.lruElem = nil
@@ -589,7 +689,9 @@ type pieceImpl struct {
 func (p *pieceImpl) Completion() storage.Completion {
 	pd, err := p.getPieceData()
 	if err != nil {
-		return storage.Completion{}
+		// Piece was evicted or never existed: report as incomplete so
+		// the library removes it from the completed-pieces bitmap.
+		return storage.Completion{Complete: false, Ok: true}
 	}
 
 	pd.mu.RLock()
@@ -747,21 +849,35 @@ func (p *pieceImpl) WriteAt(b []byte, off int64) (n int, err error) {
 }
 
 // ensureDataAllocated makes sure that the piece's data slice is allocated.
+// Lock ordering: c.mu → pd.mu (never the reverse). Release pd.mu before
+// calling allocateMemory (which acquires c.mu), then re-check under pd.mu
+// after allocating. If a concurrent goroutine already allocated while
+// blocked, the redundant reservation is refunded via freeMemory.
 func (p *pieceImpl) ensureDataAllocated(pd *pieceData) error {
 	pd.mu.RLock()
 	needsAlloc := pd.data == nil
 	pd.mu.RUnlock()
 
-	if needsAlloc {
-		if err := p.client.allocateMemory(pd.pieceSize, p.hash); err != nil {
-			return err
-		}
-		pd.mu.Lock()
-		if pd.data == nil {
-			pd.data = make([]byte, pd.pieceSize)
-		}
-		pd.mu.Unlock()
+	if !needsAlloc {
+		return nil
 	}
+
+	if err := p.client.allocateMemory(pd.pieceSize, p.hash); err != nil {
+		return err
+	}
+
+	// Re-check under write lock — another goroutine may have already allocated.
+	pd.mu.Lock()
+	if pd.data == nil {
+		pd.data = make([]byte, pd.pieceSize)
+		pd.mu.Unlock()
+	} else {
+		// Another goroutine already allocated; refund the redundant
+		// reservation to keep c.used from drifting.
+		pd.mu.Unlock()
+		p.client.freeMemory(pd.pieceSize, p.hash)
+	}
+
 	return nil
 }
 
