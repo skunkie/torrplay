@@ -126,16 +126,27 @@ export function TorrentStatsDialogLayout({
                 </div>
               </div>
 
-              {stats.pieces && stats.pieces.length > 0 && (
-                <div className='space-y-3'>
-                  <h4 className='text-sm font-medium'>Piece Map</h4>
-                  <PieceGrid
-                    totalPieces={stats.totalPieces}
-                    pieces={stats.pieces}
-                    readers={stats.readers ?? []}
-                  />
-                </div>
-              )}
+              <Accordion type='single'
+                collapsible
+                className='w-full space-y-3'>
+                <AccordionItem value='piece-map'>
+                  <AccordionTrigger className='text-sm font-medium'>
+                    <span className='flex items-center gap-2'>
+                      Piece Map
+                      {stats.pieces && stats.pieces.length > 0 && (
+                        <span className='text-xs text-muted-foreground'>({stats.pieces.length})</span>
+                      )}
+                    </span>
+                  </AccordionTrigger>
+                  <AccordionContent className='pt-3'>
+                    <PieceGrid
+                      totalPieces={stats.totalPieces}
+                      pieces={stats.pieces ?? []}
+                      readers={stats.readers ?? []}
+                    />
+                  </AccordionContent>
+                </AccordionItem>
+              </Accordion>
 
               {stats.readers && stats.readers.length > 0 && (
                 <div className='space-y-3'>

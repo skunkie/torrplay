@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import { TorrentStatsDialogLayout } from '@/components/torrent-stats-dialog-layout';
 import type { Torrent, TorrentStats } from '@/lib/types/api';
@@ -123,7 +124,8 @@ describe('TorrentStatsDialogLayout', () => {
     expect(screen.getByText('250 Bytes')).toBeInTheDocument();
   });
 
-  it('renders piece grid when pieces are present', () => {
+  it('renders piece grid when pieces are present', async () => {
+    const user = userEvent.setup();
     render(
       <TorrentStatsDialogLayout
         {...defaultProps}
@@ -134,8 +136,68 @@ describe('TorrentStatsDialogLayout', () => {
     );
 
     expect(screen.getByText('Piece Map')).toBeInTheDocument();
+    const trigger = screen.getByText('Piece Map').closest('button');
+    await user.click(trigger!);
     expect(screen.getByText('Incomplete')).toBeInTheDocument();
     expect(screen.getByText('Complete')).toBeInTheDocument();
+  });
+
+  it('renders piece grid without pieces array', () => {
+    const statsNoPieces = makeStats({ pieces: [] });
+
+    render(
+      <TorrentStatsDialogLayout
+        {...defaultProps}
+        stats={statsNoPieces}
+        loading={false}
+        error={null}
+      />,
+    );
+
+    expect(screen.getByText('Piece Map')).toBeInTheDocument();
+  });
+
+  it('renders piece grid as collapsible accordion', () => {
+    render(
+      <TorrentStatsDialogLayout
+        {...defaultProps}
+        stats={makeStats()}
+        loading={false}
+        error={null}
+      />,
+    );
+
+    const pieceMapTrigger = screen.getByText('Piece Map');
+    expect(pieceMapTrigger.closest('button')).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows piece count badge when piece data is available', () => {
+    render(
+      <TorrentStatsDialogLayout
+        {...defaultProps}
+        stats={makeStats()}
+        loading={false}
+        error={null}
+      />,
+    );
+
+    expect(screen.getByText('(2)')).toBeInTheDocument();
+  });
+
+  it('hides badge when piece data is empty', () => {
+    const statsNoPieces = makeStats({ pieces: [], totalPieces: 0 });
+
+    render(
+      <TorrentStatsDialogLayout
+        {...defaultProps}
+        stats={statsNoPieces}
+        loading={false}
+        error={null}
+      />,
+    );
+
+    const pieceMapTrigger = screen.getByText('Piece Map').closest('button');
+    expect(pieceMapTrigger!.textContent).not.toMatch(/\(\d+\)/);
   });
 
   describe('Reader display', () => {
@@ -241,7 +303,8 @@ describe('TorrentStatsDialogLayout', () => {
       expect(screen.getByText('pieces 9 – 9')).toBeInTheDocument();
     });
 
-    it('renders piece grid legend including Read Window', () => {
+    it('renders piece grid legend including Read Window', async () => {
+      const user = userEvent.setup();
       const stats = makeStats({
         readers: [
           { end: 5, position: 3, start: 1 },
@@ -257,6 +320,8 @@ describe('TorrentStatsDialogLayout', () => {
         />,
       );
 
+      const trigger = screen.getByText('Piece Map').closest('button');
+      await user.click(trigger!);
       expect(screen.getByText('Read Window')).toBeInTheDocument();
       expect(screen.getByText('Position')).toBeInTheDocument();
     });
