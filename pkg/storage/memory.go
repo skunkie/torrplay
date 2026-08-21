@@ -224,10 +224,12 @@ func (c *Client) GetMemoryStats() MemoryStats {
 	defer c.mu.RUnlock()
 
 	var activeTorrents int
-	for ih := range c.torrents {
-		if used := c.GetTorrentMemoryUsage(ih); used > 0 {
+	for _, ts := range c.torrents {
+		ts.mu.RLock()
+		if ts.pieceMemory > 0 {
 			activeTorrents++
 		}
+		ts.mu.RUnlock()
 	}
 
 	return MemoryStats{
