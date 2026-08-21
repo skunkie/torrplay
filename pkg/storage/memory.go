@@ -556,13 +556,16 @@ func (c *Client) evictDownToLocked(target int64) {
 }
 
 // evictPieceLocked removes a piece's data from memory and the LRU list.
-// It must be called with the client's mutex held.
+// It must be called with the client's mutex held. Acquires pd.mu to safely
+// nil out the data slice, preventing a data race with concurrent ReadAt calls.
 func (c *Client) evictPieceLocked(key pieceKey, pd *pieceData) {
+	pd.mu.Lock()
 	if pd.data != nil {
 		size := int64(len(pd.data))
 		c.used -= size
 		pd.data = nil
 	}
+	pd.mu.Unlock()
 	if pd.lruElem != nil {
 		c.lru.Remove(pd.lruElem)
 		pd.lruElem = nil
