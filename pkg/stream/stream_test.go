@@ -6,6 +6,7 @@ package stream
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -36,6 +37,34 @@ func (r *stubRegistry) ClearActiveRange(_ metainfo.Hash, _ uint64) {
 type activeRange struct {
 	startPiece int
 	endPiece   int
+}
+
+// mockReader is a minimal torrent.Reader mock for rebalancing tests.
+type mockReader struct {
+	mu  sync.Mutex
+	reh int64 // current readahead
+}
+
+func (m *mockReader) Read(p []byte) (int, error)              { return 0, io.EOF }
+func (m *mockReader) ReadAt(p []byte, off int64) (int, error) { return 0, io.EOF }
+func (m *mockReader) ReadContext(ctx context.Context, p []byte) (int, error) {
+	return 0, io.EOF
+}
+func (m *mockReader) Seek(offset int64, whence int) (int64, error) { return offset, nil }
+func (m *mockReader) Close() error                                 { return nil }
+func (m *mockReader) SetReadahead(r int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reh = r
+}
+func (m *mockReader) SetReadaheadFunc(torrent.ReadaheadFunc) {}
+func (m *mockReader) SetResponsive()                         {}
+func (m *mockReader) SetContext(context.Context)             {}
+
+func (m *mockReader) getReh() int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.reh
 }
 
 func testLogger() *slog.Logger {
@@ -320,7 +349,8 @@ func TestPool_ComputeReadahead(t *testing.T) {
 	p := New(Config{Logger: testLogger()})
 	ih := metainfo.Hash{}
 
-	rah := p.computeReadahead(1000)
+	// Caller always counts as +1, so 1000 / 1 = 1000.
+	rah := p.computeReadahead(1000, true)
 	if rah != 1000 {
 		t.Fatalf("expected 1000, got %d", rah)
 	}
@@ -328,15 +358,22 @@ func TestPool_ComputeReadahead(t *testing.T) {
 	p.readers[readerKey{hash: ih, filePath: "a", readerID: 1}] = &streamReader{active: true}
 	p.readers[readerKey{hash: ih, filePath: "b", readerID: 2}] = &streamReader{active: true}
 
-	rah = p.computeReadahead(1000)
-	if rah != 500 {
-		t.Fatalf("expected 500, got %d", rah)
+	// 2 existing active + 1 caller = 3, so 1000 / 3 = 333.
+	rah = p.computeReadahead(1000, true)
+	if rah != 333 {
+		t.Fatalf("expected 333, got %d", rah)
 	}
 
 	p.readers[readerKey{hash: ih, filePath: "c", readerID: 3}] = &streamReader{active: false}
-	rah = p.computeReadahead(1000)
+	rah = p.computeReadahead(1000, true)
+	if rah != 333 {
+		t.Fatalf("expected 333 (idle ignored), got %d", rah)
+	}
+
+	// Without includeCallers: 2 active = 1000 / 2 = 500.
+	rah = p.computeReadahead(1000, false)
 	if rah != 500 {
-		t.Fatalf("expected 500 (idle ignored), got %d", rah)
+		t.Fatalf("expected 500 without caller, got %d", rah)
 	}
 }
 
@@ -347,9 +384,10 @@ func TestPool_ComputeReadahead_FileStorageExcluded(t *testing.T) {
 	p.readers[readerKey{hash: ih, filePath: "a", readerID: 1}] = &streamReader{active: true, isFileStorage: true}
 	p.readers[readerKey{hash: ih, filePath: "b", readerID: 2}] = &streamReader{active: true, isFileStorage: false}
 
-	rah := p.computeReadahead(1000)
-	if rah != 1000 {
-		t.Fatalf("expected 1000 (file-storage excluded), got %d", rah)
+	// 1 existing active memory reader + 1 caller = 2, so 1000 / 2 = 500.
+	rah := p.computeReadahead(1000, true)
+	if rah != 500 {
+		t.Fatalf("expected 500 (file-storage excluded), got %d", rah)
 	}
 }
 
@@ -361,7 +399,8 @@ func TestPool_ComputeReadahead_MinimumOne(t *testing.T) {
 		p.readers[readerKey{hash: ih, filePath: "x", readerID: i}] = &streamReader{active: true}
 	}
 
-	rah := p.computeReadahead(5)
+	// 10 existing active + 1 caller = 11, so 5 / 11 = 0 → clamped to 1.
+	rah := p.computeReadahead(5, true)
 	if rah != 1 {
 		t.Fatalf("expected minimum 1, got %d", rah)
 	}
@@ -544,7 +583,8 @@ func TestPool_RefreshReadahead(t *testing.T) {
 	p.readers[readerKey{hash: ih, filePath: "a", readerID: 1}] = sr1
 	p.readers[readerKey{hash: ih, filePath: "b", readerID: 2}] = sr2
 
-	p.RefreshReadahead(1000)
+	// 1 active reader (no caller), so 1000 / 1 = 1000.
+	p.refreshReadaheadLocked(1000)
 
 	if sr1.rah != 1000 {
 		t.Fatalf("expected active reader readahead=1000, got %d", sr1.rah)
@@ -717,7 +757,6 @@ func TestPool_MaxReadersPerTorrent_EvictsIdle(t *testing.T) {
 		p.readers[key] = &streamReader{
 			active:    false,
 			hash:      ih,
-			filePath:  "f",
 			file:      &torrent.File{},
 			readerID:  i,
 			idleSince: time.Now().Add(time.Duration(i) * time.Minute),
@@ -753,7 +792,6 @@ func TestPool_MaxReadersPerTorrent_NoEvictionWhenOnlyActiveExist(t *testing.T) {
 		p.readers[key] = &streamReader{
 			active:   true,
 			hash:     ih,
-			filePath: "f",
 			file:     &torrent.File{},
 			readerID: i,
 		}
@@ -788,7 +826,6 @@ func TestPool_MaxReadersPerTorrent_NoEvictWhenUnderCap(t *testing.T) {
 		p.readers[key] = &streamReader{
 			active:    false,
 			hash:      ih,
-			filePath:  "f",
 			file:      &torrent.File{},
 			readerID:  i,
 			idleSince: time.Now().Add(time.Duration(i) * time.Minute),
@@ -838,7 +875,6 @@ func TestPool_MaxReadersPerTorrent_SingleEvictionLoop(t *testing.T) {
 	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = &streamReader{
 		active:    false,
 		hash:      ih,
-		filePath:  "f",
 		file:      &torrent.File{},
 		readerID:  1,
 		idleSince: time.Now(),
@@ -847,7 +883,6 @@ func TestPool_MaxReadersPerTorrent_SingleEvictionLoop(t *testing.T) {
 		p.readers[readerKey{hash: ih, filePath: "f", readerID: i}] = &streamReader{
 			active:   true,
 			hash:     ih,
-			filePath: "f",
 			file:     &torrent.File{},
 			readerID: i,
 		}
@@ -867,67 +902,170 @@ func TestPool_MaxReadersPerTorrent_SingleEvictionLoop(t *testing.T) {
 	}
 }
 
-func TestPool_ReadaheadRebalance_OnRelease(t *testing.T) {
+func TestPool_ReadaheadRebalance_Integration(t *testing.T) {
+	// Registry is nil so registerRangeLocked returns early without
+	// needing a valid torrent.File (which has unexported fields).
 	p := New(Config{
-		Logger: testLogger(),
+		Logger:             testLogger(),
+		MaxIdleTime:        5 * time.Minute,
+		IdleTimeout:        30 * time.Second,
+		MemoryPressureFunc: func() float64 { return 0.3 },
 	})
 	ih := metainfo.Hash{5}
+	pool := int64(10000)
 
-	sr1 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 1, rah: 500, isFileStorage: false, readaheadPool: 1000}
-	sr2 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 2, rah: 500, isFileStorage: false, readaheadPool: 1000}
-	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr1
-	p.readers[readerKey{hash: ih, filePath: "f", readerID: 2}] = sr2
+	// Simulate 3 memory readers sharing the pool.
+	srs := make([]*streamReader, 3)
+	for i := uint64(1); i <= 3; i++ {
+		mr := &mockReader{reh: 0}
+		srs[i-1] = &streamReader{
+			active:        true,
+			hash:          ih,
+			readerID:      i,
+			rah:           0,
+			isFileStorage: false,
+			reader:        mr,
+		}
+		p.readers[readerKey{hash: ih, filePath: "f", readerID: i}] = srs[i-1]
+	}
+	p.readaheadPool = pool
 
-	p.refreshReadaheadLocked(1000)
-
-	if sr1.rah != 500 || sr2.rah != 500 {
-		t.Fatalf("expected both readers at 500, got sr1=%d sr2=%d", sr1.rah, sr2.rah)
+	// All 3 active: each gets pool/3 = 3333.
+	p.refreshReadaheadLocked(pool)
+	for i, sr := range srs {
+		want := int64(3333)
+		if sr.rah != want {
+			t.Fatalf("reader %d: expected readahead %d, got %d", i+1, want, sr.rah)
+		}
+		if sr.reader.(*mockReader).getReh() != want {
+			t.Fatalf("reader %d: mock SetReadahead(%d) not called, got %d", i+1, want, sr.reader.(*mockReader).getReh())
+		}
 	}
 
-	sr1.active = false
-	p.refreshReadaheadLocked(1000)
-
-	if sr2.rah != 1000 {
-		t.Fatalf("expected sr2 to get full pool=1000 after sr1 released, got %d", sr2.rah)
+	// Release reader 2: remaining 2 get pool/2 = 5000.
+	p.release(ih, "f", 2)
+	if srs[1].rah != 3333 {
+		t.Fatalf("released reader 2 should keep readahead=3333, got %d", srs[1].rah)
 	}
-	if sr1.rah != 500 {
-		t.Fatalf("expected sr1 readahead unchanged at 500 (idle), got %d", sr1.rah)
+	for _, sr := range []*streamReader{srs[0], srs[2]} {
+		if sr.rah != 5000 {
+			t.Fatalf("active reader %d: expected readahead 5000, got %d", sr.readerID, sr.rah)
+		}
+		if sr.reader.(*mockReader).getReh() != 5000 {
+			t.Fatalf("active reader %d: mock SetReadahead(5000) not called, got %d", sr.readerID, sr.reader.(*mockReader).getReh())
+		}
+	}
+
+	// Release reader 0: reader 2 gets full pool = 10000.
+	p.release(ih, "f", 1)
+	if srs[0].rah != 5000 {
+		t.Fatalf("released reader 0 should keep readahead=5000, got %d", srs[0].rah)
+	}
+	if srs[2].rah != 10000 {
+		t.Fatalf("active reader 2: expected readahead 10000, got %d", srs[2].rah)
+	}
+	if srs[2].reader.(*mockReader).getReh() != 10000 {
+		t.Fatalf("active reader 2: mock SetReadahead(10000) not called, got %d", srs[2].reader.(*mockReader).getReh())
+	}
+
+	// Reader 1 was never active in this scenario — releasing it is a no-op.
+	p.release(ih, "f", 2)
+
+	// File-storage reader is excluded from rebalancing.
+	fsMr := &mockReader{reh: 50000000}
+	fsSr := &streamReader{
+		active:        true,
+		hash:          ih,
+		readerID:      99,
+		rah:           50000000,
+		isFileStorage: true,
+		reader:        fsMr,
+	}
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 99}] = fsSr
+	p.refreshReadaheadLocked(pool)
+	if srs[2].rah != 10000 {
+		t.Fatalf("memory reader should keep readahead=10000, got %d", srs[2].rah)
+	}
+	if fsSr.rah != 50000000 {
+		t.Fatalf("file-storage reader should keep readahead=50000000, got %d", fsSr.rah)
+	}
+	if fsSr.reader.(*mockReader).getReh() != 50000000 {
+		t.Fatalf("file-storage reader SetReadahead should not have changed, got %d", fsSr.reader.(*mockReader).getReh())
 	}
 }
 
-func TestPool_ReadaheadRebalance_FileStorageExcluded(t *testing.T) {
-	p := New(Config{
-		Logger: testLogger(),
-	})
-	ih := metainfo.Hash{6}
-
-	sr1 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 1, rah: 0, isFileStorage: true, readaheadPool: 1000}
-	sr2 := &streamReader{active: true, hash: ih, filePath: "f", readerID: 2, rah: 0, isFileStorage: false, readaheadPool: 1000}
-	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr1
-	p.readers[readerKey{hash: ih, filePath: "f", readerID: 2}] = sr2
-
-	p.refreshReadaheadLocked(1000)
-
-	if sr2.rah != 1000 {
-		t.Fatalf("expected sr2 to get full pool=1000 (file-storage excluded), got %d", sr2.rah)
-	}
-	if sr1.rah != 0 {
-		t.Fatalf("expected sr1 readahead unchanged at 0, got %d", sr1.rah)
-	}
-}
-
-func TestPool_ReadaheadRebalance_NoRebalanceWhenZero(t *testing.T) {
+func TestPool_ReadaheadRebalance_PoolZero(t *testing.T) {
 	p := New(Config{
 		Logger: testLogger(),
 	})
 	ih := metainfo.Hash{7}
 
-	sr := &streamReader{active: true, hash: ih, filePath: "f", readerID: 1, rah: 500, isFileStorage: false, readaheadPool: 0}
+	sr := &streamReader{
+		active:        true,
+		hash:          ih,
+		readerID:      1,
+		rah:           500,
+		isFileStorage: false,
+	}
 	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr
 
 	p.release(ih, "f", 1)
 
 	if sr.rah != 500 {
-		t.Fatalf("expected readahead unchanged at 500 when ReadaheadPool is 0, got %d", sr.rah)
+		t.Fatalf("expected readahead unchanged at 500 when readaheadPool is 0, got %d", sr.rah)
+	}
+}
+
+func TestPool_ReadaheadRebalance_IdleGCRebalance(t *testing.T) {
+	// Registry is nil so registerRangeLocked returns early without
+	// needing a valid torrent.File (which has unexported fields).
+	p := New(Config{
+		Logger:             testLogger(),
+		MaxIdleTime:        10 * time.Minute,
+		IdleTimeout:        100 * time.Millisecond,
+		MemoryPressureFunc: func() float64 { return 0.3 },
+	})
+	ih := metainfo.Hash{10}
+	pool := int64(10000)
+
+	// Two active readers.
+	sr1 := &streamReader{
+		active:        true,
+		hash:          ih,
+		readerID:      1,
+		rah:           0,
+		isFileStorage: false,
+		reader:        &mockReader{reh: 0},
+	}
+	sr2 := &streamReader{
+		active:        true,
+		hash:          ih,
+		readerID:      2,
+		rah:           0,
+		isFileStorage: false,
+		reader:        &mockReader{reh: 0},
+	}
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 1}] = sr1
+	p.readers[readerKey{hash: ih, filePath: "f", readerID: 2}] = sr2
+	p.readaheadPool = pool
+	p.refreshReadaheadLocked(pool)
+
+	if sr1.rah != 5000 || sr2.rah != 5000 {
+		t.Fatalf("expected 5000 each, got sr1=%d sr2=%d", sr1.rah, sr2.rah)
+	}
+
+	// Park sr1 via idleGC — it loses readahead.
+	sr1.active = false
+	sr1.idleSince = time.Now().Add(-200 * time.Millisecond)
+	p.parkIdleReaders()
+
+	if sr1.rah != 0 {
+		t.Fatalf("parked reader should have readahead=0, got %d", sr1.rah)
+	}
+
+	// sr2 should now get the full pool since sr1 is parked (idle).
+	// parkIdleReaders should have called refreshReadaheadLocked for active readers.
+	if sr2.rah != 10000 {
+		t.Fatalf("active reader should get full pool after idle peer parked: expected 10000, got %d", sr2.rah)
 	}
 }

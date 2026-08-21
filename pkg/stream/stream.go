@@ -143,30 +143,29 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 type streamReader struct {
 	active        bool
 	file          *torrent.File
-	filePath      string
 	hash          metainfo.Hash
 	idleSince     time.Time
 	isFileStorage bool
 	// lastOffset is the last byte offset reported by the onOffsetChange
 	// callback. Updated under pool.mu only, so code holding pool.mu can
 	// read it without acquiring wrapper.mu.
-	lastOffset    int64
-	rah           int64 // current readahead in bytes (updated by RefreshReadahead)
-	readaheadPool int64 // total pool budget used to compute this reader's readahead
-	reader        torrent.Reader
-	readerID      uint64
-	wrapper       *readAtWrapper
+	lastOffset int64
+	rah        int64 // current readahead in bytes (updated by refreshReadaheadLocked)
+	reader     torrent.Reader
+	readerID   uint64
+	wrapper    *readAtWrapper
 }
 
 // Pool manages a pool of stream readers keyed by (infohash, filePath, readerID).
 type Pool struct {
-	closeCh chan struct{}
-	closed  bool
-	cfg     Config
-	logger  *slog.Logger
-	mu      sync.Mutex
-	nextID  uint64
-	readers map[readerKey]*streamReader
+	closeCh       chan struct{}
+	closed        bool
+	cfg           Config
+	logger        *slog.Logger
+	mu            sync.Mutex
+	nextID        uint64
+	readaheadPool int64 // current total readahead budget, updated by Acquire/RefreshReadahead
+	readers       map[readerKey]*streamReader
 }
 
 // New creates a new stream pool.
@@ -226,15 +225,15 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 			sr.isFileStorage = isFileStorage
 
 			sr.reader.SetContext(ctx)
-			rah := p.computeReadahead(totalReadaheadPool)
+			rah := p.computeReadahead(totalReadaheadPool, false)
 			if isFileStorage {
 				rah = p.cfg.FileStorageReadahead
 			}
 			sr.reader.SetReadahead(rah)
 			sr.rah = rah
-			sr.readaheadPool = totalReadaheadPool
+			p.readaheadPool = totalReadaheadPool
 
-			// Reset lastOffset so RefreshReadahead/ReaderPositions don't
+			// Reset lastOffset so refreshReadaheadLocked/ReaderPositions don't
 			// read a stale offset from a previous activation.
 			_, _ = sr.reader.Seek(0, io.SeekStart)
 			sr.lastOffset = 0
@@ -285,7 +284,7 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 
 	reader := file.NewReader()
 	reader.SetContext(ctx)
-	rah := p.computeReadahead(totalReadaheadPool)
+	rah := p.computeReadahead(totalReadaheadPool, true)
 	if isFileStorage {
 		rah = p.cfg.FileStorageReadahead
 	}
@@ -304,12 +303,12 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 		hash:          ih,
 		isFileStorage: isFileStorage,
 		rah:           rah,
-		readaheadPool: totalReadaheadPool,
 		reader:        reader,
 		readerID:      readerID,
 		wrapper:       wrapper,
 	}
 	p.readers[key] = sr
+	p.readaheadPool = totalReadaheadPool
 
 	// byteOffset is 0 because the reader was just created and re-seeked.
 	p.registerRangeLocked(ih, key, file, rah, 0)
@@ -353,8 +352,8 @@ func (p *Pool) release(ih metainfo.Hash, filePath string, readerID uint64) {
 		slog.String("file", filePath),
 		slog.Uint64("readerID", readerID))
 
-	if sr.readaheadPool > 0 {
-		p.refreshReadaheadLocked(sr.readaheadPool)
+	if p.readaheadPool > 0 {
+		p.refreshReadaheadLocked(p.readaheadPool)
 	}
 }
 
@@ -367,7 +366,7 @@ func (p *Pool) evictOldestIdleLocked(ih metainfo.Hash, filePath string) bool {
 	var oldest *streamReader
 	var oldestKey readerKey
 	for key, sr := range p.readers {
-		if sr.hash == ih && sr.filePath == filePath && !sr.active {
+		if key.hash == ih && key.filePath == filePath && !sr.active {
 			if oldest == nil || sr.idleSince.Before(oldest.idleSince) {
 				oldest = sr
 				oldestKey = key
@@ -397,8 +396,8 @@ func (p *Pool) evictOldestIdleLocked(ih metainfo.Hash, filePath string) bool {
 // Must be called with p.mu held.
 func (p *Pool) countReadersLocked(ih metainfo.Hash, filePath string) int {
 	count := 0
-	for _, sr := range p.readers {
-		if sr.hash == ih && sr.filePath == filePath {
+	for key := range p.readers {
+		if key.hash == ih && key.filePath == filePath {
 			count++
 		}
 	}
@@ -409,7 +408,7 @@ func (p *Pool) countReadersLocked(ih metainfo.Hash, filePath string) int {
 // File-storage readers keep their fixed readahead and are never divided.
 // Must be called with p.mu held.
 func (p *Pool) refreshReadaheadLocked(totalReadaheadPool int64) {
-	rah := p.computeReadahead(totalReadaheadPool)
+	rah := p.computeReadahead(totalReadaheadPool, false)
 
 	for key, sr := range p.readers {
 		if sr.active {
@@ -430,8 +429,8 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadPool int64) {
 		slog.Int64("perReader", rah))
 }
 
-// RefreshReadahead recalculates and applies readahead for all active readers.
-// File-storage readers keep their fixed readahead and are never divided.
+// RefreshReadahead recalculates readahead for all active readers using the
+// provided total pool budget. File-storage readers keep their fixed readahead.
 func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -443,19 +442,22 @@ func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
 // readahead and never compete for the pool budget.
 // Must be called with p.mu held.
 //
-// Note: the caller is not yet in p.readers when this is called during Acquire,
-// so activeCount does not include the new reader. This means the new reader
-// gets totalPool/count(existing) rather than totalPool/count(all), temporarily
-// over-committing until the next RefreshReadahead rebalances.
-func (p *Pool) computeReadahead(totalPool int64) int64 {
+// includeCallers adds 1 to the active count to account for readers that
+// exist in p.readers but are not yet marked active (e.g., newly acquired
+// readers that will be marked active by the caller). When includeCallers
+// is false, only currently active readers are counted.
+func (p *Pool) computeReadahead(totalPool int64, includeCallers bool) int64 {
 	activeCount := 0
 	for _, sr := range p.readers {
 		if sr.active && !sr.isFileStorage {
 			activeCount++
 		}
 	}
-	if activeCount == 0 {
-		return totalPool
+	if includeCallers {
+		activeCount++
+	}
+	if activeCount < 1 {
+		activeCount = 1
 	}
 	rah := totalPool / int64(activeCount)
 	if rah < 1 {
@@ -535,7 +537,7 @@ func (p *Pool) updateActiveRange(ih metainfo.Hash, key readerKey, file *torrent.
 	}
 
 	// Cache the offset on the streamReader so other pool.mu holders
-	// (RefreshReadahead, ReaderPositions) can read it without touching
+	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
 	// wrapper.mu — preserving the lock order.
 	sr.lastOffset = newOffset
 
@@ -729,5 +731,11 @@ func (p *Pool) parkIdleReaders() {
 			slog.String("hash", sr.hash.HexString()),
 			slog.Uint64("readerID", sr.readerID),
 			slog.Duration("idleTimeout", timeout))
+	}
+
+	// Rebalance readahead among active readers now that idle readers
+	// have been parked (their readahead was set to 0).
+	if (len(toPark) > 0 || len(toClose) > 0) && p.readaheadPool > 0 {
+		p.refreshReadaheadLocked(p.readaheadPool)
 	}
 }
