@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -55,6 +56,17 @@ type Config struct {
 	// prevent pieces from being downloaded and immediately evicted.
 	// When nil, a fixed IdleTimeout is used.
 	MemoryPressureFunc func() float64
+	// PrioritizeAheadFraction, when > 0, bumps the download priority of pieces
+	// ahead of the reader to PiecePriorityNow for the closest
+	// PrioritizeNearFraction of them and PiecePriorityHigh for the rest.  The
+	// fraction applies to the readahead window size in pieces (end − position).
+	// Valid range: 0.0–1.0.  A value of 0 (default) disables prioritization.
+	PrioritizeAheadFraction float64
+	// PrioritizeNearFraction, when > 0, defines the fraction of the
+	// prioritized pieces that receive PiecePriorityNow (closest to the reader);
+	// the remaining fraction receives PiecePriorityHigh.  Valid range: 0.0–1.0.
+	// Defaults to 0.3 (30 % get Now, 70 % get High).
+	PrioritizeNearFraction float64
 	// Registry tracks active read ranges for piece eviction protection.
 	Registry ActiveRangeRegistry // optional, nil = no range tracking
 }
@@ -150,10 +162,21 @@ type streamReader struct {
 	// callback. Updated under pool.mu only, so code holding pool.mu can
 	// read it without acquiring wrapper.mu.
 	lastOffset int64
-	rah        int64 // current readahead in bytes (updated by refreshReadaheadLocked)
-	reader     torrent.Reader
-	readerID   uint64
-	wrapper    *readAtWrapper
+	// prioritizedPieces tracks piece indices that were bumped to
+	// PiecePriorityNow so they can be restored on release.
+	prioritizedPieces []int
+	// priorityMu guards prioritizedPieces so that concurrent offset
+	// updates from different goroutines serialize their piece-priority
+	// writes without contending on pool.mu.
+	priorityMu sync.Mutex
+	// prioritySeq increments on each prioritization call; stale
+	// goroutines drop their result when their seq no longer matches.
+	// Atomic — no mutex needed for this field.
+	prioritySeq atomic.Uint64
+	rah         int64 // current readahead in bytes (updated by refreshReadaheadLocked)
+	reader      torrent.Reader
+	readerID    uint64
+	wrapper     *readAtWrapper
 }
 
 // Pool manages a pool of stream readers keyed by (infohash, filePath, readerID).
@@ -267,9 +290,9 @@ func (p *Pool) Acquire(ctx context.Context, ih metainfo.Hash, file *torrent.File
 
 	// No idle reader found.
 	if p.cfg.MaxReadersPerTorrent > 0 {
-		max := p.cfg.MaxReadersPerTorrent
+		limit := p.cfg.MaxReadersPerTorrent
 		count := p.countReadersLocked(ih, file.Path())
-		for count >= max {
+		for count >= limit {
 			if !p.evictOldestIdleLocked(ih, file.Path()) {
 				// No idle readers to evict — cap is soft, allow count > cap.
 				break
@@ -343,6 +366,15 @@ func (p *Pool) release(ih metainfo.Hash, filePath string, readerID uint64) {
 	if p.cfg.Registry != nil {
 		p.cfg.Registry.ClearActiveRange(sr.hash, sr.readerID)
 	}
+
+	// Restore piece priorities to None so they no longer compete with
+	// other readers' readahead windows.  Bump prioritySeq to invalidate
+	// any in-flight prioritizeAsync goroutine, and take priorityMu to
+	// serialize with concurrent SetPriority calls.
+	sr.prioritySeq.Add(1)
+	sr.priorityMu.Lock()
+	sr.prioritizedPieces = resetPriorities(sr.prioritizedPieces, sr.file)
+	sr.priorityMu.Unlock()
 
 	sr.active = false
 	sr.idleSince = time.Now()
@@ -434,6 +466,7 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadPool int64) {
 func (p *Pool) RefreshReadahead(totalReadaheadPool int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.readaheadPool = totalReadaheadPool
 	p.refreshReadaheadLocked(totalReadaheadPool)
 }
 
@@ -512,6 +545,118 @@ func (p *Pool) registerRangeLocked(ih metainfo.Hash, key readerKey, file *torren
 	p.cfg.Registry.SetActiveRange(ih, key.readerID, start, end)
 }
 
+// prioritizeNextPieces bumps the download priority of pieces ahead of the
+// reader.  The nearest nearFrac pieces get PiecePriorityNow, the rest get
+// PiecePriorityHigh.  Returns the list of piece indices that were bumped so
+// the caller can restore them later.  Must be called with p.mu held.
+func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, rah int64, frac, nearFrac float64, old []int) []int {
+	if frac <= 0 || file == nil {
+		return resetPriorities(old, file)
+	}
+	tor := file.Torrent()
+	if tor == nil {
+		return resetPriorities(old, file)
+	}
+	info := tor.Info()
+	if info == nil {
+		return resetPriorities(old, file)
+	}
+
+	endPieceMax := int64(file.EndPieceIndex()) + 1
+	pieceLength := info.PieceLength
+	if pieceLength <= 0 {
+		pieceLength = 1
+	}
+
+	// Clamp target to the torrent's actual piece count — EndPieceIndex()
+	// may exceed it for partially-seeded or split files.
+	torrentPieceCount := int64(tor.NumPieces())
+	if torrentPieceCount > 0 && endPieceMax > torrentPieceCount {
+		endPieceMax = torrentPieceCount
+	}
+	n, nowCount, target, currentPiece := prioPlan(byteOffset, rah, pieceLength, int64(file.BeginPieceIndex()), endPieceMax, frac, nearFrac)
+
+	// Reset stale priorities from the previous window.
+	bumped := resetPriorities(old, file)
+
+	// Direct bounded loop: start at currentPiece+1, bump exactly n pieces.
+	count := 0
+	for idx := currentPiece + 1; idx < target; idx++ {
+		piece := tor.Piece(metainfo.PieceIndex(idx))
+		if piece == nil {
+			continue
+		}
+		if count < nowCount {
+			piece.SetPriority(torrent.PiecePriorityNow)
+		} else {
+			piece.SetPriority(torrent.PiecePriorityHigh)
+		}
+		bumped = append(bumped, int(idx))
+		count++
+		if count >= n {
+			break
+		}
+	}
+	return bumped
+}
+
+// prioPlan computes how many pieces to prioritize and how to split them
+// between Now and High.  It is a pure function of the input parameters so it
+// can be unit-tested without a live torrent.  Returns (n, nowCount, target, currentPiece).
+func prioPlan(byteOffset, rah, pieceLength, beginPiece, endPieceMax int64, frac, nearFrac float64) (n int, nowCount int, target int64, currentPiece int64) {
+	if frac > 1 {
+		frac = 1
+	}
+	if pieceLength <= 0 {
+		pieceLength = 1
+	}
+	rahPieces := rah / pieceLength
+	if rahPieces < 1 {
+		rahPieces = 1
+	}
+	n = int(float64(rahPieces) * frac)
+	if n < 1 {
+		n = 1
+	}
+	if nearFrac <= 0 {
+		nearFrac = 0.3
+	}
+	if nearFrac > 1 {
+		nearFrac = 1
+	}
+	nowCount = int(float64(n) * nearFrac)
+	if nowCount < 1 {
+		nowCount = 1
+	}
+	currentPiece = byteOffset/pieceLength + beginPiece
+	target = currentPiece + 1 + int64(n)
+	if target > endPieceMax {
+		target = endPieceMax
+	}
+	if target < currentPiece+1 {
+		target = currentPiece + 1
+	}
+	return n, nowCount, target, currentPiece
+}
+
+// resetPriorities restores piece indices in `pieces` back to None priority.
+func resetPriorities(pieces []int, file *torrent.File) []int {
+	if file == nil {
+		return nil
+	}
+	tor := file.Torrent()
+	if tor == nil {
+		return nil
+	}
+	for _, idx := range pieces {
+		piece := tor.Piece(metainfo.PieceIndex(idx))
+		if piece != nil {
+			piece.SetPriority(torrent.PiecePriorityNone)
+		}
+	}
+	return nil
+}
+
 // findReaderLocked returns the streamReader for the given key, or nil.
 // Must be called with p.mu held.
 func (p *Pool) findReaderLocked(key readerKey) *streamReader {
@@ -522,17 +667,24 @@ func (p *Pool) findReaderLocked(key readerKey) *streamReader {
 // window for a reader based on its new read offset. Called asynchronously
 // from readAtWrapper when the position moves. Takes pool.mu to protect
 // against concurrent release / Close / parkIdleReaders.
+//
+// The active-range registration stays under p.mu to preserve atomicity
+// with release/Close.  Piece-priority bumping uses the reader's own
+// priorityMu so it does not block other pool operations (Acquire,
+// release, parkIdleReaders).  A per-reader sequence counter ensures
+// that out-of-order priority goroutines drop stale results.
 func (p *Pool) updateActiveRange(ih metainfo.Hash, key readerKey, file *torrent.File, newOffset int64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if p.cfg.Registry == nil {
+		p.mu.Unlock()
 		return
 	}
 
 	// If the reader was already released or deleted, skip the update.
 	sr := p.findReaderLocked(key)
 	if sr == nil || !sr.active {
+		p.mu.Unlock()
 		return
 	}
 
@@ -541,13 +693,45 @@ func (p *Pool) updateActiveRange(ih metainfo.Hash, key readerKey, file *torrent.
 	// wrapper.mu — preserving the lock order.
 	sr.lastOffset = newOffset
 
+	rah := sr.rah
+	var prioEnabled bool
+	var seq uint64
+	if p.cfg.PrioritizeAheadFraction > 0 && !sr.isFileStorage {
+		seq = sr.prioritySeq.Add(1)
+		prioEnabled = true
+	}
+
 	pieceLength := int64(1)
 	if file.Torrent().Info() != nil {
 		pieceLength = file.Torrent().Info().PieceLength
 	}
-
-	start, end := computeRange(file, pieceLength, sr.rah, newOffset)
+	start, end := computeRange(file, pieceLength, rah, newOffset)
 	p.cfg.Registry.SetActiveRange(ih, key.readerID, start, end)
+	p.mu.Unlock()
+
+	if prioEnabled {
+		go p.prioritizeAsync(sr, seq, file, newOffset, rah)
+	}
+}
+
+// prioritizeAsync updates piece priorities for a single reader.  It holds
+// sr.priorityMu for the entire body (read-snapshot → compute → conditional
+// write-back) so that in-flight goroutines cannot race each other's
+// SetPriority calls, and release/Close can invalidate them by bumping
+// prioritySeq.
+func (p *Pool) prioritizeAsync(sr *streamReader, seq uint64, file *torrent.File, newOffset, rah int64) {
+	near := p.cfg.PrioritizeNearFraction
+	frac := p.cfg.PrioritizeAheadFraction
+
+	sr.priorityMu.Lock()
+	if sr.prioritySeq.Load() != seq {
+		sr.priorityMu.Unlock()
+		return
+	}
+	old := sr.prioritizedPieces
+	result := p.prioritizeNextPieces(file, newOffset, rah, frac, near, old)
+	sr.prioritizedPieces = result
+	sr.priorityMu.Unlock()
 }
 
 // ReaderPositions returns metadata about all readers (active and idle) for the given torrent.
@@ -597,6 +781,14 @@ func (p *Pool) Close() {
 	close(p.closeCh)
 
 	for key, sr := range p.readers {
+		// Invalidate any in-flight prioritizeAsync goroutines.
+		sr.prioritySeq.Add(1)
+		if sr.prioritizedPieces != nil {
+			sr.priorityMu.Lock()
+			resetPriorities(sr.prioritizedPieces, sr.file)
+			sr.prioritizedPieces = nil
+			sr.priorityMu.Unlock()
+		}
 		if sr.reader != nil {
 			_ = sr.reader.Close()
 			sr.reader = nil

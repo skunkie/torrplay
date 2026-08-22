@@ -31,6 +31,33 @@
 // released, the active range is cleared immediately so those pieces become
 // eviction candidates again.
 //
+// # Piece-Priority Bumping
+//
+// When PrioritizeAheadFraction > 0, reading a new offset triggers an
+// asynchronous piece-priority bump in the torrent client. The nearest
+// PrioritizeNearFraction (default 30%) of the readahead window get
+// PiecePriorityNow, the rest get PiecePriorityHigh. Stale priority updates
+// from concurrent readers are dropped using a per-reader atomic sequence
+// counter (prioritySeq) protected by priorityMu — release() and Close()
+// bump the sequence and clear the cached piece list, invalidating any
+// in-flight goroutines.
+//
+// # Reader Cap and Eviction
+//
+// MaxReadersPerTorrent limits the number of active readers per (hash, filePath)
+// pair to prevent excessive memory pressure from the torrent client. Each file
+// tracks its own independent cap. The reuse loop in Acquire always claims an
+// existing idle reader for the same key before the cap/eviction block is
+// reached, so evictOldestIdleLocked is effectively unreachable through the
+// public Acquire path under normal (non-racing) conditions.
+//
+// # Readahead Rebalancing
+//
+// When a reader is released or parked, the pool redistributes the total
+// readahead budget (FileStorageReadahead) among remaining active readers
+// via refreshReadaheadLocked. This ensures no single reader monopolizes
+// the torrent client's download capacity while others starve.
+//
 // # Idle GC
 //
 // Readers that remain idle longer than the effective timeout are parked
