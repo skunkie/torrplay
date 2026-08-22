@@ -27,7 +27,8 @@ export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: Syste
           <DialogDescription>Version, build date, commit, and uptime details</DialogDescription>
         </DialogHeader>
 
-        <div className='space-y-4 py-4 overflow-y-auto flex-1'>
+        <div tabIndex={0}
+          className='space-y-4 py-4 overflow-y-auto flex-1 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-md'>
           <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
             <Card className='p-4'>
               <div className='flex items-center gap-3'>

@@ -64,8 +64,13 @@ export function HandleTorrentDialog({
         </div>
 
         <DialogFooter className='grid grid-cols-1 gap-2'>
-          <Button className='w-full'
-            onClick={handleAddAndPlay}>Add & Play</Button>
+          <Button
+            className='w-full'
+            autoFocus
+            onClick={handleAddAndPlay}
+          >
+            Add & Play
+          </Button>
           <Button className='w-full'
             variant='outline'
             onClick={handlePlay}>

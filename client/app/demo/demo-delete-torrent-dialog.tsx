@@ -36,6 +36,7 @@ export function DemoDeleteTorrentDialog({ torrent, open, onOpenChange, isDeletin
             Delete Torrent
           </DialogTitle>
           <DialogDescription>
+            Are you sure you want to delete this torrent? This action cannot be undone.
           </DialogDescription>
         </DialogHeader>
         <div className='py-4 bg-muted/50 rounded-md'>

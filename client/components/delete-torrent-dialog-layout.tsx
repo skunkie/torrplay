@@ -39,27 +39,38 @@ export function DeleteTorrentDialogLayout({
             Delete Torrent
           </DialogTitle>
           <DialogDescription>
+            Are you sure you want to delete this torrent? This action cannot be undone.
           </DialogDescription>
         </DialogHeader>
-        <div className='py-4 bg-muted/50 rounded-md'>
-          {torrent && (
-            <p className='text-center font-medium break-all px-4'>
-              {torrent.title || torrent.name || torrent.hash}
-            </p>
-          )}
-        </div>
-        <DialogFooter>
-          <Button variant='outline'
-            onClick={() => onOpenChange(false)}
-            disabled={isDeleting}>
-            Cancel
-          </Button>
-          <Button variant='destructive'
-            onClick={onSubmit}
-            disabled={isDeleting}>
-            {isDeleting ? 'Deleting...' : 'Delete'}
-          </Button>
-        </DialogFooter>
+        <form onSubmit={e => {
+          e.preventDefault();
+          if (!isDeleting) onSubmit();
+        }}>
+          <div className='py-4 bg-muted/50 rounded-md'>
+            {torrent && (
+              <p className='text-center font-medium break-all px-4'>
+                {torrent.title || torrent.name || torrent.hash}
+              </p>
+            )}
+          </div>
+          <DialogFooter className='mt-4'>
+            <Button
+              type='button'
+              variant='outline'
+              onClick={() => onOpenChange(false)}
+              disabled={isDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type='submit'
+              variant='destructive'
+              disabled={isDeleting}
+            >
+              {isDeleting ? 'Deleting...' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

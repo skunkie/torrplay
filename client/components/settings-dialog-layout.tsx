@@ -140,442 +140,458 @@ export function SettingsDialogLayout({
           <DialogDescription>Configure application settings</DialogDescription>
         </DialogHeader>
 
-        <div className='grid gap-y-6 py-4 max-h-[60vh] overflow-y-auto pr-3'>
-          {!IS_NATIVE && (
-            <div className='space-y-4'>
-              <h3 className='text-lg font-medium text-foreground'>API Configuration</h3>
-              <div className='flex items-center justify-between'>
-                <Label htmlFor='custom-api-url'>Use Custom API URL</Label>
-                <Switch id='custom-api-url'
-                  checked={isApiUrlCustom}
-                  onCheckedChange={setIsApiUrlCustom} />
-              </div>
-              {isApiUrlCustom && (
-                <div className='space-y-2'>
-                  <Label htmlFor='api-url'>API URL</Label>
-                  <Input
-                    id='api-url'
-                    placeholder='http://localhost:8090'
-                    value={apiUrl}
-                    onChange={e => setApiUrl(e.target.value)}
-                  />
-                  <p className='text-sm text-muted-foreground'>
-                    The URL of your TorrPlay server. The page will reload if you change this.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {IS_TAURI && (
-            <div className='space-y-4'>
-              <h3 className='text-lg font-medium text-foreground'>External Player</h3>
-              <div className='space-y-2'>
-                <Label htmlFor='player-name'>Player Name</Label>
-                <Input
-                  id='player-name'
-                  placeholder='vlc, mpv, etc.'
-                  value={externalPlayer}
-                  onChange={e => setExternalPlayer(e.target.value)}
-                />
-                <p className='text-sm text-muted-foreground'>
-                  The executable name of your desired video player. Leave empty to use the system default.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {IS_NATIVE && (
-            <div className='space-y-4'>
-              <h3 className='text-lg font-medium text-foreground'>Torrent Handler</h3>
-              <div className='flex items-center justify-between'>
-                <div className='space-y-0.5'>
-                  <Label>Play Action Preference</Label>
-                  <p className='text-sm text-muted-foreground'>
-                    Reset the saved preference for either Play or Add and Play a torrent.
-                  </p>
-                </div>
-                <Button variant='outline'
-                  onClick={onResetTorrentHandlerChoice}>
-                  Reset
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {isLoadingSettings && (
-            <div className='flex flex-col items-center justify-center gap-2 text-center py-8'>
-              <Loader2 className='h-6 w-6 animate-spin text-muted-foreground' />
-              <p className='text-sm text-muted-foreground'>Loading server settings...</p>
-            </div>
-          )}
-
-          {error && !isLoadingSettings && (
-            <div className='rounded-md bg-destructive/10 border border-destructive/20 p-3'>
-              <div className='flex items-start gap-3'>
-                <AlertTriangle className='h-5 w-5 text-destructive flex-shrink-0 mt-0.5' />
-                <div>
-                  <h4 className='font-semibold text-destructive'>Failed to load server settings</h4>
-                  <p className='text-sm text-destructive/80 mt-1'>
-                    Could not connect to the backend. The service might be starting or unavailable.
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {(canSaveServerSettings || isApiUrlChangePending) && settings && (
-            <div className='space-y-6'>
+        <form onSubmit={e => {
+          e.preventDefault();
+          if (!saving && (isApiUrlChangePending || canSaveServerSettings)) {
+            onSave();
+          }
+        }}>
+          <div tabIndex={0}
+            className='grid gap-y-6 py-4 max-h-[60vh] overflow-y-auto pr-3 focus:outline-none'>
+            {!IS_NATIVE && (
               <div className='space-y-4'>
-                <h3 className='text-lg font-medium text-foreground'>Authentication</h3>
+                <h3 className='text-lg font-medium text-foreground'>API Configuration</h3>
                 <div className='flex items-center justify-between'>
-                  <Label htmlFor='auth-enabled'>Enable Authentication</Label>
-                  <Switch
-                    id='auth-enabled'
-                    checked={authSettings?.enabled ?? false}
-                    onCheckedChange={checked => setAuthSettings({ ...authSettings, enabled: checked } as Auth)}
-                  />
+                  <Label htmlFor='custom-api-url'>Use Custom API URL</Label>
+                  <Switch id='custom-api-url'
+                    checked={isApiUrlCustom}
+                    onCheckedChange={setIsApiUrlCustom} />
                 </div>
-                {authSettings?.enabled && (
-                  <div className='space-y-4'>
-                    <div className='space-y-2'>
-                      <Label htmlFor='auth-type'>Authentication Type</Label>
-                      <Select
-                        value={authSettings.type}
-                        onValueChange={value => setAuthSettings({ ...authSettings, type: value } as Auth)}
-                      >
-                        <SelectTrigger id='auth-type'>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value='basic'>Basic</SelectItem>
-                          <SelectItem value='bearer'>Bearer</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className='space-y-2'>
-                      <Label htmlFor='auth-username'>Username</Label>
-                      <Input
-                        id='auth-username'
-                        value={authSettings.username}
-                        onChange={e => setAuthSettings({ ...authSettings, username: e.target.value } as Auth)}
-                      />
-                    </div>
-                    <div className='space-y-2'>
-                      <Label htmlFor='auth-password'>Password</Label>
-                      <Input
-                        id='auth-password'
-                        type='password'
-                        value={authSettings.password}
-                        onChange={e => setAuthSettings({ ...authSettings, password: e.target.value } as Auth)}
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              <div className='space-y-4'>
-                <h3 className='text-lg font-medium text-foreground'>DLNA Configuration</h3>
-
-                <div className='flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between'>
-                  <div className='space-y-0.5'>
-                    <Label htmlFor='dlna-enabled'>Enable DLNA</Label>
-                    <p className='text-sm text-muted-foreground'>Allow media streaming via DLNA protocol.</p>
-                  </div>
-                  <Switch id='dlna-enabled'
-                    checked={dlnaEnabled}
-                    onCheckedChange={setDlnaEnabled} />
-                </div>
-
-                {dlnaEnabled && (
+                {isApiUrlCustom && (
                   <div className='space-y-2'>
-                    <Label htmlFor='friendly-name'>Friendly Name</Label>
+                    <Label htmlFor='api-url'>API URL</Label>
                     <Input
-                      id='friendly-name'
-                      placeholder='TorrPlay'
-                      value={friendlyName}
-                      onChange={e => setFriendlyName(e.target.value)}
-                      maxLength={64}
+                      id='api-url'
+                      placeholder='http://localhost:8090'
+                      value={apiUrl}
+                      onChange={e => setApiUrl(e.target.value)}
                     />
-                    <p className='text-sm text-muted-foreground'>Display name for DLNA devices (1-64 characters).</p>
+                    <p className='text-sm text-muted-foreground'>
+                      The URL of your TorrPlay server. The page will reload if you change this.
+                    </p>
                   </div>
                 )}
               </div>
+            )}
 
+            {IS_TAURI && (
               <div className='space-y-4'>
-                <h3 className='text-lg font-medium text-foreground'>Storage</h3>
+                <h3 className='text-lg font-medium text-foreground'>External Player</h3>
                 <div className='space-y-2'>
-                  <Label htmlFor='file-storage-path'>File Storage Path</Label>
+                  <Label htmlFor='player-name'>Player Name</Label>
                   <Input
-                    id='file-storage-path'
-                    placeholder='/torrplay'
-                    value={fileStoragePath}
-                    onChange={e => setFileStoragePath(e.target.value)}
+                    id='player-name'
+                    placeholder='vlc, mpv, etc.'
+                    value={externalPlayer}
+                    onChange={e => setExternalPlayer(e.target.value)}
                   />
                   <p className='text-sm text-muted-foreground'>
-                    The path where torrent files will be stored. Leave empty to disable file storage.
+                    The executable name of your desired video player. Leave empty to use the system default.
                   </p>
                 </div>
+              </div>
+            )}
 
-                <div className='flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between'>
+            {IS_NATIVE && (
+              <div className='space-y-4'>
+                <h3 className='text-lg font-medium text-foreground'>Torrent Handler</h3>
+                <div className='flex items-center justify-between'>
                   <div className='space-y-0.5'>
-                    <Label htmlFor='downloader-enabled'>Enable Downloader</Label>
-                    <p className='text-sm text-muted-foreground'>Enable background downloading for torrents with file storage.</p>
+                    <Label>Play Action Preference</Label>
+                    <p className='text-sm text-muted-foreground'>
+                      Reset the saved preference for either Play or Add and Play a torrent.
+                    </p>
                   </div>
-                  <Switch
-                    id='downloader-enabled'
-                    checked={downloaderEnabled}
-                    onCheckedChange={setDownloaderEnabled}
-                    disabled={!fileStoragePath}
-                  />
+                  <Button variant='outline'
+                    onClick={onResetTorrentHandlerChoice}>
+                    Reset
+                  </Button>
                 </div>
               </div>
+            )}
 
-              <div className='space-y-4'>
-                <h3 className='text-lg font-medium text-foreground'>Torrent Client</h3>
-                <div className='space-y-2'>
-                  <Label htmlFor='torrent-trackers'>Torrent Trackers</Label>
-                  <Textarea
-                    id='torrent-trackers'
-                    value={(torrentTrackers || []).join('\n')}
-                    onChange={e => setTorrentTrackers(e.target.value.split('\n').filter(t => t !== ''))}
-                    rows={5}
-                  />
-                  <p className='text-sm text-muted-foreground'>
-                    One tracker tier per line. To include multiple trackers in the same tier, separate them with commas.
-                  </p>
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='disable-dht'>Disable DHT</Label>
-                  <Switch
-                    id='disable-dht'
-                    checked={torrentClientSettings?.disableDht ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableDht: checked } as TorrentClient)}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='disable-ipv6'>Disable IPv6</Label>
-                  <Switch
-                    id='disable-ipv6'
-                    checked={torrentClientSettings?.disableIpv6 ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableIpv6: checked } as TorrentClient)}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='disable-pex'>Disable PEX</Label>
-                  <Switch
-                    id='disable-pex'
-                    checked={torrentClientSettings?.disablePex ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disablePex: checked } as TorrentClient)}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='disable-tcp'>Disable TCP</Label>
-                  <Switch
-                    id='disable-tcp'
-                    checked={torrentClientSettings?.disableTcp ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableTcp: checked } as TorrentClient)}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='disable-utp'>Disable uTP</Label>
-                  <Switch
-                    id='disable-utp'
-                    checked={torrentClientSettings?.disableUtp ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableUtp: checked } as TorrentClient)}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='seed'>Enable Seeding</Label>
-                  <Switch
-                    id='seed'
-                    checked={torrentClientSettings?.seed ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, seed: checked } as TorrentClient)}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='prefer-header-obfuscation'>Prefer Header Obfuscation</Label>
-                  <Switch
-                    id='prefer-header-obfuscation'
-                    checked={torrentClientSettings?.preferHeaderObfuscation ?? false}
-                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, preferHeaderObfuscation: checked } as TorrentClient)}
-                  />
-                </div>
+            {isLoadingSettings && (
+              <div className='flex flex-col items-center justify-center gap-2 text-center py-8'>
+                <Loader2 className='h-6 w-6 animate-spin text-muted-foreground' />
+                <p className='text-sm text-muted-foreground'>Loading server settings...</p>
+              </div>
+            )}
 
-                <div className='space-y-2'>
+            {error && !isLoadingSettings && (
+              <div className='rounded-md bg-destructive/10 border border-destructive/20 p-3'>
+                <div className='flex items-start gap-3'>
+                  <AlertTriangle className='h-5 w-5 text-destructive flex-shrink-0 mt-0.5' />
+                  <div>
+                    <h4 className='font-semibold text-destructive'>Failed to load server settings</h4>
+                    <p className='text-sm text-destructive/80 mt-1'>
+                      Could not connect to the backend. The service might be starting or unavailable.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {(canSaveServerSettings || isApiUrlChangePending) && settings && (
+              <div className='space-y-6'>
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>Authentication</h3>
                   <div className='flex items-center justify-between'>
-                    <Label>Rate Limit Unit</Label>
-                    <Select value={rateLimitUnit}
-                      onValueChange={setRateLimitUnit}>
-                      <SelectTrigger className='w-[120px]'>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value='bytes/s'>bytes/s</SelectItem>
-                        <SelectItem value='KiB/s'>KiB/s</SelectItem>
-                        <SelectItem value='MiB/s'>MiB/s</SelectItem>
-                      </SelectContent>
-                    </Select>
+                    <Label htmlFor='auth-enabled'>Enable Authentication</Label>
+                    <Switch
+                      id='auth-enabled'
+                      checked={authSettings?.enabled ?? false}
+                      onCheckedChange={checked => setAuthSettings({ ...authSettings, enabled: checked } as Auth)}
+                    />
                   </div>
-                </div>
-
-                <div className='space-y-2'>
-                  <Label htmlFor='download-rate-limit'>Download Rate Limit ({rateLimitUnit})</Label>
-                  <Input
-                    id='download-rate-limit'
-                    type='number'
-                    value={convertRateLimit(torrentClientSettings?.downloadRateLimit ?? 0, rateLimitUnit)}
-                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, downloadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
-                  />
-                  <p className='text-sm text-muted-foreground'>
-                    0 means unlimited.
-                  </p>
-                </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='upload-rate-limit'>Upload Rate Limit ({rateLimitUnit})</Label>
-                  <Input
-                    id='upload-rate-limit'
-                    type='number'
-                    value={convertRateLimit(torrentClientSettings?.uploadRateLimit ?? 0, rateLimitUnit)}
-                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, uploadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
-                  />
-                  <p className='text-sm text-muted-foreground'>
-                    0 means unlimited.
-                  </p>
-                </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='established-conns-per-torrent'>Connections Per Torrent</Label>
-                  <Input
-                    id='established-conns-per-torrent'
-                    type='number'
-                    value={torrentClientSettings?.establishedConnsPerTorrent ?? 50}
-                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, establishedConnsPerTorrent: parseInt(e.target.value) } as TorrentClient)}
-                  />
-                </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='torrent-peers-high-water'>Peers High Water Mark</Label>
-                  <Input
-                    id='torrent-peers-high-water'
-                    type='number'
-                    value={torrentClientSettings?.torrentPeersHighWater ?? 500}
-                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, torrentPeersHighWater: parseInt(e.target.value) } as TorrentClient)}
-                  />
-                </div>
-              </div>
-
-              <div className='space-y-4'>
-                <h3 className='text-lg font-medium text-foreground'>Memory Management</h3>
-
-                <div className='space-y-3'>
-                  <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                    <Label htmlFor='max-memory'>Maximum Memory</Label>
-                    <span className='text-sm font-mono text-muted-foreground'>
-                      {formatBytes(maxMemory * 1024 * 1024)}
-                    </span>
-                  </div>
-
-                  <Slider
-                    id='max-memory'
-                    min={32}
-                    max={2048}
-                    step={32}
-                    value={[maxMemory]}
-                    onValueChange={value => setMaxMemory(value[0])}
-                    className='py-4'
-                  />
-
-                  <div className='flex justify-between text-sm text-muted-foreground'>
-                    <span>32 MB</span>
-                    <span>2 GB</span>
-                  </div>
-
-                  <p className='text-sm text-muted-foreground'>
-                    Memory limit for piece storage. Lower values reduce memory usage but may impact streaming performance.
-                  </p>
-
-                  {maxMemory < 64 && (
-                    <div className='rounded-md bg-destructive/10 border border-destructive/20 p-3'>
-                      <p className='text-sm text-destructive'>
-                        Warning: Low memory settings may cause poor streaming performance for large files.
-                      </p>
+                  {authSettings?.enabled && (
+                    <div className='space-y-4'>
+                      <div className='space-y-2'>
+                        <Label htmlFor='auth-type'>Authentication Type</Label>
+                        <Select
+                          value={authSettings.type}
+                          onValueChange={value => setAuthSettings({ ...authSettings, type: value } as Auth)}
+                        >
+                          <SelectTrigger id='auth-type'>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value='basic'>Basic</SelectItem>
+                            <SelectItem value='bearer'>Bearer</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className='space-y-2'>
+                        <Label htmlFor='auth-username'>Username</Label>
+                        <Input
+                          id='auth-username'
+                          value={authSettings.username}
+                          onChange={e => setAuthSettings({ ...authSettings, username: e.target.value } as Auth)}
+                        />
+                      </div>
+                      <div className='space-y-2'>
+                        <Label htmlFor='auth-password'>Password</Label>
+                        <Input
+                          id='auth-password'
+                          type='password'
+                          value={authSettings.password}
+                          onChange={e => setAuthSettings({ ...authSettings, password: e.target.value } as Auth)}
+                        />
+                      </div>
                     </div>
                   )}
                 </div>
-              </div>
 
-              <div className='space-y-4'>
-                <h3 className='text-lg font-medium text-foreground'>Logging</h3>
-                <div className='space-y-2'>
-                  <Label htmlFor='log-level'>Log Level</Label>
-                  <Select
-                    value={logLevel}
-                    onValueChange={setLogLevel}
-                  >
-                    <SelectTrigger id='log-level'>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value='DEBUG'>DEBUG</SelectItem>
-                      <SelectItem value='INFO'>INFO</SelectItem>
-                      <SelectItem value='WARN'>WARN</SelectItem>
-                      <SelectItem value='ERROR'>ERROR</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className='text-sm text-muted-foreground'>
-                    Minimum log level for application logging.
-                  </p>
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>DLNA Configuration</h3>
+
+                  <div className='flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between'>
+                    <div className='space-y-0.5'>
+                      <Label htmlFor='dlna-enabled'>Enable DLNA</Label>
+                      <p className='text-sm text-muted-foreground'>Allow media streaming via DLNA protocol.</p>
+                    </div>
+                    <Switch id='dlna-enabled'
+                      checked={dlnaEnabled}
+                      onCheckedChange={setDlnaEnabled} />
+                  </div>
+
+                  {dlnaEnabled && (
+                    <div className='space-y-2'>
+                      <Label htmlFor='friendly-name'>Friendly Name</Label>
+                      <Input
+                        id='friendly-name'
+                        placeholder='TorrPlay'
+                        value={friendlyName}
+                        onChange={e => setFriendlyName(e.target.value)}
+                        maxLength={64}
+                      />
+                      <p className='text-sm text-muted-foreground'>Display name for DLNA devices (1-64 characters).</p>
+                    </div>
+                  )}
                 </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='log-format'>Log Format</Label>
-                  <Select
-                    value={logFormat}
-                    onValueChange={setLogFormat}
-                  >
-                    <SelectTrigger id='log-format'>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value='text'>Text</SelectItem>
-                      <SelectItem value='json'>JSON</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className='text-sm text-muted-foreground'>
-                    Format for application log output.
-                  </p>
+
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>Storage</h3>
+                  <div className='space-y-2'>
+                    <Label htmlFor='file-storage-path'>File Storage Path</Label>
+                    <Input
+                      id='file-storage-path'
+                      placeholder='/torrplay'
+                      value={fileStoragePath}
+                      onChange={e => setFileStoragePath(e.target.value)}
+                    />
+                    <p className='text-sm text-muted-foreground'>
+                      The path where torrent files will be stored. Leave empty to disable file storage.
+                    </p>
+                  </div>
+
+                  <div className='flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between'>
+                    <div className='space-y-0.5'>
+                      <Label htmlFor='downloader-enabled'>Enable Downloader</Label>
+                      <p className='text-sm text-muted-foreground'>Enable background downloading for torrents with file storage.</p>
+                    </div>
+                    <Switch
+                      id='downloader-enabled'
+                      checked={downloaderEnabled}
+                      onCheckedChange={setDownloaderEnabled}
+                      disabled={!fileStoragePath}
+                    />
+                  </div>
+                </div>
+
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>Torrent Client</h3>
+                  <div className='space-y-2'>
+                    <Label htmlFor='torrent-trackers'>Torrent Trackers</Label>
+                    <Textarea
+                      id='torrent-trackers'
+                      value={(torrentTrackers || []).join('\n')}
+                      onChange={e => setTorrentTrackers(e.target.value.split('\n').filter(t => t !== ''))}
+                      rows={5}
+                    />
+                    <p className='text-sm text-muted-foreground'>
+                      One tracker tier per line. To include multiple trackers in the same tier, separate them with commas.
+                    </p>
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='disable-dht'>Disable DHT</Label>
+                    <Switch
+                      id='disable-dht'
+                      checked={torrentClientSettings?.disableDht ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableDht: checked } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='disable-ipv6'>Disable IPv6</Label>
+                    <Switch
+                      id='disable-ipv6'
+                      checked={torrentClientSettings?.disableIpv6 ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableIpv6: checked } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='disable-pex'>Disable PEX</Label>
+                    <Switch
+                      id='disable-pex'
+                      checked={torrentClientSettings?.disablePex ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disablePex: checked } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='disable-tcp'>Disable TCP</Label>
+                    <Switch
+                      id='disable-tcp'
+                      checked={torrentClientSettings?.disableTcp ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableTcp: checked } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='disable-utp'>Disable uTP</Label>
+                    <Switch
+                      id='disable-utp'
+                      checked={torrentClientSettings?.disableUtp ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableUtp: checked } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='seed'>Enable Seeding</Label>
+                    <Switch
+                      id='seed'
+                      checked={torrentClientSettings?.seed ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, seed: checked } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='flex items-center justify-between'>
+                    <Label htmlFor='prefer-header-obfuscation'>Prefer Header Obfuscation</Label>
+                    <Switch
+                      id='prefer-header-obfuscation'
+                      checked={torrentClientSettings?.preferHeaderObfuscation ?? false}
+                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, preferHeaderObfuscation: checked } as TorrentClient)}
+                    />
+                  </div>
+
+                  <div className='space-y-2'>
+                    <div className='flex items-center justify-between'>
+                      <Label>Rate Limit Unit</Label>
+                      <Select value={rateLimitUnit}
+                        onValueChange={setRateLimitUnit}>
+                        <SelectTrigger className='w-[120px]'>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value='bytes/s'>bytes/s</SelectItem>
+                          <SelectItem value='KiB/s'>KiB/s</SelectItem>
+                          <SelectItem value='MiB/s'>MiB/s</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <div className='space-y-2'>
+                    <Label htmlFor='download-rate-limit'>Download Rate Limit ({rateLimitUnit})</Label>
+                    <Input
+                      id='download-rate-limit'
+                      type='number'
+                      value={convertRateLimit(torrentClientSettings?.downloadRateLimit ?? 0, rateLimitUnit)}
+                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, downloadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                    />
+                    <p className='text-sm text-muted-foreground'>
+                      0 means unlimited.
+                    </p>
+                  </div>
+                  <div className='space-y-2'>
+                    <Label htmlFor='upload-rate-limit'>Upload Rate Limit ({rateLimitUnit})</Label>
+                    <Input
+                      id='upload-rate-limit'
+                      type='number'
+                      value={convertRateLimit(torrentClientSettings?.uploadRateLimit ?? 0, rateLimitUnit)}
+                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, uploadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                    />
+                    <p className='text-sm text-muted-foreground'>
+                      0 means unlimited.
+                    </p>
+                  </div>
+                  <div className='space-y-2'>
+                    <Label htmlFor='established-conns-per-torrent'>Connections Per Torrent</Label>
+                    <Input
+                      id='established-conns-per-torrent'
+                      type='number'
+                      value={torrentClientSettings?.establishedConnsPerTorrent ?? 50}
+                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, establishedConnsPerTorrent: parseInt(e.target.value) } as TorrentClient)}
+                    />
+                  </div>
+                  <div className='space-y-2'>
+                    <Label htmlFor='torrent-peers-high-water'>Peers High Water Mark</Label>
+                    <Input
+                      id='torrent-peers-high-water'
+                      type='number'
+                      value={torrentClientSettings?.torrentPeersHighWater ?? 500}
+                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, torrentPeersHighWater: parseInt(e.target.value) } as TorrentClient)}
+                    />
+                  </div>
+                </div>
+
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>Memory Management</h3>
+
+                  <div className='space-y-3'>
+                    <div className='flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between'>
+                      <Label htmlFor='max-memory'>Maximum Memory</Label>
+                      <span className='text-sm font-mono text-muted-foreground'>
+                        {formatBytes(maxMemory * 1024 * 1024)}
+                      </span>
+                    </div>
+
+                    <Slider
+                      id='max-memory'
+                      min={32}
+                      max={2048}
+                      step={32}
+                      value={[maxMemory]}
+                      onValueChange={value => setMaxMemory(value[0])}
+                      className='py-4'
+                    />
+
+                    <div className='flex justify-between text-sm text-muted-foreground'>
+                      <span>32 MB</span>
+                      <span>2 GB</span>
+                    </div>
+
+                    <p className='text-sm text-muted-foreground'>
+                      Memory limit for piece storage. Lower values reduce memory usage but may impact streaming performance.
+                    </p>
+
+                    {maxMemory < 64 && (
+                      <div className='rounded-md bg-destructive/10 border border-destructive/20 p-3'>
+                        <p className='text-sm text-destructive'>
+                          Warning: Low memory settings may cause poor streaming performance for large files.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>Logging</h3>
+                  <div className='space-y-2'>
+                    <Label htmlFor='log-level'>Log Level</Label>
+                    <Select
+                      value={logLevel}
+                      onValueChange={setLogLevel}
+                    >
+                      <SelectTrigger id='log-level'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value='DEBUG'>DEBUG</SelectItem>
+                        <SelectItem value='INFO'>INFO</SelectItem>
+                        <SelectItem value='WARN'>WARN</SelectItem>
+                        <SelectItem value='ERROR'>ERROR</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className='text-sm text-muted-foreground'>
+                      Minimum log level for application logging.
+                    </p>
+                  </div>
+                  <div className='space-y-2'>
+                    <Label htmlFor='log-format'>Log Format</Label>
+                    <Select
+                      value={logFormat}
+                      onValueChange={setLogFormat}
+                    >
+                      <SelectTrigger id='log-format'>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value='text'>Text</SelectItem>
+                        <SelectItem value='json'>JSON</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className='text-sm text-muted-foreground'>
+                      Format for application log output.
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
-        </div>
-
-        <DialogFooter className='flex-col gap-2 sm:flex-row'>
-          <Button variant='outline'
-            onClick={onResetToDefaults}
-            disabled={saving}
-            className='w-full sm:w-auto'>
-            Reset to Defaults
-          </Button>
-          <div className='flex gap-2 w-full sm:w-auto sm:ml-auto'>
-            <Button variant='outline'
-              onClick={onReset}
-              disabled={saving}
-              className='flex-1 sm:flex-auto'>
-              Reset
-            </Button>
-            <Button onClick={onSave}
-              disabled={saving || (!isApiUrlChangePending && !canSaveServerSettings)}
-              className='flex-1 sm:flex-auto'>
-              {saving ? (
-                <>
-                  <Loader2 className='h-4 w-4 mr-2 animate-spin' />
-                  Saving...
-                </>
-              ) : (
-                'Save Changes'
-              )}
-            </Button>
+            )}
           </div>
-        </DialogFooter>
+
+          <DialogFooter className='flex-col gap-2 sm:flex-row mt-4'>
+            <Button
+              type='button'
+              variant='outline'
+              onClick={onResetToDefaults}
+              disabled={saving}
+              className='w-full sm:w-auto'
+            >
+              Reset to Defaults
+            </Button>
+            <div className='flex gap-2 w-full sm:w-auto sm:ml-auto'>
+              <Button
+                type='button'
+                variant='outline'
+                onClick={onReset}
+                disabled={saving}
+                className='flex-1 sm:flex-auto'
+              >
+                Reset
+              </Button>
+              <Button
+                type='submit'
+                disabled={saving || (!isApiUrlChangePending && !canSaveServerSettings)}
+                className='flex-1 sm:flex-auto'
+              >
+                {saving ? (
+                  <>
+                    <Loader2 className='h-4 w-4 mr-2 animate-spin' />
+                    Saving...
+                  </>
+                ) : (
+                  'Save Changes'
+                )}
+              </Button>
+            </div>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   );

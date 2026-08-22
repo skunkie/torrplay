@@ -62,6 +62,11 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
           return;
         }
 
+        // Do not intercept Escape if a modal dialog is currently open in the DOM
+        if (document.querySelector('[role="dialog"][data-state="open"]')) {
+          return;
+        }
+
         e.preventDefault();
         e.stopPropagation();
 
@@ -126,6 +131,12 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
         {...props}
         ref={cardRef}
         onKeyDown={handleKeyDown}
+        onBlur={e => {
+          if (!justOpenedDialog.current && !cardRef.current?.contains(e.relatedTarget as Node)) {
+            setIsNavigating(false);
+          }
+          props.onBlur?.(e);
+        }}
         data-nav-inside={isNavigating}
         className='group hover:border-primary/50 transition-colors flex flex-col focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
         tabIndex={isNavigating ? -1 : 0}
