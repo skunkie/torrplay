@@ -49,8 +49,9 @@ export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
   return (
     <header
       ref={ref}
+      aria-hidden={isHidden ? true : undefined}
       className={`border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50 transition-transform duration-300 ${
-        isHidden ? '-translate-y-full' : 'translate-y-0'
+        isHidden ? '-translate-y-full pointer-events-none invisible md:visible md:pointer-events-auto' : 'translate-y-0'
       } md:translate-y-0`}
     >
       <div className='container mx-auto px-4 py-2 space-y-4 max-w-screen-tv'>

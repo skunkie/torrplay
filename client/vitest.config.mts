@@ -13,7 +13,7 @@ export default defineConfig({
     globals: true,
     setupFiles: './vitest.setup.ts',
     watch: false,
-    include: ['components/**/__tests__/**/*.test.tsx'],
+    include: ['{components,hooks,lib}/**/__tests__/**/*.test.tsx'],
     silent: true,
   },
   resolve: {

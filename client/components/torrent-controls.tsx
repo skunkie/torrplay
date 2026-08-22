@@ -28,7 +28,9 @@ interface TorrentControlsProps {
   onCategoryFilterChange: (value: string) => void,
   sortBy: string,
   onSortByChange: (value: string) => void,
-  onAddTorrent: () => void
+  onAddTorrent: () => void,
+  topControlsRef?: React.RefObject<HTMLDivElement | null>,
+  mobileControlsRef?: React.RefObject<HTMLDivElement | null>
 }
 
 export function TorrentControls({
@@ -43,9 +45,14 @@ export function TorrentControls({
   sortBy,
   onSortByChange,
   onAddTorrent,
+  topControlsRef: externalTopControlsRef,
+  mobileControlsRef: externalMobileControlsRef,
 }: TorrentControlsProps) {
-  const mobileControlsRef = useRef<HTMLDivElement>(null);
-  const topControlsRef = useRef<HTMLDivElement>(null);
+  const internalMobileControlsRef = useRef<HTMLDivElement>(null);
+  const internalTopControlsRef = useRef<HTMLDivElement>(null);
+
+  const topControlsRef = externalTopControlsRef || internalTopControlsRef;
+  const mobileControlsRef = externalMobileControlsRef || internalMobileControlsRef;
 
   return (
     <div className='mb-3'>
