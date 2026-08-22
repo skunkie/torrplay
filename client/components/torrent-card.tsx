@@ -4,7 +4,7 @@
 
 'use client';
 
-import { BarChart3, Edit, ImageOff, Play, Plus, Trash2 } from 'lucide-react';
+import { BarChart3, Edit, HardDrive, ImageOff, Play, Plus, Trash2 } from 'lucide-react';
 import { forwardRef, KeyboardEvent, useEffect, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -161,6 +161,15 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
               <div className='w-full h-full flex items-center justify-center'
                 data-testid='no-poster-placeholder'>
                 <ImageOff className='w-16 h-16 text-muted-foreground' />
+              </div>
+            )}
+            {torrent.storage === 'file' && (
+              <div
+                data-testid='file-storage-badge'
+                title='File Storage'
+                className='absolute top-2 right-2 z-10 flex items-center justify-center rounded-md bg-black/60 backdrop-blur-sm p-1 text-white shadow-xs pointer-events-none'
+              >
+                <HardDrive className='h-3.5 w-3.5' />
               </div>
             )}
             {hasVideoFiles && (

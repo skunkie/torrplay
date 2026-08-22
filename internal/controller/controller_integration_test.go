@@ -195,6 +195,28 @@ func TestIntegrationAddTorrentWhileStreaming(t *testing.T) {
 	finishBlockedIntegrationStream(t, fixture, done)
 }
 
+func TestIntegrationTSTorrentsAddWhileStreaming(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, true)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, fixture)
+	done, activeTorrent := startBlockedIntegrationStream(t, ctrl, fixture, fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4", ih))
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	reqBody := fmt.Sprintf(`{"action":"add","link":%q,"title":"TS Add Streaming"}`, utils.MagnetURIFromHash(ih))
+	resp, err := http.Post(server.URL+"/torrents", "application/json", bytes.NewBufferString(reqBody))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
+
+	loadedTorrent, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok)
+	assert.Same(t, activeTorrent, loadedTorrent)
+
+	finishBlockedIntegrationStream(t, fixture, done)
+}
+
 func TestIntegrationStreamingFromLocalWebseed(t *testing.T) {
 	fixture := newLocalWebseedFixture(t, false)
 	defer fixture.release()

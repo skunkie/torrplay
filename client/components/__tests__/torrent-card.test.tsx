@@ -457,4 +457,36 @@ describe('TorrentCard', () => {
     expect(posterInner).toBeInTheDocument();
     expect(card).not.toHaveClass('overflow-hidden');
   });
+
+  it('renders the file storage badge when storage is file', () => {
+    render(
+      <TorrentCard
+        torrent={{ ...mockTorrent, storage: 'file' }}
+        onEdit={() => {}}
+        onViewStats={() => {}}
+        onDelete={() => {}}
+        onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
+      />,
+    );
+
+    const badge = screen.getByTestId('file-storage-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute('title', 'File Storage');
+  });
+
+  it('does not render the file storage badge when storage is memory', () => {
+    render(
+      <TorrentCard
+        torrent={{ ...mockTorrent, storage: 'memory' }}
+        onEdit={() => {}}
+        onViewStats={() => {}}
+        onDelete={() => {}}
+        onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
+      />,
+    );
+
+    expect(screen.queryByTestId('file-storage-badge')).not.toBeInTheDocument();
+  });
 });
