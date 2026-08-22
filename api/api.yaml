@@ -1659,6 +1659,10 @@ components:
             - total_size
             - piece_count
           properties:
+            active:
+              type: boolean
+              description: Whether the torrent is actively streaming or downloading.
+              example: true
             files:
               type: array
               description: List of files contained in the torrent.

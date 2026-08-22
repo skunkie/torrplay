@@ -1536,3 +1536,64 @@ func TestCalcReadaheadPct(t *testing.T) {
 		})
 	}
 }
+
+func TestTorrentActiveField(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	magnet := samples[ih]
+	req := api.TorrentAdd{Magnet: &magnet}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// Initially not active
+	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
+	require.Equal(t, http.StatusOK, rr.Code)
+	var gotTorrent api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&gotTorrent))
+	require.NotNil(t, gotTorrent.Active)
+	assert.False(t, *gotTorrent.Active)
+
+	var listResult api.ListTorrents
+	rr = doGet(t, ctrl.router, "/api/v1/torrents")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&listResult))
+	require.Len(t, listResult.Torrents, 1)
+	require.NotNil(t, listResult.Torrents[0].Active)
+	assert.False(t, *listResult.Torrents[0].Active)
+
+	// Simulate active streaming
+	to, err := ctrl.addTorrentByHash(ih)
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	file := to.Files()[0]
+	ctrl.streamPool.SetReadaheadBudget(1024 * 1024)
+	_, release, err := ctrl.streamPool.Acquire(file, stream.MemoryStorage)
+	require.NoError(t, err)
+
+	// Now should be active
+	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&gotTorrent))
+	require.NotNil(t, gotTorrent.Active)
+	assert.True(t, *gotTorrent.Active)
+
+	rr = doGet(t, ctrl.router, "/api/v1/torrents")
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&listResult))
+	require.Len(t, listResult.Torrents, 1)
+	require.NotNil(t, listResult.Torrents[0].Active)
+	assert.True(t, *listResult.Torrents[0].Active)
+
+	// Release stream
+	release()
+
+	// Should be inactive again
+	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&gotTorrent))
+	require.NotNil(t, gotTorrent.Active)
+	assert.False(t, *gotTorrent.Active)
+}

@@ -502,6 +502,7 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 	t, err := c.db.GetTorrent(ih)
 	if err == nil {
 		apiT := database.ToAPITorrent(t)
+		apiT.Active = utils.Ptr(c.hasTorrentReaders(ih))
 		if apiT.Poster != nil {
 			apiT.Poster = c.buildPosterUrl(r, *apiT.Poster)
 		}
@@ -527,6 +528,7 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 	select {
 	case <-to.GotInfo():
 		metadata := torrentToMetadata(to)
+		metadata.Active = utils.Ptr(c.hasTorrentReaders(ih))
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(metadata); err != nil {
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
@@ -1352,6 +1354,7 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 	}
 
 	for _, t := range ts {
+		t.Active = utils.Ptr(c.hasTorrentReaders(t.Hash))
 		if t.Poster != nil {
 			t.Poster = c.buildPosterUrl(r, *t.Poster)
 		}
