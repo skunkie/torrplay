@@ -127,30 +127,41 @@ func TestServer_RestartFailedShutdown(t *testing.T) {
 	addr := "127.0.0.1:8085"
 	s := NewServer(chi.NewRouter(), addr, logger)
 
-	// Manually create a server instance that will fail to shut down gracefully.
+	blockCh := make(chan struct{})
 	mockServer := &http.Server{
 		Addr: s.addr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// This handler will block, preventing a graceful shutdown.
-			<-time.After(10 * time.Second)
+			select {
+			case <-blockCh:
+			case <-r.Context().Done():
+			}
 		}),
 	}
+	defer func() {
+		close(blockCh)
+		_ = mockServer.Close()
+	}()
 
 	s.mu.Lock()
 	s.server = mockServer
 	s.mu.Unlock()
 
 	go func() {
-		// This can return an error "address already in use" if the OS hasn't
-		// freed the port from a previous test. That's fine.
-		// The main thing is that it's listening.
 		_ = s.server.ListenAndServe()
 	}()
 	<-time.After(50 * time.Millisecond)
 
 	// Make a request that will hang.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	go func() {
-		_, _ = http.Get("http://" + addr)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr, nil)
+		tr := &http.Transport{DisableKeepAlives: true}
+		client := &http.Client{Transport: tr}
+		resp, _ := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 	}()
 	// Give the request time to be accepted by the server.
 	<-time.After(50 * time.Millisecond)
