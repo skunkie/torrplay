@@ -29,9 +29,14 @@ import (
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/metrics"
+	tputil "github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
 	"github.com/torrplay/torrplay/pkg/stream"
 )
+
+func TestMain(m *testing.M) {
+	tputil.VerifyTestMain(m)
+}
 
 // Taken from https://webtorrent.io/free-torrents.
 var samples = map[metainfo.Hash]string{

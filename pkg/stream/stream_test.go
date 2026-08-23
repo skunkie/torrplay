@@ -19,7 +19,12 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/torrplay/torrplay/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	testutil.VerifyTestMain(m)
+}
 
 func TestPool_AcquireRejectsInvalidFile(t *testing.T) {
 	pool := New(Config{})
