@@ -18,8 +18,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
 )
+
+func TestMain(m *testing.M) {
+	testutil.VerifyTestMain(m, "github.com/ethulhu/helix", "github.com/skunkie/helix")
+}
 
 const testTorrentFileName = "test file.mp4"
 
@@ -47,12 +52,11 @@ type mockDB struct {
 func (m *mockDB) GetSettings() (*database.Settings, error) {
 	return &database.Settings{
 		Settings: api.Settings{
-			EnableDlna:          utils.Ptr(true),
-			FriendlyName:        utils.Ptr("test-server"),
-			HTTPServerPort:      utils.Ptr(8080),
-			LogLevel:            utils.Ptr(slog.LevelInfo),
-			MaxMemory:           utils.Ptr(int64(1024 * 1024 * 1024)),
-			ReadaheadPercentage: utils.Ptr(20),
+			EnableDlna:     utils.Ptr(true),
+			FriendlyName:   utils.Ptr("test-server"),
+			HTTPServerPort: utils.Ptr(8080),
+			LogLevel:       utils.Ptr(slog.LevelInfo),
+			MaxMemory:      utils.Ptr(int64(1024 * 1024 * 1024)),
 			TorrentClient: &api.TorrentClient{
 				DisableIPv6:                utils.Ptr(false),
 				EstablishedConnsPerTorrent: utils.Ptr(50),

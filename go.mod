@@ -15,7 +15,6 @@ tool (
 
 require (
 	github.com/ProfChaos/torrent-name-parser v0.5.1
-	github.com/ajnavarro/go-torrent-fs v0.0.0-20220321185138-a877b11b19e7
 	github.com/anacrolix/generics v0.1.1-0.20251125230353-15d98d46693b
 	github.com/anacrolix/torrent v1.61.0
 	github.com/ethulhu/helix v0.0.0-20201121143238-0df88b97c21d
@@ -32,6 +31,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/swaggest/swgui v1.8.7
 	go.etcd.io/bbolt v1.4.3
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/time v0.14.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1

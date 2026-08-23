@@ -24,7 +24,12 @@ import (
 	"github.com/anacrolix/torrent/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	testutil.VerifyTestMain(m)
+}
 
 // newTestClient creates a new client for testing with a specified memory limit.
 func newTestClient(maxMemory int64) *Client {
