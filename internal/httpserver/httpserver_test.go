@@ -18,7 +18,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/testutil"
 )
+
+func TestMain(m *testing.M) {
+	testutil.VerifyTestMain(m)
+}
 
 func TestServer_Lifecycle(t *testing.T) {
 	// Setup a simple router for testing.
