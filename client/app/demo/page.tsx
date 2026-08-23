@@ -38,8 +38,9 @@ const demoTorrentsData: Torrent[] = [
     title: 'Sintel',
     magnet: 'magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10',
     poster: 'https://upload.wikimedia.org/wikipedia/commons/8/8f/Sintel_poster.jpg',
-    category: 'Animation',
-    createdAt: '2026-01-01T00:00:00.000000+00:00',
+    category: 'Fantasy',
+    createdAt: '2026-01-10T09:00:00.000Z',
+    updatedAt: '2026-01-18T11:00:00.000Z',
     totalSize: 129302391,
     pieceCount: 987,
     pieceSize: 131072,
@@ -65,8 +66,8 @@ const demoTorrentsData: Torrent[] = [
     magnet: 'magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fbig-buck-bunny.torrent',
     poster: 'https://upload.wikimedia.org/wikipedia/commons/c/c5/Big_buck_bunny_poster_big.jpg',
     category: 'Animation',
-    createdAt: '2026-01-01T00:00:00.000000+00:00',
-    updatedAt: '2026-01-02T00:00:00.000000+00:00',
+    createdAt: '2026-01-01T10:00:00.000Z',
+    updatedAt: '2026-01-20T14:00:00.000Z',
     totalSize: 276445467,
     pieceCount: 1055,
     pieceSize: 262144,
@@ -83,8 +84,9 @@ const demoTorrentsData: Torrent[] = [
     title: 'Cosmos Laundromat',
     magnet: 'magnet:?xt=urn:btih:c9e15763f722f23e98a29decdfae341b98d53056&dn=Cosmos+Laundromat&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fcosmos-laundromat.torrent',
     poster: 'https://upload.wikimedia.org/wikipedia/commons/c/c5/CosmosLaundromatPoster.jpg',
-    category: 'Animation',
-    createdAt: '2026-01-01T00:00:00.000000+00:00',
+    category: 'Sci-Fi',
+    createdAt: '2026-01-04T12:00:00.000Z',
+    updatedAt: '2026-01-15T16:00:00.000Z',
     totalSize: 220864086,
     pieceCount: 843,
     pieceSize: 262144,
@@ -104,8 +106,9 @@ const demoTorrentsData: Torrent[] = [
     title: 'Tears of Steel',
     magnet: 'magnet:?xt=urn:btih:209c8226b299b308beaf2b9cd3fb49212dbd13ec&dn=Tears+of+Steel&tr=udp%3A%2F%2Fexplodie.org%3A6969&tr=udp%3A%2F%2Ftracker.coppersurfer.tk%3A6969&tr=udp%3A%2F%2Ftracker.empire-js.us%3A1337&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=wss%3A%2F%2Ftracker.btorrent.xyz&tr=wss%3A%2F%2Ftracker.fastcast.nz&tr=wss%3A%2F%2Ftracker.openwebtorrent.com&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Ftears-of-steel.torrent',
     poster: 'https://upload.wikimedia.org/wikipedia/commons/thumb/7/70/Tos-poster.png/1280px-Tos-poster.png',
-    category: 'Animation',
-    createdAt: '2026-01-01T00:00:00.000000+00:00',
+    category: 'Live Action',
+    createdAt: '2026-01-07T15:00:00.000Z',
+    updatedAt: '2026-01-10T18:00:00.000Z',
     totalSize: 571426507,
     pieceCount: 1090,
     pieceSize: 524288,
@@ -153,12 +156,14 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     memoryStats: memoryStats,
     memoryUsagePercentage: 0,
     pieces: Array.from({ length: 987 }, (_, i) => ({
-      complete: i < 987,
+      complete: true,
       inMemory: false,
       index: i,
-      size: 131072
+      size: i === 986 ? 65399 : 131072,
     })),
-    readers: [],
+    readers: [
+      { position: 350, start: 340, end: 460 }
+    ],
     totalPieces: 987,
     totalSize: 129302391,
   },
@@ -189,10 +194,10 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     memoryStats: memoryStats,
     memoryUsagePercentage: 0,
     pieces: Array.from({ length: 1055 }, (_, i) => ({
-      complete: i < 1055,
+      complete: true,
       inMemory: false,
       index: i,
-      size: 262144
+      size: i === 1054 ? 145691 : 262144,
     })),
     readers: [
       { position: 200, start: 190, end: 320 }
@@ -230,7 +235,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
       complete: i < 387,
       inMemory: i < 387,
       index: i,
-      size: 262144
+      size: i === 842 ? 138838 : 262144,
     })),
     readers: [
       { position: 180, start: 170, end: 300 }
@@ -260,11 +265,12 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     memoryUsagePercentage: 1,
     metadataChunksRead: 2,
     pendingPeers: 12,
-    pieces: [
-      { complete: true, inMemory: true, index: 0, size: 524288 },
-      { complete: true, inMemory: true, index: 1, size: 524288 },
-      { complete: true, inMemory: true, index: 1089, size: 476875 }
-    ],
+    pieces: Array.from({ length: 1090 }, (_, i) => ({
+      complete: i === 0 || i === 1 || i === 1089,
+      inMemory: i === 0 || i === 1 || i === 1089,
+      index: i,
+      size: i === 1089 ? 476875 : 524288,
+    })),
     readers: [
       { position: 0, start: 0, end: 40 }
     ],
