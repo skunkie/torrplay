@@ -18,14 +18,14 @@ export function DemoMetricsDialog({ open, onOpenChange }: DemoMetricsDialogProps
     return {
       usedMemory: 268435456,
       maxMemory: 536870912,
-      activeTorrents: 2,
+      activeTorrents: 4,
       totalPieces: 4000
     };
   }, []);
 
   const systemMetrics = useMemo(() => {
     return {
-      activeTorrents: 2,
+      activeTorrents: 4,
       downloadSpeed: 1234567,
       uploadSpeed: 123456,
     };
