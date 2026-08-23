@@ -155,7 +155,15 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     return null;
   }, [modal, hash, torrentsData]);
 
+  const lastActiveElementRef = useRef<HTMLElement | null>(null);
+
   const updateModal = useCallback((newModal: string | null, newHash: string | null = null) => {
+    if (newModal && typeof document !== 'undefined') {
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body && !active.closest('[role="dialog"]')) {
+        lastActiveElementRef.current = active;
+      }
+    }
     const params = new URLSearchParams(searchParams.toString());
     if (newModal) {
       params.set('modal', newModal);
@@ -169,6 +177,21 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     }
     router.push(`${pathname}?${params.toString()}`, { scroll: false });
   }, [pathname, router, searchParams]);
+
+  const prevModalRef = useRef<string | null>(modal);
+  useEffect(() => {
+    if (prevModalRef.current && !modal) {
+      requestAnimationFrame(() => {
+        if (lastActiveElementRef.current && document.body.contains(lastActiveElementRef.current)) {
+          lastActiveElementRef.current.focus();
+        } else if (gridRef.current && document.activeElement === document.body) {
+          const firstItem = gridRef.current.querySelector<HTMLElement>('[data-radix-collection-item], [data-item]');
+          firstItem?.focus();
+        }
+      });
+    }
+    prevModalRef.current = modal;
+  }, [modal]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(min-width: 768px)');
@@ -543,8 +566,9 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         onSettingsClick={() => updateModal('settings')}
         onSystemInfoClick={() => updateModal('system-info')}
         onTitleSearch={handleTitleFilterChange}
+        inert={Boolean(modal)}
       />
-      <PageContainer>
+      <PageContainer inert={Boolean(modal)}>
         <TorrentControls
           torrentsData={torrentsData}
           torrents={categories}

@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React, { useRef } from 'react';
 import { describe, expect, it } from 'vitest';
 
@@ -156,4 +156,133 @@ describe('useKeyboardNavigation', () => {
     // Focus should remain on header button because dialog is open
     expect(headerBtn).toHaveFocus();
   });
+
+  it('restores focus to trigger element when dialog is closed', async () => {
+    const { Dialog, DialogContent } = await import('@/components/ui/dialog');
+
+    function DialogWrapper() {
+      const [open, setOpen] = React.useState(false);
+      return (
+        <div>
+          <button
+            data-testid='trigger-btn'
+            onClick={() => setOpen(true)}
+          >
+            Open Modal
+          </button>
+          <Dialog
+            open={open}
+            onOpenChange={setOpen}
+          >
+            <DialogContent>
+              <button
+                data-testid='close-modal-btn'
+                onClick={() => setOpen(false)}
+              >
+                Close
+              </button>
+            </DialogContent>
+          </Dialog>
+        </div>
+      );
+    }
+
+    render(<DialogWrapper />);
+
+    const triggerBtn = screen.getByTestId('trigger-btn');
+    triggerBtn.focus();
+    expect(triggerBtn).toHaveFocus();
+
+    fireEvent.click(triggerBtn);
+    expect(screen.getByTestId('close-modal-btn')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('close-modal-btn'));
+    await waitFor(() => {
+      expect(triggerBtn).toHaveFocus();
+    });
+  });
+
+  it('restores focus to distinct trigger elements across sequential dialog openings', async () => {
+    const { Dialog, DialogContent } = await import('@/components/ui/dialog');
+
+    function MultiTriggerDialogWrapper() {
+      const [activeModal, setActiveModal] = React.useState<string | null>(null);
+
+      return (
+        <div>
+          <button
+            data-testid='trigger-btn-1'
+            onClick={e => {
+              e.currentTarget.focus();
+              setActiveModal('modal-1');
+            }}
+          >
+            Open Modal 1
+          </button>
+          <button
+            data-testid='trigger-btn-2'
+            onClick={e => {
+              e.currentTarget.focus();
+              setActiveModal('modal-2');
+            }}
+          >
+            Open Modal 2
+          </button>
+
+          <Dialog
+            open={activeModal === 'modal-1'}
+            onOpenChange={open => !open && setActiveModal(null)}
+          >
+            <DialogContent>
+              <button
+                data-testid='close-modal-1'
+                onClick={() => setActiveModal(null)}
+              >
+                Close 1
+              </button>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog
+            open={activeModal === 'modal-2'}
+            onOpenChange={open => !open && setActiveModal(null)}
+          >
+            <DialogContent>
+              <button
+                data-testid='close-modal-2'
+                onClick={() => setActiveModal(null)}
+              >
+                Close 2
+              </button>
+            </DialogContent>
+          </Dialog>
+        </div>
+      );
+    }
+
+    render(<MultiTriggerDialogWrapper />);
+
+    const triggerBtn1 = screen.getByTestId('trigger-btn-1');
+    const triggerBtn2 = screen.getByTestId('trigger-btn-2');
+
+    // Trigger modal 1
+    fireEvent.click(triggerBtn1);
+    expect(screen.getByTestId('close-modal-1')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('close-modal-1'));
+    await waitFor(() => {
+      expect(triggerBtn1).toHaveFocus();
+    });
+
+    // Trigger modal 2
+    triggerBtn2.focus();
+    fireEvent.click(triggerBtn2);
+    expect(screen.getByTestId('close-modal-2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('close-modal-2'));
+    await waitFor(() => {
+      expect(triggerBtn2).toHaveFocus();
+    });
+  });
 });
+

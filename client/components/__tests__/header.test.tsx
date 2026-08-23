@@ -131,4 +131,21 @@ describe('Header', () => {
     fireEvent.click(systemInfoBtn);
     expect(onSystemInfoClick).toHaveBeenCalled();
   });
+
+  it('applies inert attribute to header element when inert is true', async () => {
+    const { Header } = await import('@/components/header');
+    render(
+      <Header
+        homeHref='/'
+        onSettingsClick={mockOnSettingsClick}
+        onMetricsClick={mockOnMetricsClick}
+        onTitleSearch={mockOnTitleSearch}
+        inert={true}
+      />
+    );
+
+    const header = document.querySelector('header');
+    expect(header).toBeInTheDocument();
+    expect(header).toHaveAttribute('inert');
+  });
 });

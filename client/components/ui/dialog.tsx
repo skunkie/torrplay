@@ -27,11 +27,32 @@ const dialogVariants = cva(
   },
 );
 
+const DialogTriggerContext = React.createContext<{
+  triggerElementRef: React.MutableRefObject<HTMLElement | null>
+}>({ triggerElementRef: { current: null } });
+
 function Dialog({
+  open,
+  modal = false,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot='dialog'
-    {...props} />;
+  const triggerElementRef = React.useRef<HTMLElement | null>(null);
+
+  if (open && typeof document !== 'undefined') {
+    const active = document.activeElement as HTMLElement | null;
+    if (active && active !== document.body && !active.closest('[role="dialog"]')) {
+      triggerElementRef.current = active;
+    }
+  }
+
+  return (
+    <DialogTriggerContext.Provider value={{ triggerElementRef }}>
+      <DialogPrimitive.Root data-slot='dialog'
+        open={open}
+        modal={modal}
+        {...props} />
+    </DialogTriggerContext.Provider>
+  );
 }
 
 function DialogTrigger({
@@ -63,8 +84,8 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot='dialog-overlay'
       className={cn(
-        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/50',
-        className,
+        'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/80',
+        className
       )}
       {...props}
     />
@@ -76,16 +97,44 @@ function DialogContent({
   children,
   variant,
   showCloseButton = true,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
 } & VariantProps<typeof dialogVariants>) {
+  const { triggerElementRef } = React.useContext(DialogTriggerContext);
+
+  const handleOpenAutoFocus = (event: Event) => {
+    if (triggerElementRef.current === null) {
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body && !active.closest('[role="dialog"]')) {
+        triggerElementRef.current = active;
+      }
+    }
+    if (onOpenAutoFocus) {
+      onOpenAutoFocus(event);
+    }
+  };
+
+  const handleCloseAutoFocus = (event: Event) => {
+    if (onCloseAutoFocus) {
+      onCloseAutoFocus(event);
+    }
+    if (!event.defaultPrevented && triggerElementRef.current && document.body.contains(triggerElementRef.current)) {
+      event.preventDefault();
+      triggerElementRef.current.focus();
+    }
+  };
+
   return (
     <DialogPortal data-slot='dialog-portal'>
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot='dialog-content'
         className={cn(dialogVariants({ variant, className }))}
+        onOpenAutoFocus={handleOpenAutoFocus}
+        onCloseAutoFocus={handleCloseAutoFocus}
         {...props}
       >
         {children}
