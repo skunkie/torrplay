@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { RefObject } from 'react';
+import React, { RefObject } from 'react';
 
 import { Button } from '@/components/ui/button';
 import {
@@ -74,6 +74,35 @@ export function AddTorrentDialogLayout({
   handleFileSubmit,
   loading,
 }: AddTorrentDialogLayoutProps) {
+  const [highlightedIndex, setHighlightedIndex] = React.useState(-1);
+
+  React.useEffect(() => {
+    setHighlightedIndex(-1);
+  }, [category, showSuggestions]);
+
+  const handleCategoryKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showSuggestions || filteredCategories.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlightedIndex(prev => (prev < filteredCategories.length - 1 ? prev + 1 : 0));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedIndex(prev => (prev > 0 ? prev - 1 : filteredCategories.length - 1));
+    } else if (e.key === 'Enter') {
+      if (highlightedIndex >= 0 && highlightedIndex < filteredCategories.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        setCategory(filteredCategories[highlightedIndex]);
+        setShowSuggestions(false);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      setShowSuggestions(false);
+    }
+  };
+
   return (
     <Dialog open={open}
       onOpenChange={onOpenChange}>
@@ -96,214 +125,250 @@ export function AddTorrentDialogLayout({
 
           <TabsContent value='magnet'
             className='space-y-4 pt-4'>
-            <div className='space-y-2'>
-              <Label htmlFor='magnet'>Magnet</Label>
-              <Input
-                id='magnet'
-                placeholder='magnet:?xt=urn:btih:...'
-                value={magnet}
-                onChange={e => setMagnet(e.target.value)}
-              />
-            </div>
+            <form onSubmit={e => {
+              e.preventDefault();
+              if (magnet && !loading) handleMagnetSubmit();
+            }}
+            className='space-y-4'>
+              <div className='space-y-2'>
+                <Label htmlFor='magnet'>Magnet</Label>
+                <Input
+                  id='magnet'
+                  placeholder='magnet:?xt=urn:btih:...'
+                  value={magnet}
+                  onChange={e => setMagnet(e.target.value)}
+                />
+              </div>
 
-            <div className='space-y-2'>
-              <Label htmlFor='title-magnet'>Title (optional)</Label>
-              <Input
-                id='title-magnet'
-                placeholder='My Torrent'
-                value={title}
-                onChange={e => setTitle(e.target.value)}
-              />
-            </div>
+              <div className='space-y-2'>
+                <Label htmlFor='title-magnet'>Title (optional)</Label>
+                <Input
+                  id='title-magnet'
+                  placeholder='My Torrent'
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                />
+              </div>
 
-            <div className='space-y-2 relative'
-              ref={categoryInputRef}>
-              <Label htmlFor='category-magnet'>Category (optional)</Label>
-              <Input
-                id='category-magnet'
-                placeholder='Movies, Series, Cartoons...'
-                value={category}
-                onChange={e => setCategory(e.target.value)}
-                onFocus={() => setShowSuggestions(true)}
-              />
-              {showSuggestions && filteredCategories.length > 0 && (
-                <div className='absolute z-10 w-full bg-secondary rounded-md shadow-lg mt-1'>
-                  <ul className='max-h-60 overflow-auto rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm'>
-                    {filteredCategories.map(cat => (
-                      <li
-                        key={cat}
-                        className='cursor-pointer select-none relative py-2 pl-3 pr-9 text-secondary-foreground hover:bg-primary hover:text-primary-foreground'
-                        onClick={() => {
-                          setCategory(cat);
-                          setShowSuggestions(false);
-                        }}
-                      >
-                        {cat}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
+              <div className='space-y-2 relative'
+                ref={categoryInputRef}>
+                <Label htmlFor='category-magnet'>Category (optional)</Label>
+                <Input
+                  id='category-magnet'
+                  placeholder='Movies, Series, Cartoons...'
+                  value={category}
+                  onChange={e => setCategory(e.target.value)}
+                  onFocus={() => setShowSuggestions(true)}
+                  onKeyDown={handleCategoryKeyDown}
+                  role='combobox'
+                  aria-autocomplete='list'
+                  aria-expanded={showSuggestions && filteredCategories.length > 0}
+                />
+                {showSuggestions && filteredCategories.length > 0 && (
+                  <div className='absolute z-10 w-full bg-secondary rounded-md shadow-lg mt-1'>
+                    <ul role='listbox'
+                      className='max-h-60 overflow-auto rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm'>
+                      {filteredCategories.map((cat, idx) => (
+                        <li
+                          key={cat}
+                          role='option'
+                          aria-selected={highlightedIndex === idx}
+                          className={`cursor-pointer select-none relative py-2 pl-3 pr-9 ${
+                            highlightedIndex === idx ? 'bg-primary text-primary-foreground' : 'text-secondary-foreground hover:bg-primary hover:text-primary-foreground'
+                          }`}
+                          onClick={() => {
+                            setCategory(cat);
+                            setShowSuggestions(false);
+                          }}
+                        >
+                          {cat}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
 
-            <div className='space-y-2'>
-              <Label htmlFor='poster-magnet'>Poster URL (optional)</Label>
-              <Input
-                id='poster-magnet'
-                placeholder='https://...'
-                value={poster}
-                onChange={e => setPoster(e.target.value)}
-              />
-            </div>
+              <div className='space-y-2'>
+                <Label htmlFor='poster-magnet'>Poster URL (optional)</Label>
+                <Input
+                  id='poster-magnet'
+                  placeholder='https://...'
+                  value={poster}
+                  onChange={e => setPoster(e.target.value)}
+                />
+              </div>
 
-            <div className='flex items-center space-x-2'>
-              <Switch
-                id='use-file-storage-magnet'
-                checked={useFileStorage}
-                onCheckedChange={setUseFileStorage}
-              />
-              <Label htmlFor='use-file-storage-magnet'>Use File Storage</Label>
-            </div>
+              <div className='flex items-center space-x-2'>
+                <Switch
+                  id='use-file-storage-magnet'
+                  checked={useFileStorage}
+                  onCheckedChange={setUseFileStorage}
+                />
+                <Label htmlFor='use-file-storage-magnet'>Use File Storage</Label>
+              </div>
 
-            <Button
-              onClick={handleMagnetSubmit}
-              disabled={!magnet || loading}
-              className='w-full'
-            >
-              {loading ? 'Adding...' : 'Add Torrent'}
-            </Button>
+              <Button
+                type='submit'
+                disabled={!magnet || loading}
+                className='w-full'
+              >
+                {loading ? 'Adding...' : 'Add Torrent'}
+              </Button>
+            </form>
           </TabsContent>
 
           <TabsContent value='hash'
             className='space-y-4 pt-4'>
-            <div className='space-y-2'>
-              <Label htmlFor='hash'>Info Hash</Label>
-              <Input
-                id='hash'
-                placeholder='1234567890abcdef...'
-                value={hash}
-                onChange={e => setHash(e.target.value)}
-              />
-            </div>
+            <form onSubmit={e => {
+              e.preventDefault();
+              if (hash && !loading) handleHashSubmit();
+            }}
+            className='space-y-4'>
+              <div className='space-y-2'>
+                <Label htmlFor='hash'>Info Hash</Label>
+                <Input
+                  id='hash'
+                  placeholder='1234567890abcdef...'
+                  value={hash}
+                  onChange={e => setHash(e.target.value)}
+                />
+              </div>
 
-            <div className='space-y-2'>
-              <Label htmlFor='title-hash'>Title (optional)</Label>
-              <Input
-                id='title-hash'
-                placeholder='My Torrent'
-                value={title}
-                onChange={e => setTitle(e.target.value)}
-              />
-            </div>
+              <div className='space-y-2'>
+                <Label htmlFor='title-hash'>Title (optional)</Label>
+                <Input
+                  id='title-hash'
+                  placeholder='My Torrent'
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                />
+              </div>
 
-            <div className='space-y-2 relative'
-              ref={categoryInputRef}>
-              <Label htmlFor='category-hash'>Category (optional)</Label>
-              <Input
-                id='category-hash'
-                placeholder='Movies, Series, Cartoons...'
-                value={category}
-                onChange={e => setCategory(e.target.value)}
-                onFocus={() => setShowSuggestions(true)}
-              />
-              {showSuggestions && filteredCategories.length > 0 && (
-                <div className='absolute z-10 w-full bg-secondary rounded-md shadow-lg mt-1'>
-                  <ul className='max-h-60 overflow-auto rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm'>
-                    {filteredCategories.map(cat => (
-                      <li
-                        key={cat}
-                        className='cursor-pointer select-none relative py-2 pl-3 pr-9 text-secondary-foreground hover:bg-primary hover:text-primary-foreground'
-                        onClick={() => {
-                          setCategory(cat);
-                          setShowSuggestions(false);
-                        }}
-                      >
-                        {cat}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
+              <div className='space-y-2 relative'
+                ref={categoryInputRef}>
+                <Label htmlFor='category-hash'>Category (optional)</Label>
+                <Input
+                  id='category-hash'
+                  placeholder='Movies, Series, Cartoons...'
+                  value={category}
+                  onChange={e => setCategory(e.target.value)}
+                  onFocus={() => setShowSuggestions(true)}
+                  onKeyDown={handleCategoryKeyDown}
+                  role='combobox'
+                  aria-autocomplete='list'
+                  aria-expanded={showSuggestions && filteredCategories.length > 0}
+                />
+                {showSuggestions && filteredCategories.length > 0 && (
+                  <div className='absolute z-10 w-full bg-secondary rounded-md shadow-lg mt-1'>
+                    <ul role='listbox'
+                      className='max-h-60 overflow-auto rounded-md py-1 text-base ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm'>
+                      {filteredCategories.map((cat, idx) => (
+                        <li
+                          key={cat}
+                          role='option'
+                          aria-selected={highlightedIndex === idx}
+                          className={`cursor-pointer select-none relative py-2 pl-3 pr-9 ${
+                            highlightedIndex === idx ? 'bg-primary text-primary-foreground' : 'text-secondary-foreground hover:bg-primary hover:text-primary-foreground'
+                          }`}
+                          onClick={() => {
+                            setCategory(cat);
+                            setShowSuggestions(false);
+                          }}
+                        >
+                          {cat}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
 
-            <div className='space-y-2'>
-              <Label htmlFor='poster-hash'>Poster URL (optional)</Label>
-              <Input
-                id='poster-hash'
-                placeholder='https://...'
-                value={poster}
-                onChange={e => setPoster(e.target.value)}
-              />
-            </div>
+              <div className='space-y-2'>
+                <Label htmlFor='poster-hash'>Poster URL (optional)</Label>
+                <Input
+                  id='poster-hash'
+                  placeholder='https://...'
+                  value={poster}
+                  onChange={e => setPoster(e.target.value)}
+                />
+              </div>
 
-            <div className='flex items-center space-x-2'>
-              <Switch
-                id='use-file-storage-hash'
-                checked={useFileStorage}
-                onCheckedChange={setUseFileStorage}
-              />
-              <Label htmlFor='use-file-storage-hash'>Use File Storage</Label>
-            </div>
+              <div className='flex items-center space-x-2'>
+                <Switch
+                  id='use-file-storage-hash'
+                  checked={useFileStorage}
+                  onCheckedChange={setUseFileStorage}
+                />
+                <Label htmlFor='use-file-storage-hash'>Use File Storage</Label>
+              </div>
 
-            <Button
-              onClick={handleHashSubmit}
-              disabled={!hash || loading}
-              className='w-full'
-            >
-              {loading ? 'Adding...' : 'Add Torrent'}
-            </Button>
+              <Button
+                type='submit'
+                disabled={!hash || loading}
+                className='w-full'
+              >
+                {loading ? 'Adding...' : 'Add Torrent'}
+              </Button>
+            </form>
           </TabsContent>
 
           <TabsContent value='file'
             className='space-y-4 pt-4'>
-            <div className='space-y-2'>
-              <Label htmlFor='file'>Torrent File</Label>
-              <Input
-                id='file'
-                type='file'
-                onChange={e =>
-                  setFile(e.target.files ? e.target.files[0] : null)
-                }
-                accept='.torrent'
-              />
-            </div>
+            <form onSubmit={e => {
+              e.preventDefault();
+              if (file && !loading) handleFileSubmit();
+            }}
+            className='space-y-4'>
+              <div className='space-y-2'>
+                <Label htmlFor='file'>Torrent File</Label>
+                <Input
+                  id='file'
+                  type='file'
+                  onChange={e =>
+                    setFile(e.target.files ? e.target.files[0] : null)
+                  }
+                  accept='.torrent'
+                />
+              </div>
 
-            <div className='space-y-2'>
-              <Label htmlFor='title-file'>Title (optional)</Label>
-              <Input
-                id='title-file'
-                placeholder='My Torrent'
-                value={title}
-                onChange={e => setTitle(e.target.value)}
-              />
-            </div>
+              <div className='space-y-2'>
+                <Label htmlFor='title-file'>Title (optional)</Label>
+                <Input
+                  id='title-file'
+                  placeholder='My Torrent'
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                />
+              </div>
 
-            <div className='space-y-2'>
-              <Label htmlFor='poster-file'>Poster URL (optional)</Label>
-              <Input
-                id='poster-file'
-                placeholder='https://...'
-                value={poster}
-                onChange={e => setPoster(e.target.value)}
-              />
-            </div>
+              <div className='space-y-2'>
+                <Label htmlFor='poster-file'>Poster URL (optional)</Label>
+                <Input
+                  id='poster-file'
+                  placeholder='https://...'
+                  value={poster}
+                  onChange={e => setPoster(e.target.value)}
+                />
+              </div>
 
-            <div className='flex items-center space-x-2'>
-              <Switch
-                id='use-file-storage-file'
-                checked={useFileStorage}
-                onCheckedChange={setUseFileStorage}
-              />
-              <Label htmlFor='use-file-storage-file'>Use File Storage</Label>
-            </div>
+              <div className='flex items-center space-x-2'>
+                <Switch
+                  id='use-file-storage-file'
+                  checked={useFileStorage}
+                  onCheckedChange={setUseFileStorage}
+                />
+                <Label htmlFor='use-file-storage-file'>Use File Storage</Label>
+              </div>
 
-            <Button
-              onClick={handleFileSubmit}
-              disabled={!file || loading}
-              className='w-full'
-            >
-              {loading ? 'Adding...' : 'Add Torrent'}
-            </Button>
+              <Button
+                type='submit'
+                disabled={!file || loading}
+                className='w-full'
+              >
+                {loading ? 'Adding...' : 'Add Torrent'}
+              </Button>
+            </form>
           </TabsContent>
         </Tabs>
       </DialogContent>

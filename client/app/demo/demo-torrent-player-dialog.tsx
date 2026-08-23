@@ -6,31 +6,14 @@
 
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 
-import DemoVideoPlayer from '@/components/demo-video-player';
+import { TorrentPlayerDialogLayout } from '@/components/torrent-player-dialog-layout';
 import type { Torrent, TorrentFile } from '@/lib/types/api';
-import { getInitialVideoFile, getVideoType } from '@/lib/video-utils';
-
-const videoExtensions = [
-  '.mp4',
-  '.mkv',
-  '.avi',
-  '.mov',
-  '.wmv',
-  '.webm',
-  '.flv',
-  '.m4v',
-];
+import { getInitialVideoFile, getVideoFiles, getVideoType } from '@/lib/video-utils';
 
 interface DemoTorrentPlayerDialogProps {
   torrent: Torrent | null,
   open: boolean,
   onOpenChange: (open: boolean) => void
-}
-
-function getSelectedFile(torrent: Torrent | null): TorrentFile | null {
-  if (!torrent) return null;
-  const files = torrent.files.filter(f => videoExtensions.some(ext => f.name.toLowerCase().endsWith(ext)));
-  return getInitialVideoFile(files);
 }
 
 export function DemoTorrentPlayerDialog({ torrent, open, onOpenChange }: DemoTorrentPlayerDialogProps) {
@@ -42,13 +25,18 @@ export function DemoTorrentPlayerDialog({ torrent, open, onOpenChange }: DemoTor
   }
   prevOpenRef.current = open;
 
-  const computedFile = open ? getSelectedFile(torrent) : null;
-  const selectedFile = userSelectedFile ?? computedFile;
+  const videoFiles = open && torrent ? getVideoFiles(torrent.files) : [];
+  const initialFile = open && torrent ? getInitialVideoFile(videoFiles) : null;
+  const selectedFile = userSelectedFile ?? initialFile;
 
   const handleExit = useCallback(() => {
-    onOpenChange(false);
-    setUserSelectedFile(null);
-  }, [onOpenChange]);
+    if (videoFiles.length > 1) {
+      setUserSelectedFile(null);
+    } else {
+      onOpenChange(false);
+      setUserSelectedFile(null);
+    }
+  }, [onOpenChange, videoFiles.length]);
 
   const videoPlayerOptions = useMemo(() => {
     if (selectedFile && torrent) {
@@ -66,18 +54,17 @@ export function DemoTorrentPlayerDialog({ torrent, open, onOpenChange }: DemoTor
 
   const isPlayerVisible = !!videoPlayerOptions;
 
-  if (!open || !torrent) return null;
-
-  if (!isPlayerVisible) return null;
-
   return (
-    <div className='fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4'>
-      <div className='relative w-full max-w-4xl aspect-video'>
-        <DemoVideoPlayer
-          options={videoPlayerOptions}
-          onExit={handleExit}
-        />
-      </div>
-    </div>
+    <TorrentPlayerDialogLayout
+      open={open}
+      onOpenChange={onOpenChange}
+      videoFiles={videoFiles}
+      selectedFile={selectedFile}
+      setSelectedFile={setUserSelectedFile}
+      isPlayerVisible={isPlayerVisible}
+      videoPlayerOptions={videoPlayerOptions}
+      handleExit={handleExit}
+      isDemo={true}
+    />
   );
 }

@@ -28,7 +28,8 @@ export function MetricsDialogLayout({ open, onOpenChange, memoryStats, systemMet
           <DialogDescription>Real-time system and torrent statistics</DialogDescription>
         </DialogHeader>
 
-        <div className='space-y-4 py-4 overflow-y-auto flex-1'>
+        <div tabIndex={0}
+          className='space-y-4 py-4 overflow-y-auto flex-1 focus:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-md'>
           <div className='grid gap-3 sm:grid-cols-2'>
             <Card className='p-4'>
               <div className='flex items-center gap-3'>

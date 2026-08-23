@@ -96,4 +96,19 @@ describe('DeleteTorrentDialog', () => {
 
     expect(screen.queryByText('Delete Torrent')).not.toBeInTheDocument();
   });
+
+  it('renders accessible dialog description', () => {
+    render(
+      <DeleteTorrentDialog
+        torrent={mockTorrent}
+        open={true}
+        onOpenChange={mockOnOpenChange}
+        onSuccess={mockOnSuccess}
+      />,
+    );
+
+    expect(
+      screen.getByText('Are you sure you want to delete this torrent? This action cannot be undone.')
+    ).toBeInTheDocument();
+  });
 });

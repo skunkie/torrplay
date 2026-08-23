@@ -8,6 +8,7 @@ import { type VideoSrc } from '@vidstack/react';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 
+import DemoVideoPlayer from './demo-video-player';
 import VideoPlayer from './video-player';
 
 interface VideoPlayerLayoutProps {
@@ -22,7 +23,7 @@ interface VideoPlayerLayoutProps {
   isDemo?: boolean
 }
 
-export const VideoPlayerLayout = ({ open, onOpenChange, options, onExit }: VideoPlayerLayoutProps) => {
+export const VideoPlayerLayout = ({ open, onOpenChange, options, onExit, isDemo = false }: VideoPlayerLayoutProps) => {
   return (
     <Dialog open={open}
       onOpenChange={onOpenChange}>
@@ -30,8 +31,15 @@ export const VideoPlayerLayout = ({ open, onOpenChange, options, onExit }: Video
         showCloseButton={false}>
         <DialogTitle className='sr-only'>{options.title ?? ''}</DialogTitle>
         <DialogDescription className='sr-only'>Video player for {options.title ?? 'video'}</DialogDescription>
-        {open && <VideoPlayer options={options}
-          onExit={onExit} />}
+        {open && (
+          isDemo ? (
+            <DemoVideoPlayer options={options}
+              onExit={onExit} />
+          ) : (
+            <VideoPlayer options={options}
+              onExit={onExit} />
+          )
+        )}
       </DialogContent>
     </Dialog>
   );

@@ -62,13 +62,19 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
           return;
         }
 
+        // Do not intercept Escape if a modal dialog is currently open in the DOM
+        if (document.querySelector('[role="dialog"][data-state="open"]')) {
+          return;
+        }
+
         e.preventDefault();
         e.stopPropagation();
 
-        if (justOpenedDialog.current) {
+        if (justOpenedDialog.current && !cardRef.current?.contains(document.activeElement)) {
           justOpenedDialog.current = false;
           lastFocusedButtonRef.current?.focus();
         } else {
+          justOpenedDialog.current = false;
           setIsNavigating(false);
           cardRef.current?.focus();
         }
@@ -126,6 +132,19 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
         {...props}
         ref={cardRef}
         onKeyDown={handleKeyDown}
+        onFocus={e => {
+          if (cardRef.current?.contains(e.target as Node) && e.target !== cardRef.current) {
+            setIsNavigating(true);
+            justOpenedDialog.current = false;
+          }
+          props.onFocus?.(e);
+        }}
+        onBlur={e => {
+          if (!justOpenedDialog.current && !cardRef.current?.contains(e.relatedTarget as Node)) {
+            setIsNavigating(false);
+          }
+          props.onBlur?.(e);
+        }}
         data-nav-inside={isNavigating}
         className='group hover:border-primary/50 transition-colors flex flex-col focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
         tabIndex={isNavigating ? -1 : 0}
@@ -135,8 +154,10 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
           role='button'
           aria-label={`Play torrent ${torrent.title || torrent.name}`}
           className='relative w-full pt-[143%] bg-muted cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-t-lg'
-          onClick={() => {
+          onClick={e => {
             if (hasVideoFiles) {
+              lastFocusedButtonRef.current = e.currentTarget as unknown as HTMLButtonElement;
+              justOpenedDialog.current = true;
               onPlayTorrent(torrent);
             }
           }}
@@ -144,6 +165,8 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               if (hasVideoFiles) {
+                lastFocusedButtonRef.current = e.currentTarget as unknown as HTMLButtonElement;
+                justOpenedDialog.current = true;
                 onPlayTorrent(torrent);
               }
             }
@@ -205,8 +228,8 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
               size='sm'
               onClick={e => {
                 lastFocusedButtonRef.current = e.currentTarget;
-                onViewStats(torrent);
                 justOpenedDialog.current = true;
+                onViewStats(torrent);
               }}
               tabIndex={isNavigating ? 0 : -1}
               className='group hover:bg-blue-500 hover:text-white dark:hover:bg-blue-600 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
@@ -221,8 +244,8 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
                 size='sm'
                 onClick={e => {
                   lastFocusedButtonRef.current = e.currentTarget;
-                  onEdit(torrent);
                   justOpenedDialog.current = true;
+                  onEdit(torrent);
                 }}
                 tabIndex={isNavigating ? 0 : -1}
                 className='group hover:bg-blue-500 hover:text-white dark:hover:bg-blue-600 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'
@@ -249,8 +272,8 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
               size='sm'
               onClick={e => {
                 lastFocusedButtonRef.current = e.currentTarget;
-                onDelete(torrent);
                 justOpenedDialog.current = true;
+                onDelete(torrent);
               }}
               tabIndex={isNavigating ? 0 : -1}
               className='group hover:bg-destructive hover:text-destructive-foreground transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2'

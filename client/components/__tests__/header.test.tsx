@@ -96,9 +96,56 @@ describe('Header', () => {
         onSettingsClick={mockOnSettingsClick}
         onMetricsClick={mockOnMetricsClick}
         onTitleSearch={mockOnTitleSearch}
-      />,
+      />
     );
 
     expect(screen.getByText('v2.5.3')).toBeInTheDocument();
+  });
+
+  it('calls onSettingsClick, onMetricsClick, and onSystemInfoClick when buttons are clicked', async () => {
+    const { Header } = await import('@/components/header');
+    const onSettingsClick = vi.fn();
+    const onMetricsClick = vi.fn();
+    const onSystemInfoClick = vi.fn();
+
+    render(
+      <Header
+        homeHref='/'
+        onSettingsClick={onSettingsClick}
+        onMetricsClick={onMetricsClick}
+        onSystemInfoClick={onSystemInfoClick}
+        onTitleSearch={mockOnTitleSearch}
+      />
+    );
+
+    const { fireEvent } = await import('@testing-library/react');
+    const settingsBtn = screen.getByRole('button', { name: 'Settings' });
+    fireEvent.click(settingsBtn);
+    expect(onSettingsClick).toHaveBeenCalled();
+
+    const metricsBtn = screen.getByRole('button', { name: 'Metrics' });
+    fireEvent.click(metricsBtn);
+    expect(onMetricsClick).toHaveBeenCalled();
+
+    const systemInfoBtn = screen.getByRole('button', { name: 'System Info' });
+    fireEvent.click(systemInfoBtn);
+    expect(onSystemInfoClick).toHaveBeenCalled();
+  });
+
+  it('applies inert attribute to header element when inert is true', async () => {
+    const { Header } = await import('@/components/header');
+    render(
+      <Header
+        homeHref='/'
+        onSettingsClick={mockOnSettingsClick}
+        onMetricsClick={mockOnMetricsClick}
+        onTitleSearch={mockOnTitleSearch}
+        inert={true}
+      />
+    );
+
+    const header = document.querySelector('header');
+    expect(header).toBeInTheDocument();
+    expect(header).toHaveAttribute('inert');
   });
 });

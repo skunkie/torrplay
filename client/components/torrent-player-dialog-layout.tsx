@@ -43,19 +43,36 @@ export const TorrentPlayerDialogLayout = ({
   handleExit,
   isDemo = false,
 }: TorrentPlayerDialogLayoutProps) => {
-  const renderContent = () => {
-    if (!isPlayerVisible) {
-      if (videoFiles.length === 0 && open) {
-        return (
+  if (isPlayerVisible && videoPlayerOptions) {
+    return (
+      <VideoPlayerLayout
+        open={open}
+        onOpenChange={shouldOpen => {
+          if (!shouldOpen && handleExit) {
+            handleExit();
+          } else {
+            onOpenChange(shouldOpen);
+          }
+        }}
+        options={videoPlayerOptions}
+        onExit={handleExit}
+        isDemo={isDemo}
+      />
+    );
+  }
+
+  return (
+    <Dialog open={open}
+      onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogTitle className='sr-only'>Torrent Player</DialogTitle>
+        <DialogDescription className='sr-only'>Media player for torrent videos</DialogDescription>
+        {videoFiles.length === 0 ? (
           <DialogHeader>
             <DialogTitle>No Playable Files</DialogTitle>
             <DialogDescription>No playable video files were found in this torrent.</DialogDescription>
           </DialogHeader>
-        );
-      }
-
-      if (videoFiles.length > 0) {
-        return (
+        ) : (
           <>
             <DialogHeader>
               <DialogTitle>Select a video to play</DialogTitle>
@@ -74,36 +91,8 @@ export const TorrentPlayerDialogLayout = ({
               ))}
             </div>
           </>
-        );
-      }
-    }
-
-    return null;
-  };
-
-  return (
-    <>
-      <Dialog open={open && !isPlayerVisible}
-        onOpenChange={onOpenChange}>
-        <DialogContent>
-          <DialogTitle className='sr-only'>Torrent Player</DialogTitle>
-          <DialogDescription className='sr-only'>Media player for torrent videos</DialogDescription>
-          {renderContent()}
-        </DialogContent>
-      </Dialog>
-      {isPlayerVisible && videoPlayerOptions && (
-        <VideoPlayerLayout
-          open={open}
-          onOpenChange={shouldOpen => {
-            if (!shouldOpen && handleExit) {
-              handleExit();
-            }
-          }}
-          options={videoPlayerOptions}
-          onExit={handleExit}
-          isDemo={isDemo}
-        />
-      )}
-    </>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 };

@@ -39,8 +39,9 @@ export function TorrentGrid({
     const updateColumnCount = () => {
       if (gridElement.isConnected) {
         const gridComputedStyle = window.getComputedStyle(gridElement);
-        const newColumnCount = gridComputedStyle.getPropertyValue('grid-template-columns').split(' ').length;
-        onColumnCountChange?.(newColumnCount);
+        const colsStr = gridComputedStyle.getPropertyValue('grid-template-columns');
+        const newColumnCount = colsStr ? colsStr.split(/\s+/).filter(Boolean).length : 1;
+        onColumnCountChange?.(Math.max(1, newColumnCount));
       }
     };
 
@@ -54,14 +55,18 @@ export function TorrentGrid({
     };
   }, [onColumnCountChange]);
 
-  // On initial load, focus the first card if nothing else on the page has focus.
+  const hasInitiallyFocused = useRef(false);
+
+  // On initial load only, focus the first card if nothing else on the page has focus.
   useEffect(() => {
     if (
+      !hasInitiallyFocused.current &&
       torrents.length > 0 &&
       gridRef.current &&
       !gridRef.current.contains(document.activeElement) &&
       document.activeElement === document.body
     ) {
+      hasInitiallyFocused.current = true;
       const firstItem = gridRef.current.querySelector<HTMLElement>('[data-radix-collection-item]');
       firstItem?.focus();
     }

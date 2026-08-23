@@ -5,7 +5,7 @@
 'use client';
 
 import { useRouter, useSearchParams } from 'next/navigation';
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { HeaderLayout } from '@/components/header-layout';
@@ -291,8 +291,16 @@ function DemoContent() {
   const searchParams = useSearchParams();
   const modal = searchParams.get('modal');
   const hash = searchParams.get('hash');
+  const gridRef = useRef<HTMLDivElement>(null);
+  const lastActiveElementRef = useRef<HTMLElement | null>(null);
 
   const updateModal = (modalName: string | null, hashValue: string | null = null) => {
+    if (modalName && typeof document !== 'undefined') {
+      const active = document.activeElement as HTMLElement | null;
+      if (active && active !== document.body && !active.closest('[role="dialog"]')) {
+        lastActiveElementRef.current = active;
+      }
+    }
     const params = new URLSearchParams(searchParams.toString());
     if (modalName) {
       params.set('modal', modalName);
@@ -306,6 +314,21 @@ function DemoContent() {
     }
     router.push(`?${params.toString()}`, { scroll: false });
   };
+
+  const prevModalRef = useRef<string | null>(modal);
+  useEffect(() => {
+    if (prevModalRef.current && !modal) {
+      requestAnimationFrame(() => {
+        if (lastActiveElementRef.current && document.body.contains(lastActiveElementRef.current)) {
+          lastActiveElementRef.current.focus();
+        } else if (gridRef.current && document.activeElement === document.body) {
+          const firstItem = gridRef.current.querySelector<HTMLElement>('[data-radix-collection-item], [data-item]');
+          firstItem?.focus();
+        }
+      });
+    }
+    prevModalRef.current = modal;
+  }, [modal]);
 
   const [titleFilter, setTitleFilter] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
@@ -486,8 +509,9 @@ function DemoContent() {
         logout={logout}
         auth={auth}
         isHidden={false}
+        inert={Boolean(modal)}
       />
-      <PageContainer>
+      <PageContainer inert={Boolean(modal)}>
         <TorrentControls
           torrentsData={{ torrents: demoTorrentsData }}
           torrents={categories}
@@ -502,14 +526,16 @@ function DemoContent() {
           onAddTorrent={() => updateModal('add')}
         />
 
-        <TorrentGrid
-          torrents={paginatedTorrents}
-          onEdit={handleEdit}
-          onViewStats={handleViewStats}
-          onDelete={handleDelete}
-          onPlay={handlePlay}
-          onAddToDatabase={handleAddToDatabase}
-        />
+        <div ref={gridRef}>
+          <TorrentGrid
+            torrents={paginatedTorrents}
+            onEdit={handleEdit}
+            onViewStats={handleViewStats}
+            onDelete={handleDelete}
+            onPlay={handlePlay}
+            onAddToDatabase={handleAddToDatabase}
+          />
+        </div>
 
         {usePagination && torrentsPerPage > 0 && totalPages > 1 && (
           <div className='flex justify-center items-center gap-4 mt-8'>
