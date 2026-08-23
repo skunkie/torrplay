@@ -18,7 +18,8 @@ interface HeaderProps {
   onMetricsClick: () => void,
   onSettingsClick: () => void,
   onSystemInfoClick: () => void,
-  onTitleSearch: (query: string) => void
+  onTitleSearch: (query: string) => void,
+  inert?: boolean
 }
 
 export const Header = forwardRef<HTMLDivElement, HeaderProps>((
@@ -28,6 +29,7 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
     onSettingsClick,
     onSystemInfoClick,
     onTitleSearch,
+    inert,
   }, ref) => {
   const { liveUpdatesPaused, setLiveUpdatesPaused } = useLiveUpdates();
   const { isAuthenticated, logout, auth } = useAuth();
@@ -81,6 +83,7 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
       logout={logout}
       auth={auth}
       isHidden={isHidden}
+      inert={inert}
     />
   );
 });

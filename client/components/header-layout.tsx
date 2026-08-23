@@ -28,7 +28,8 @@ interface HeaderLayoutProps {
   isAuthenticated: boolean,
   logout: () => void,
   auth: AuthContextType['auth'],
-  isHidden: boolean
+  isHidden: boolean,
+  inert?: boolean
 }
 
 export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
@@ -45,10 +46,12 @@ export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
     logout,
     auth,
     isHidden,
+    inert,
   }, ref) => {
   return (
     <header
       ref={ref}
+      inert={inert}
       aria-hidden={isHidden ? true : undefined}
       className={`border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-50 transition-transform duration-300 ${
         isHidden ? '-translate-y-full pointer-events-none invisible md:visible md:pointer-events-auto' : 'translate-y-0'
