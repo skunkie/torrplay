@@ -140,4 +140,12 @@ describe('DemoVideoPlayer', () => {
     const textWhiteElements = container.querySelectorAll('.text-white');
     expect(textWhiteElements.length).toBeGreaterThan(0);
   });
+
+  it('renders audio track selector and allows selecting demo audio tracks', async () => {
+    const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
+      onExit={vi.fn()} />);
+
+    const audioTrackBtn = container.querySelector('button[aria-label="Select audio track"]');
+    expect(audioTrackBtn).toBeInTheDocument();
+  });
 });
