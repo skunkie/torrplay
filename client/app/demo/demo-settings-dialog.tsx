@@ -37,7 +37,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
-  const [logLevel, setLogLevel] = useState<string>('INFO');
+  const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
   const [logFormat, setLogFormat] = useState<'json' | 'text'>('text');
 
   // Initialize defaults on first open if no settings exist yet.
@@ -81,8 +81,8 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       auth: authSettings || { enabled: false, type: 'basic' as const },
       torrentClient: torrentClientSettings || defaultSettings.torrentClient,
       torrentTrackers: torrentTrackers,
-      logLevel: logLevel,
-      logFormat: logFormat,
+      logLevel: logLevel || 'INFO',
+      logFormat: logFormat || 'text',
     });
     toast.success('Settings saved', { description: 'Demo mode - settings not actually saved' });
     onOpenChange(false);

@@ -52,8 +52,8 @@ interface SettingsDialogLayoutProps {
   setTorrentClientSettings: (value: TorrentClient | null) => void,
   torrentTrackers: string[],
   setTorrentTrackers: (value: string[]) => void,
-  logLevel: string,
-  setLogLevel: (value: string) => void,
+  logLevel: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
+  setLogLevel: (value: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR') => void,
   logFormat: 'json' | 'text',
   setLogFormat: (value: 'json' | 'text') => void,
 
@@ -516,7 +516,7 @@ export function SettingsDialogLayout({
                     <Label htmlFor='log-level'>Log Level</Label>
                     <Select
                       value={logLevel}
-                      onValueChange={setLogLevel}
+                      onValueChange={value => setLogLevel(value as 'DEBUG' | 'INFO' | 'WARN' | 'ERROR')}
                     >
                       <SelectTrigger id='log-level'>
                         <SelectValue />
@@ -536,7 +536,7 @@ export function SettingsDialogLayout({
                     <Label htmlFor='log-format'>Log Format</Label>
                     <Select
                       value={logFormat}
-                      onValueChange={setLogFormat}
+                      onValueChange={value => setLogFormat(value as 'json' | 'text')}
                     >
                       <SelectTrigger id='log-format'>
                         <SelectValue />
