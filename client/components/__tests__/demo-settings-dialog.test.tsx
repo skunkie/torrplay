@@ -29,7 +29,7 @@ vi.mock('@/lib/api-client', () => ({
   getApiBaseUrl: () => 'http://localhost:8090',
 }));
 
-const buildDemoSettings = (overrides: Partial<Settings> = {}) => ({
+const buildDemoSettings = (overrides: Partial<Settings> = {}): Settings => ({
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
   enableDlna: false,
   enableDownloader: false,
