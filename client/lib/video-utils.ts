@@ -11,9 +11,16 @@ export const getVideoFiles = (files: TorrentFile[]): TorrentFile[] => {
   return files.filter(f => VIDEO_EXTENSIONS.some(ext => f.name.toLowerCase().endsWith(ext)));
 };
 
-export const getVideoType = (filename: string): VideoMimeType => {
-  if (filename.toLowerCase().endsWith('.mkv')) return 'video/mp4' as VideoMimeType;
-  return '' as VideoMimeType;
+export const getVideoType = (filename?: string): VideoMimeType => {
+  if (filename) {
+    const lower = filename.toLowerCase();
+    if (lower.endsWith('.webm')) return 'video/webm';
+    if (lower.endsWith('.ogg') || lower.endsWith('.ogv')) return 'video/ogg';
+    if (lower.endsWith('.avi')) return 'video/avi';
+    if (lower.endsWith('.3gp')) return 'video/3gp';
+    if (lower.endsWith('.mpeg') || lower.endsWith('.mpg')) return 'video/mpeg';
+  }
+  return 'video/mp4';
 };
 
 export const getInitialVideoFile = (videoFiles: TorrentFile[]): TorrentFile | null => {

@@ -30,7 +30,11 @@ import {
   VolumeLowIcon
 } from '@vidstack/react/icons';
 import { X } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
+
+import { getDemoAudioTracks } from '@/lib/demo-audio-tracks';
+
+import { AudioTrackSelector } from './audio-track-selector';
 
 interface DemoVideoPlayerProps {
   options: {
@@ -44,6 +48,11 @@ interface DemoVideoPlayerProps {
 const DemoVideoPlayer: React.FC<DemoVideoPlayerProps> = ({ options, onExit }) => {
   const player = useRef<MediaPlayerInstance>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>(0);
+
+  const audioTracks = useMemo(() => {
+    return getDemoAudioTracks(options.title);
+  }, [options.title]);
 
   const seek = (seconds: number) => {
     if (player.current) {
@@ -121,6 +130,11 @@ const DemoVideoPlayer: React.FC<DemoVideoPlayerProps> = ({ options, onExit }) =>
                 <VolumeSlider.Thumb className='absolute left-[var(--slider-fill)] z-20 h-5 w-5 -translate-x-1/2 rounded-full border border-primary bg-white shadow-sm ring-white/40 will-change-[left] group-data-[active]:ring-4' />
               </VolumeSlider.Root>
               <Time type='duration' />
+              <AudioTrackSelector
+                tracks={audioTracks}
+                selectedTrackIndex={selectedAudioTrack}
+                onSelectTrack={setSelectedAudioTrack}
+              />
               <Controls.Group className='flex items-center'>
                 <button
                   onClick={toggleFullscreen}
