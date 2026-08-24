@@ -501,5 +501,36 @@ describe('TorrentCard', () => {
 
     expect(screen.queryByTestId('file-storage-badge')).not.toBeInTheDocument();
   });
-});
 
+  it('renders the active badge when active is true', () => {
+    render(
+      <TorrentCard
+        torrent={{ ...mockTorrent, active: true }}
+        onEdit={() => {}}
+        onViewStats={() => {}}
+        onDelete={() => {}}
+        onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
+      />,
+    );
+
+    const badge = screen.getByTestId('active-torrent-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute('title', 'Active');
+  });
+
+  it('does not render the active badge when active is false or undefined', () => {
+    render(
+      <TorrentCard
+        torrent={{ ...mockTorrent, active: false }}
+        onEdit={() => {}}
+        onViewStats={() => {}}
+        onDelete={() => {}}
+        onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
+      />,
+    );
+
+    expect(screen.queryByTestId('active-torrent-badge')).not.toBeInTheDocument();
+  });
+});

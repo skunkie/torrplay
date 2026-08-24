@@ -45,6 +45,7 @@ const demoTorrentsData: Torrent[] = [
     pieceCount: 987,
     pieceSize: 131072,
     storage: 'file',
+    active: true,
     files: [
       { name: 'Sintel.de.srt', path: 'Sintel/Sintel.de.srt', length: 1652 },
       { name: 'Sintel.en.srt', path: 'Sintel/Sintel.en.srt', length: 1514 },
