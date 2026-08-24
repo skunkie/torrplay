@@ -186,6 +186,19 @@ export const TorrentCard = forwardRef<HTMLDivElement, TorrentCardProps>(
                 <ImageOff className='w-16 h-16 text-muted-foreground' />
               </div>
             )}
+            {torrent.active && (
+              <div
+                data-testid='active-torrent-badge'
+                title='Active'
+                className='absolute top-2 left-2 z-10 flex items-center gap-1.5 rounded-md bg-black/60 backdrop-blur-sm px-1.5 py-1 text-white shadow-xs pointer-events-none'
+              >
+                <span className='relative flex h-2 w-2'>
+                  <span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75'></span>
+                  <span className='relative inline-flex rounded-full h-2 w-2 bg-green-500'></span>
+                </span>
+                <span className='text-[10px] font-medium leading-none hidden 3xl:inline'>Active</span>
+              </div>
+            )}
             {torrent.storage === 'file' && (
               <div
                 data-testid='file-storage-badge'
