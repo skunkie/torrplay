@@ -76,6 +76,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
     expect(screen.getByText('Test Torrent')).toBeInTheDocument();
@@ -90,6 +91,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={onPlayTorrent}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -143,6 +145,7 @@ describe('TorrentCard', () => {
         onViewStats={onViewStats}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -188,6 +191,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -258,6 +262,7 @@ describe('TorrentCard', () => {
           onViewStats={() => {}}
           onDelete={() => {}}
           onPlayTorrent={() => {}}
+          onAddToDatabase={() => {}}
         />
         <TorrentCard
           torrent={mockTorrent2}
@@ -265,6 +270,7 @@ describe('TorrentCard', () => {
           onViewStats={() => {}}
           onDelete={() => {}}
           onPlayTorrent={() => {}}
+          onAddToDatabase={() => {}}
         />
       </div>,
     );
@@ -308,6 +314,7 @@ describe('TorrentCard', () => {
         onViewStats={onViewStats}
         onDelete={onDelete}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -337,6 +344,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={onPlayTorrent}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -359,6 +367,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -377,6 +386,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -396,6 +406,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -424,6 +435,7 @@ describe('TorrentCard', () => {
         onViewStats={() => {}}
         onDelete={() => {}}
         onPlayTorrent={() => {}}
+        onAddToDatabase={() => {}}
       />,
     );
 
@@ -490,3 +502,4 @@ describe('TorrentCard', () => {
     expect(screen.queryByTestId('file-storage-badge')).not.toBeInTheDocument();
   });
 });
+

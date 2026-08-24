@@ -1608,10 +1608,15 @@ components:
           example: "text"
         log_level:
           type: string
+          description: Log level.
+          enum:
+            - "DEBUG"
+            - "INFO"
+            - "WARN"
+            - "ERROR"
           x-go-type: slog.Level
           x-go-type-import:
             path: log/slog
-          description: Log level.
           example: "INFO"
         log_store_size:
           type: integer
@@ -1626,12 +1631,6 @@ components:
           minimum: 33554432
           maximum: 2147483648
           example: 67108864
-        readahead_percentage:
-          type: integer
-          description: Readahead percentage value (50-100).
-          minimum: 50
-          maximum: 100
-          example: 90
         torrent_trackers:
           type: array
           description: |

@@ -487,4 +487,32 @@ describe('SettingsDialog', () => {
       expect(trackersTextarea).toHaveValue('');
     });
   });
+
+  it('correctly populates log level when server returns DEBUG level', async () => {
+    settingsRef.current = buildMockSettings({
+      logLevel: 'DEBUG',
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+      expect(logLevelSelect).toHaveTextContent('DEBUG');
+    });
+  });
+
+  it('correctly populates default INFO log level when server returns undefined logLevel', async () => {
+    settingsRef.current = buildMockSettings({
+      logLevel: undefined,
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+      expect(logLevelSelect).toHaveTextContent('INFO');
+    });
+  });
 });
