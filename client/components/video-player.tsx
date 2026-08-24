@@ -38,6 +38,17 @@ import {
 import { X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import {
+  type AudioTrackInfo,
+  getDefaultAudioTrackIndex,
+  isAudioDecodingSupported,
+  MkvAudioSyncEngine,
+  probeAudioTracks,
+} from '@/lib/mkv-audio';
+import { getVidstackVideoElement } from '@/lib/vidstack-media';
+
+import { AudioTrackSelector } from './audio-track-selector';
+
 interface VideoPlayerProps {
   options: {
     src?: VideoSrc,
@@ -59,6 +70,19 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
   const hasPlayedRef = useRef(false);
   const handleEndedRef = useRef<(() => void) | null>(null);
 
+  // Audio track management
+  const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>(0);
+  const [isWasmAudioActive, setIsWasmAudioActive] = useState<boolean>(false);
+  const syncEngineRef = useRef<MkvAudioSyncEngine | null>(null);
+  const nativeAudioTrackIndexRef = useRef(0);
+
+  const streamUrl = typeof options.src === 'string'
+    ? options.src
+    : (options.src && 'src' in options.src && typeof options.src.src === 'string')
+      ? options.src.src
+      : undefined;
+
   useEffect(() => {
     const setPlayerPreference = () => {
       const externalPlayer = localStorage.getItem('external_player');
@@ -70,12 +94,111 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
   }, []);
 
   useEffect(() => {
-    if (onExit) {
-      handleEndedRef.current = onExit;
+    if (!streamUrl || useExternalPlayer || !isAudioDecodingSupported()) return;
+
+    let cancelled = false;
+    probeAudioTracks(streamUrl)
+      .then(({ input, tracks, audioTrackObjects }) => {
+        if (cancelled) {
+          input.dispose();
+          return;
+        }
+        setAudioTracks(tracks);
+        if (tracks.length > 0) {
+          const engine = new MkvAudioSyncEngine(
+            input,
+            audioTrackObjects,
+            err => {
+              console.debug('MkvAudioSyncEngine stopped due to decoder error:', err);
+              setIsWasmAudioActive(false);
+              engine.setWasmActive(false);
+            }
+          );
+          syncEngineRef.current = engine;
+
+          const videoEl = getVidstackVideoElement(player.current);
+          if (videoEl) {
+            engine.attachMediaElement(videoEl);
+          }
+
+          const currentVolume = player.current?.volume ?? 1;
+          const currentMuted = player.current?.muted ?? false;
+          engine.setVolume(currentVolume);
+          engine.setMuted(currentMuted);
+
+          const defaultTrackIndex = getDefaultAudioTrackIndex(tracks);
+          nativeAudioTrackIndexRef.current = defaultTrackIndex;
+          const defaultTrack = tracks[defaultTrackIndex];
+          const requiresWasm = defaultTrack ? !defaultTrack.isNativelySupported : false;
+
+          setSelectedAudioTrack(defaultTrackIndex);
+          if (requiresWasm) {
+            setIsWasmAudioActive(true);
+            engine.setWasmActive(true);
+            engine.selectTrack(defaultTrackIndex);
+
+            // If the player is already playing when probing finishes, start audio immediately
+            if (player.current && !player.current.paused) {
+              engine.onPlay(player.current.currentTime);
+            }
+          } else {
+            setIsWasmAudioActive(false);
+            engine.setWasmActive(false);
+          }
+        }
+      })
+      .catch(err => {
+        console.debug('Failed to probe audio tracks for stream:', err);
+      });
+
+    return () => {
+      cancelled = true;
+      syncEngineRef.current?.destroy();
+      syncEngineRef.current = null;
+      nativeAudioTrackIndexRef.current = 0;
+      setAudioTracks([]);
+      setIsWasmAudioActive(false);
+    };
+  }, [streamUrl, useExternalPlayer]);
+
+  const handleSelectAudioTrack = (index: number) => {
+    setSelectedAudioTrack(index);
+    const track = audioTracks[index];
+    if (!track) return;
+
+    const engine = syncEngineRef.current;
+    if (!engine) return;
+
+    if (player.current) {
+      engine.setVolume(player.current.volume);
+      engine.setMuted(player.current.muted);
     }
-  }, [onExit]);
+
+    // The browser owns the container's default native track. All other tracks
+    // route through the sync engine because HTML media lacks portable switching.
+    const requiresWasm = index !== nativeAudioTrackIndexRef.current || !track.isNativelySupported;
+    setIsWasmAudioActive(requiresWasm);
+    engine.setWasmActive(requiresWasm);
+
+    const videoEl = getVidstackVideoElement(player.current);
+    if (videoEl) {
+      engine.attachMediaElement(videoEl);
+    }
+
+    if (requiresWasm) {
+      engine.selectTrack(index);
+      if (player.current && !player.current.paused) {
+        engine.onPlay(player.current.currentTime);
+      }
+    } else {
+      engine.onPause();
+    }
+  };
 
   const handleEnded = () => {
+    if (isWasmAudioActive && syncEngineRef.current) {
+      syncEngineRef.current.onPause();
+    }
     if (handleEndedRef.current && hasPlayedRef.current) {
       handleEndedRef.current();
     }
@@ -83,22 +206,71 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
 
   const handlePlay = () => {
     hasPlayedRef.current = true;
+    if (syncEngineRef.current && player.current) {
+      const videoEl = getVidstackVideoElement(player.current);
+      if (videoEl) {
+        syncEngineRef.current.attachMediaElement(videoEl);
+      }
+      if (isWasmAudioActive) {
+        syncEngineRef.current.onPlay(player.current.currentTime);
+      }
+    }
+  };
+
+  const handlePause = () => {
+    if (isWasmAudioActive && syncEngineRef.current) {
+      syncEngineRef.current.onPause();
+    }
+  };
+
+  const handleSeeked = () => {
+    if (isWasmAudioActive && syncEngineRef.current && player.current) {
+      syncEngineRef.current.onSeek(player.current.currentTime);
+    }
+  };
+
+  const handleTimeUpdate = (detail: { currentTime: number }) => {
+    if (isWasmAudioActive && syncEngineRef.current) {
+      syncEngineRef.current.onTimeUpdate(detail.currentTime);
+    }
+  };
+
+  const handleWaiting = () => {
+    if (isWasmAudioActive && syncEngineRef.current) {
+      syncEngineRef.current.onWaiting();
+    }
+  };
+
+  const handlePlaying = () => {
+    if (syncEngineRef.current && player.current) {
+      const videoEl = getVidstackVideoElement(player.current);
+      if (videoEl) {
+        syncEngineRef.current.attachMediaElement(videoEl);
+      }
+      if (isWasmAudioActive) {
+        syncEngineRef.current.onPlaying(player.current.currentTime);
+      }
+    }
+  };
+
+  const handleVolumeChange = (detail: { volume: number, muted: boolean }) => {
+    if (isWasmAudioActive && syncEngineRef.current) {
+      syncEngineRef.current.setVolume(detail.volume);
+      syncEngineRef.current.setMuted(detail.muted);
+    }
+  };
+
+  const handleRateChange = (rate: number) => {
+    if (isWasmAudioActive && syncEngineRef.current) {
+      syncEngineRef.current.setPlaybackRate(rate);
+    }
   };
 
   useEffect(() => {
     const handleVideoPlayback = async () => {
       if (!preferenceLoaded || !useExternalPlayer || intentLaunched.current) return;
 
-      let url: string | undefined;
-      if (options.src) {
-        if (typeof options.src === 'string') {
-          url = options.src;
-        } else if ('src' in options.src && typeof options.src.src === 'string') {
-          url = options.src.src;
-        }
-      }
-
-      if (!url) {
+      if (!streamUrl) {
         console.error('Video source is not a valid URL for an external player.');
         if (onExit) onExit();
         return;
@@ -107,7 +279,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
       if (IS_TAURI) {
         try {
           const externalPlayer = localStorage.getItem('external_player');
-          await openUrl(url, externalPlayer || undefined);
+          await openUrl(streamUrl, externalPlayer || undefined);
           if (onExit) onExit();
         } catch (error) {
           console.error(error);
@@ -118,7 +290,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
         try {
           const intentPayload: IntentLauncherParams = {
             action: ActivityAction.VIEW,
-            data: url,
+            data: streamUrl,
             type: 'video/*',
           };
 
@@ -139,7 +311,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
     };
 
     handleVideoPlayback();
-  }, [options, onExit, useExternalPlayer, preferenceLoaded]);
+  }, [streamUrl, options.title, onExit, useExternalPlayer, preferenceLoaded]);
 
   const BufferingIndicator = () => {
     return (
@@ -217,6 +389,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
     };
   }, [toggleFullscreen]);
 
+  useEffect(() => {
+    if (onExit) {
+      handleEndedRef.current = onExit;
+    }
+  }, [onExit]);
+
   if (!preferenceLoaded) {
     return null;
   }
@@ -235,6 +413,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
       onFullscreenChange={setIsFullscreen}
       onEnded={handleEnded}
       onPlay={handlePlay}
+      onPlaying={handlePlaying}
+      onWaiting={handleWaiting}
+      onTimeUpdate={handleTimeUpdate}
+      onPause={handlePause}
+      onSeeked={handleSeeked}
+      onVolumeChange={handleVolumeChange}
+      onRateChange={handleRateChange}
       playsInline
     >
       <MediaProvider />
@@ -303,6 +488,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
                 <VolumeSlider.Thumb className='absolute left-[var(--slider-fill)] z-20 h-5 w-5 -translate-x-1/2 rounded-full border border-primary bg-white shadow-sm ring-white/40 will-change-[left] group-data-[active]:ring-4' />
               </VolumeSlider.Root>
               <Time type='duration' />
+              <AudioTrackSelector
+                tracks={audioTracks}
+                selectedTrackIndex={selectedAudioTrack}
+                onSelectTrack={handleSelectAudioTrack}
+              />
               <button
                 type='button'
                 onClick={toggleFullscreen}
