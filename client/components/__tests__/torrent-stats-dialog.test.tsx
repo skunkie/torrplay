@@ -6,6 +6,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TorrentStatsDialog } from '@/components/torrent-stats-dialog';
+import type { Torrent } from '@/lib/types/api';
 
 const mockGetTorrentStats = vi.fn();
 const mockSetLiveUpdatesPaused = vi.fn();
@@ -28,7 +29,7 @@ vi.mock('sonner', () => ({
   },
 }));
 
-const baseTorrent = {
+const baseTorrent: Torrent = {
   category: 'movies',
   files: [{ length: 1000, name: 'movie.mp4', path: 'movies/movie.mp4' }],
   hash: 'abc123def456',

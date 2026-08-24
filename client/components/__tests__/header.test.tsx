@@ -35,11 +35,13 @@ describe('Header', () => {
 
   it('renders the version when system info is available', async () => {
     const { default: useSWR } = await import('swr');
-    const mockUseSWR = useSWR as typeof useSWR;
+    const mockUseSWR = vi.mocked(useSWR);
     mockUseSWR.mockReturnValue({
       data: { version: '1.0.0' },
       error: null,
       mutate: vi.fn(),
+      isLoading: false,
+      isValidating: false,
     });
 
     const { Header } = await import('@/components/header');
@@ -49,6 +51,7 @@ describe('Header', () => {
         homeHref='/'
         onSettingsClick={mockOnSettingsClick}
         onMetricsClick={mockOnMetricsClick}
+        onSystemInfoClick={vi.fn()}
         onTitleSearch={mockOnTitleSearch}
       />,
     );
@@ -58,11 +61,13 @@ describe('Header', () => {
 
   it('does not render version when system info is unavailable', async () => {
     const { default: useSWR } = await import('swr');
-    const mockUseSWR = useSWR as typeof useSWR;
+    const mockUseSWR = vi.mocked(useSWR);
     mockUseSWR.mockReturnValue({
       data: null,
       error: null,
       mutate: vi.fn(),
+      isLoading: false,
+      isValidating: false,
     });
 
     const { Header } = await import('@/components/header');
@@ -72,6 +77,7 @@ describe('Header', () => {
         homeHref='/'
         onSettingsClick={mockOnSettingsClick}
         onMetricsClick={mockOnMetricsClick}
+        onSystemInfoClick={vi.fn()}
         onTitleSearch={mockOnTitleSearch}
       />,
     );
@@ -81,11 +87,13 @@ describe('Header', () => {
 
   it('renders version when it changes after initial null state', async () => {
     const { default: useSWR } = await import('swr');
-    const mockUseSWR = useSWR as typeof useSWR;
+    const mockUseSWR = vi.mocked(useSWR);
     mockUseSWR.mockReturnValue({
       data: { version: '2.5.3' },
       error: null,
       mutate: vi.fn(),
+      isLoading: false,
+      isValidating: false,
     });
 
     const { Header } = await import('@/components/header');
@@ -95,6 +103,7 @@ describe('Header', () => {
         homeHref='/'
         onSettingsClick={mockOnSettingsClick}
         onMetricsClick={mockOnMetricsClick}
+        onSystemInfoClick={vi.fn()}
         onTitleSearch={mockOnTitleSearch}
       />
     );
@@ -139,6 +148,7 @@ describe('Header', () => {
         homeHref='/'
         onSettingsClick={mockOnSettingsClick}
         onMetricsClick={mockOnMetricsClick}
+        onSystemInfoClick={vi.fn()}
         onTitleSearch={mockOnTitleSearch}
         inert={true}
       />

@@ -4,7 +4,7 @@
 
 import { render, screen, waitFor } from '@testing-library/react';
 import { SWRConfig } from 'swr';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SystemInfoDialog } from '@/components/system-info-dialog';
 import * as system from '@/lib/api/system';

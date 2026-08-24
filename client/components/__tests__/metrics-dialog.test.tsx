@@ -4,7 +4,7 @@
 
 import { render, screen, waitFor } from '@testing-library/react';
 import { SWRConfig } from 'swr';
-import { vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MetricsDialog } from '@/components/metrics-dialog';
 import * as stats from '@/lib/api/stats';
