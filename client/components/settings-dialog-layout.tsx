@@ -7,6 +7,8 @@ import { isTauri } from '@tauri-apps/api/core';
 import { AlertTriangle, Loader2 } from 'lucide-react';
 import React, { useState } from 'react';
 
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -110,6 +112,7 @@ export function SettingsDialogLayout({
   const isLoadingSettings = open && !settings && !error;
   const canSaveServerSettings = settings != null;
   const [rateLimitUnit, setRateLimitUnit] = useState('MiB/s');
+  const [bufferUnit, setBufferUnit] = useState('KiB');
 
   const convertRateLimit = (value: number, toUnit: string) => {
     if (toUnit === 'KiB/s') {
@@ -122,11 +125,34 @@ export function SettingsDialogLayout({
   };
 
   const getRateLimitInBytes = (value: number) => {
+    if (Number.isNaN(value)) {
+      return 0;
+    }
     if (rateLimitUnit === 'KiB/s') {
       return value * 1024;
     }
     if (rateLimitUnit === 'MiB/s') {
       return value * 1024 * 1024;
+    }
+    return value;
+  };
+
+  const convertBufferValue = (value: number, toUnit: string) => {
+    if (Number.isNaN(value)) {
+      return 0;
+    }
+    if (toUnit === 'KiB') {
+      return value / 1024;
+    }
+    return value;
+  };
+
+  const getBufferInBytes = (value: number) => {
+    if (Number.isNaN(value)) {
+      return 0;
+    }
+    if (bufferUnit === 'KiB') {
+      return value * 1024;
     }
     return value;
   };
@@ -338,137 +364,291 @@ export function SettingsDialogLayout({
                   </div>
                 </div>
 
-                <div className='space-y-4'>
-                  <h3 className='text-lg font-medium text-foreground'>Torrent Client</h3>
-                  <div className='space-y-2'>
-                    <Label htmlFor='torrent-trackers'>Torrent Trackers</Label>
-                    <Textarea
-                      id='torrent-trackers'
-                      value={(torrentTrackers || []).join('\n')}
-                      onChange={e => setTorrentTrackers(e.target.value.split('\n').filter(t => t !== ''))}
-                      rows={5}
-                    />
-                    <p className='text-sm text-muted-foreground'>
-                      One tracker tier per line. To include multiple trackers in the same tier, separate them with commas.
-                    </p>
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='disable-dht'>Disable DHT</Label>
-                    <Switch
-                      id='disable-dht'
-                      checked={torrentClientSettings?.disableDht ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableDht: checked } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='disable-ipv6'>Disable IPv6</Label>
-                    <Switch
-                      id='disable-ipv6'
-                      checked={torrentClientSettings?.disableIpv6 ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableIpv6: checked } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='disable-pex'>Disable PEX</Label>
-                    <Switch
-                      id='disable-pex'
-                      checked={torrentClientSettings?.disablePex ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disablePex: checked } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='disable-tcp'>Disable TCP</Label>
-                    <Switch
-                      id='disable-tcp'
-                      checked={torrentClientSettings?.disableTcp ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableTcp: checked } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='disable-utp'>Disable uTP</Label>
-                    <Switch
-                      id='disable-utp'
-                      checked={torrentClientSettings?.disableUtp ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableUtp: checked } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='seed'>Enable Seeding</Label>
-                    <Switch
-                      id='seed'
-                      checked={torrentClientSettings?.seed ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, seed: checked } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='flex items-center justify-between'>
-                    <Label htmlFor='prefer-header-obfuscation'>Prefer Header Obfuscation</Label>
-                    <Switch
-                      id='prefer-header-obfuscation'
-                      checked={torrentClientSettings?.preferHeaderObfuscation ?? false}
-                      onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, preferHeaderObfuscation: checked } as TorrentClient)}
-                    />
-                  </div>
+                <Accordion type='single'
+                  collapsible
+                  defaultValue='torrent-client'
+                  className='w-full'>
+                  <AccordionItem value='torrent-client'
+                    className='border-0 space-y-4'>
+                    <AccordionTrigger className='text-lg font-medium text-foreground'>Torrent Client</AccordionTrigger>
+                    <AccordionContent>
+                      <div className='space-y-4'>
+                        <div className='space-y-2'>
+                          <Label htmlFor='torrent-trackers'>Torrent Trackers</Label>
+                          <Textarea
+                            id='torrent-trackers'
+                            value={(torrentTrackers || []).join('\n')}
+                            onChange={e => setTorrentTrackers(e.target.value.split('\n').filter(t => t !== ''))}
+                            rows={5}
+                          />
+                          <p className='text-sm text-muted-foreground'>
+                            One tracker tier per line. To include multiple trackers in the same tier, separate them with commas.
+                          </p>
+                        </div>
 
-                  <div className='space-y-2'>
-                    <div className='flex items-center justify-between'>
-                      <Label>Rate Limit Unit</Label>
-                      <Select value={rateLimitUnit}
-                        onValueChange={setRateLimitUnit}>
-                        <SelectTrigger className='w-[120px]'>
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value='bytes/s'>bytes/s</SelectItem>
-                          <SelectItem value='KiB/s'>KiB/s</SelectItem>
-                          <SelectItem value='MiB/s'>MiB/s</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
+                        <Accordion type='multiple'
+                          defaultValue={['protocol', 'rate-limits']}>
+                          <AccordionItem value='protocol'>
+                            <AccordionTrigger className='text-sm font-medium'>Protocol & Discovery</AccordionTrigger>
+                            <AccordionContent className='pt-3'>
+                              <div className='space-y-3'>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='disable-dht'>Disable DHT</Label>
+                                  <Switch
+                                    id='disable-dht'
+                                    checked={torrentClientSettings?.disableDht ?? false}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableDht: checked } as TorrentClient)}
+                                  />
+                                </div>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='disable-ipv6'>Disable IPv6</Label>
+                                  <Switch
+                                    id='disable-ipv6'
+                                    checked={torrentClientSettings?.disableIpv6 ?? true}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableIpv6: checked } as TorrentClient)}
+                                  />
+                                </div>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='disable-pex'>Disable PEX</Label>
+                                  <Switch
+                                    id='disable-pex'
+                                    checked={torrentClientSettings?.disablePex ?? false}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disablePex: checked } as TorrentClient)}
+                                  />
+                                </div>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='disable-tcp'>Disable TCP</Label>
+                                  <Switch
+                                    id='disable-tcp'
+                                    checked={torrentClientSettings?.disableTcp ?? false}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableTcp: checked } as TorrentClient)}
+                                  />
+                                </div>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='disable-utp'>Disable uTP</Label>
+                                  <Switch
+                                    id='disable-utp'
+                                    checked={torrentClientSettings?.disableUtp ?? false}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, disableUtp: checked } as TorrentClient)}
+                                  />
+                                </div>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='seed'>Enable Seeding</Label>
+                                  <Switch
+                                    id='seed'
+                                    checked={torrentClientSettings?.seed ?? false}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, seed: checked } as TorrentClient)}
+                                  />
+                                </div>
+                                <div className='flex items-center justify-between'>
+                                  <Label htmlFor='prefer-header-obfuscation'>Prefer Header Obfuscation</Label>
+                                  <Switch
+                                    id='prefer-header-obfuscation'
+                                    checked={torrentClientSettings?.preferHeaderObfuscation ?? false}
+                                    onCheckedChange={checked => setTorrentClientSettings({ ...torrentClientSettings, preferHeaderObfuscation: checked } as TorrentClient)}
+                                  />
+                                </div>
+                              </div>
+                            </AccordionContent>
+                          </AccordionItem>
 
-                  <div className='space-y-2'>
-                    <Label htmlFor='download-rate-limit'>Download Rate Limit ({rateLimitUnit})</Label>
-                    <Input
-                      id='download-rate-limit'
-                      type='number'
-                      value={convertRateLimit(torrentClientSettings?.downloadRateLimit ?? 0, rateLimitUnit)}
-                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, downloadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
-                    />
-                    <p className='text-sm text-muted-foreground'>
-                      0 means unlimited.
-                    </p>
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='upload-rate-limit'>Upload Rate Limit ({rateLimitUnit})</Label>
-                    <Input
-                      id='upload-rate-limit'
-                      type='number'
-                      value={convertRateLimit(torrentClientSettings?.uploadRateLimit ?? 0, rateLimitUnit)}
-                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, uploadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
-                    />
-                    <p className='text-sm text-muted-foreground'>
-                      0 means unlimited.
-                    </p>
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='established-conns-per-torrent'>Connections Per Torrent</Label>
-                    <Input
-                      id='established-conns-per-torrent'
-                      type='number'
-                      value={torrentClientSettings?.establishedConnsPerTorrent ?? 50}
-                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, establishedConnsPerTorrent: parseInt(e.target.value) } as TorrentClient)}
-                    />
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='torrent-peers-high-water'>Peers High Water Mark</Label>
-                    <Input
-                      id='torrent-peers-high-water'
-                      type='number'
-                      value={torrentClientSettings?.torrentPeersHighWater ?? 500}
-                      onChange={e => setTorrentClientSettings({ ...torrentClientSettings, torrentPeersHighWater: parseInt(e.target.value) } as TorrentClient)}
-                    />
-                  </div>
-                </div>
+                          <AccordionItem value='rate-limits'>
+                            <AccordionTrigger className='text-sm font-medium'>Rate Limits</AccordionTrigger>
+                            <AccordionContent className='pt-3'>
+                              <div className='space-y-3'>
+                                <div className='space-y-2'>
+                                  <div className='flex items-center justify-between'>
+                                    <Label htmlFor='rate-limit-unit'>Rate Limit Unit</Label>
+                                    <Select value={rateLimitUnit}
+                                      onValueChange={setRateLimitUnit}>
+                                      <SelectTrigger id='rate-limit-unit'
+                                        className='w-[120px]'>
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value='bytes/s'>bytes/s</SelectItem>
+                                        <SelectItem value='KiB/s'>KiB/s</SelectItem>
+                                        <SelectItem value='MiB/s'>MiB/s</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='download-rate-limit'>Download Rate Limit ({rateLimitUnit})</Label>
+                                  <Input
+                                    id='download-rate-limit'
+                                    type='number'
+                                    min={0}
+                                    value={convertRateLimit(torrentClientSettings?.downloadRateLimit ?? 0, rateLimitUnit)}
+                                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, downloadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    0 means unlimited.
+                                  </p>
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='upload-rate-limit'>Upload Rate Limit ({rateLimitUnit})</Label>
+                                  <Input
+                                    id='upload-rate-limit'
+                                    type='number'
+                                    min={0}
+                                    value={convertRateLimit(torrentClientSettings?.uploadRateLimit ?? 0, rateLimitUnit)}
+                                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, uploadRateLimit: getRateLimitInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    0 means unlimited.
+                                  </p>
+                                </div>
+                              </div>
+                            </AccordionContent>
+                          </AccordionItem>
+
+                          <AccordionItem value='peers'>
+                            <AccordionTrigger className='text-sm font-medium'>
+                              <div className='flex items-center gap-2'>
+                                <span>Peers & Connections</span>
+                                <Badge
+                                  variant='secondary'
+                                  className='ml-auto'
+                                >
+                                  Advanced
+                                </Badge>
+                              </div>
+                            </AccordionTrigger>
+                            <AccordionContent className='pt-3'>
+                              <div className='space-y-3'>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='established-conns-per-torrent'>Connections Per Torrent</Label>
+                                  <Input
+                                    id='established-conns-per-torrent'
+                                    type='number'
+                                    min={10}
+                                    value={torrentClientSettings?.establishedConnsPerTorrent ?? 50}
+                                    onChange={e => {
+                                      const val = parseInt(e.target.value);
+                                      setTorrentClientSettings({ ...torrentClientSettings, establishedConnsPerTorrent: Number.isNaN(val) ? 0 : val } as TorrentClient);
+                                    }}
+                                  />
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='torrent-peers-high-water'>Peers High Water Mark</Label>
+                                  <Input
+                                    id='torrent-peers-high-water'
+                                    type='number'
+                                    min={60}
+                                    value={torrentClientSettings?.torrentPeersHighWater ?? 500}
+                                    onChange={e => {
+                                      const val = parseInt(e.target.value);
+                                      setTorrentClientSettings({ ...torrentClientSettings, torrentPeersHighWater: Number.isNaN(val) ? 0 : val } as TorrentClient);
+                                    }}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    Maximum number of peer addresses to reserve.
+                                  </p>
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='torrent-peers-low-water'>Peers Low Water Mark</Label>
+                                  <Input
+                                    id='torrent-peers-low-water'
+                                    type='number'
+                                    min={10}
+                                    value={torrentClientSettings?.torrentPeersLowWater ?? 50}
+                                    onChange={e => {
+                                      const val = parseInt(e.target.value);
+                                      setTorrentClientSettings({ ...torrentClientSettings, torrentPeersLowWater: Number.isNaN(val) ? 0 : val } as TorrentClient);
+                                    }}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    Minimum peers before attempting to connect to more.
+                                  </p>
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='half-open-conns-per-torrent'>Half-Open Conns Per Torrent</Label>
+                                  <Input
+                                    id='half-open-conns-per-torrent'
+                                    type='number'
+                                    min={5}
+                                    value={torrentClientSettings?.halfOpenConnsPerTorrent ?? 25}
+                                    onChange={e => {
+                                      const val = parseInt(e.target.value);
+                                      setTorrentClientSettings({ ...torrentClientSettings, halfOpenConnsPerTorrent: Number.isNaN(val) ? 0 : val } as TorrentClient);
+                                    }}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    Maximum concurrent connecting peers per torrent.
+                                  </p>
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='total-half-open-conns'>Total Half-Open Conns</Label>
+                                  <Input
+                                    id='total-half-open-conns'
+                                    type='number'
+                                    min={10}
+                                    value={torrentClientSettings?.totalHalfOpenConns ?? 100}
+                                    onChange={e => {
+                                      const val = parseInt(e.target.value);
+                                      setTorrentClientSettings({ ...torrentClientSettings, totalHalfOpenConns: Number.isNaN(val) ? 0 : val } as TorrentClient);
+                                    }}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    Maximum total half-open connections across all torrents.
+                                  </p>
+                                </div>
+                              </div>
+                            </AccordionContent>
+                          </AccordionItem>
+
+                          <AccordionItem value='memory'>
+                            <AccordionTrigger className='text-sm font-medium'>
+                              <div className='flex items-center gap-2'>
+                                <span>Memory & Buffers</span>
+                                <Badge
+                                  variant='secondary'
+                                  className='ml-auto'
+                                >
+                                  Advanced
+                                </Badge>
+                              </div>
+                            </AccordionTrigger>
+                            <AccordionContent className='pt-3'>
+                              <div className='space-y-3'>
+                                <div className='space-y-2'>
+                                  <div className='flex items-center justify-between'>
+                                    <Label htmlFor='buffer-unit'>Buffer Unit</Label>
+                                    <Select value={bufferUnit}
+                                      onValueChange={setBufferUnit}>
+                                      <SelectTrigger id='buffer-unit'
+                                        className='w-[120px]'>
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value='bytes'>bytes</SelectItem>
+                                        <SelectItem value='KiB'>KiB</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                </div>
+                                <div className='space-y-2'>
+                                  <Label htmlFor='max-alloc-peer-request-data-per-conn'>Peer Request Buffer ({bufferUnit})</Label>
+                                  <Input
+                                    id='max-alloc-peer-request-data-per-conn'
+                                    type='number'
+                                    min={bufferUnit === 'KiB' ? 16 : 16384}
+                                    value={convertBufferValue(torrentClientSettings?.maxAllocPeerRequestDataPerConn ?? 1048576, bufferUnit)}
+                                    onChange={e => setTorrentClientSettings({ ...torrentClientSettings, maxAllocPeerRequestDataPerConn: getBufferInBytes(parseInt(e.target.value)) } as TorrentClient)}
+                                  />
+                                  <p className='text-sm text-muted-foreground'>
+                                    Max bytes buffered per peer connection for outgoing data. Lower = less memory per connection. Default: 1 MiB.
+                                  </p>
+                                </div>
+                              </div>
+                            </AccordionContent>
+                          </AccordionItem>
+                        </Accordion>
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
 
                 <div className='space-y-4'>
                   <h3 className='text-lg font-medium text-foreground'>Memory Management</h3>

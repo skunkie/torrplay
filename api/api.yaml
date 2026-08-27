@@ -1333,6 +1333,16 @@ components:
           description: The maximum number of established connections per torrent.
           minimum: 10
           example: 50
+        half_open_conns_per_torrent:
+          type: integer
+          description: The maximum number of half-open (connecting) connections per torrent.
+          minimum: 5
+          example: 25
+        max_alloc_peer_request_data_per_conn:
+          type: integer
+          description: Maximum bytes to buffer per peer connection for peer request data before it is sent (in bytes). Reduces memory usage per connection.
+          minimum: 262144
+          example: 1048576
         prefer_header_obfuscation:
           type: boolean
           description: Request that outgoing connections' headers be obfuscated.
@@ -1346,6 +1356,16 @@ components:
           description: The high water mark for the number of peers per torrent.
           minimum: 60
           example: 500
+        torrent_peers_low_water:
+          type: integer
+          description: The minimum number of peers before effort is made to obtain more peers.
+          minimum: 10
+          example: 50
+        total_half_open_conns:
+          type: integer
+          description: The maximum total number of half-open (connecting) connections across all torrents.
+          minimum: 10
+          example: 100
         upload_rate_limit:
           type: integer
           description: Upload rate limit in bytes per second. 0 means unlimited.
