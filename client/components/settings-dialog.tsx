@@ -214,9 +214,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         if (torrentClientSettings.disableUtp !== originalTorrentClientSettings.disableUtp) torrentClientChanges.disableUtp = torrentClientSettings.disableUtp;
         if (torrentClientSettings.downloadRateLimit !== originalTorrentClientSettings.downloadRateLimit) torrentClientChanges.downloadRateLimit = torrentClientSettings.downloadRateLimit;
         if (torrentClientSettings.establishedConnsPerTorrent !== originalTorrentClientSettings.establishedConnsPerTorrent) torrentClientChanges.establishedConnsPerTorrent = torrentClientSettings.establishedConnsPerTorrent;
+        if (torrentClientSettings.halfOpenConnsPerTorrent !== originalTorrentClientSettings.halfOpenConnsPerTorrent) torrentClientChanges.halfOpenConnsPerTorrent = torrentClientSettings.halfOpenConnsPerTorrent;
+        if (torrentClientSettings.maxAllocPeerRequestDataPerConn !== originalTorrentClientSettings.maxAllocPeerRequestDataPerConn) torrentClientChanges.maxAllocPeerRequestDataPerConn = torrentClientSettings.maxAllocPeerRequestDataPerConn;
         if (torrentClientSettings.preferHeaderObfuscation !== originalTorrentClientSettings.preferHeaderObfuscation) torrentClientChanges.preferHeaderObfuscation = torrentClientSettings.preferHeaderObfuscation;
         if (torrentClientSettings.seed !== originalTorrentClientSettings.seed) torrentClientChanges.seed = torrentClientSettings.seed;
         if (torrentClientSettings.torrentPeersHighWater !== originalTorrentClientSettings.torrentPeersHighWater) torrentClientChanges.torrentPeersHighWater = torrentClientSettings.torrentPeersHighWater;
+        if (torrentClientSettings.torrentPeersLowWater !== originalTorrentClientSettings.torrentPeersLowWater) torrentClientChanges.torrentPeersLowWater = torrentClientSettings.torrentPeersLowWater;
+        if (torrentClientSettings.totalHalfOpenConns !== originalTorrentClientSettings.totalHalfOpenConns) torrentClientChanges.totalHalfOpenConns = torrentClientSettings.totalHalfOpenConns;
         if (torrentClientSettings.uploadRateLimit !== originalTorrentClientSettings.uploadRateLimit) torrentClientChanges.uploadRateLimit = torrentClientSettings.uploadRateLimit;
 
         if (Object.keys(torrentClientChanges).length > 0) {
@@ -288,9 +292,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       disableUtp: false,
       downloadRateLimit: 0,
       establishedConnsPerTorrent: 50,
+      halfOpenConnsPerTorrent: 25,
+      maxAllocPeerRequestDataPerConn: 1048576,
       preferHeaderObfuscation: false,
       seed: false,
       torrentPeersHighWater: 500,
+      torrentPeersLowWater: 50,
+      totalHalfOpenConns: 100,
       uploadRateLimit: 0,
     });
     setTorrentTrackers([]);

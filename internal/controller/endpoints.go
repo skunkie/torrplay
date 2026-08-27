@@ -745,6 +745,14 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			needsReplace = true
 			torrentClientCopy.EstablishedConnsPerTorrent = reqSettings.TorrentClient.EstablishedConnsPerTorrent
 		}
+		if reqSettings.TorrentClient.HalfOpenConnsPerTorrent != nil {
+			needsReplace = true
+			torrentClientCopy.HalfOpenConnsPerTorrent = reqSettings.TorrentClient.HalfOpenConnsPerTorrent
+		}
+		if reqSettings.TorrentClient.MaxAllocPeerRequestDataPerConn != nil {
+			needsReplace = true
+			torrentClientCopy.MaxAllocPeerRequestDataPerConn = reqSettings.TorrentClient.MaxAllocPeerRequestDataPerConn
+		}
 		if reqSettings.TorrentClient.PreferHeaderObfuscation != nil {
 			needsReplace = true
 			torrentClientCopy.PreferHeaderObfuscation = reqSettings.TorrentClient.PreferHeaderObfuscation
@@ -756,6 +764,14 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		if reqSettings.TorrentClient.TorrentPeersHighWater != nil {
 			needsReplace = true
 			torrentClientCopy.TorrentPeersHighWater = reqSettings.TorrentClient.TorrentPeersHighWater
+		}
+		if reqSettings.TorrentClient.TorrentPeersLowWater != nil {
+			needsReplace = true
+			torrentClientCopy.TorrentPeersLowWater = reqSettings.TorrentClient.TorrentPeersLowWater
+		}
+		if reqSettings.TorrentClient.TotalHalfOpenConns != nil {
+			needsReplace = true
+			torrentClientCopy.TotalHalfOpenConns = reqSettings.TorrentClient.TotalHalfOpenConns
 		}
 		if reqSettings.TorrentClient.UploadRateLimit != nil {
 			needsReplace = true
