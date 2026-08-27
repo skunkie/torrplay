@@ -89,9 +89,13 @@ interface TorrentClient {
   disableUtp?: boolean,
   downloadRateLimit?: number,
   establishedConnsPerTorrent?: number,
+  halfOpenConnsPerTorrent?: number,
+  maxAllocPeerRequestDataPerConn?: number,
   preferHeaderObfuscation?: boolean,
   seed?: boolean,
   torrentPeersHighWater?: number,
+  torrentPeersLowWater?: number,
+  totalHalfOpenConns?: number,
   uploadRateLimit?: number
 }
 

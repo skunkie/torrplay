@@ -25,17 +25,21 @@ func Default() api.Settings {
 		LogStoreSize:     utils.Ptr(100),
 		MaxMemory:        utils.Ptr(int64(64 * 1024 * 1024)),
 		TorrentClient: &api.TorrentClient{
-			DisableDHT:                 utils.Ptr(false),
-			DisableIPv6:                utils.Ptr(true),
-			DisablePEX:                 utils.Ptr(false),
-			DisableTCP:                 utils.Ptr(false),
-			DisableUTP:                 utils.Ptr(false),
-			DownloadRateLimit:          utils.Ptr(0),
-			EstablishedConnsPerTorrent: utils.Ptr(50),
-			PreferHeaderObfuscation:    utils.Ptr(false),
-			Seed:                       utils.Ptr(false),
-			TorrentPeersHighWater:      utils.Ptr(500),
-			UploadRateLimit:            utils.Ptr(0),
+			DisableDHT:                     utils.Ptr(false),
+			DisableIPv6:                    utils.Ptr(true),
+			DisablePEX:                     utils.Ptr(false),
+			DisableTCP:                     utils.Ptr(false),
+			DisableUTP:                     utils.Ptr(false),
+			DownloadRateLimit:              utils.Ptr(0),
+			EstablishedConnsPerTorrent:     utils.Ptr(50),
+			HalfOpenConnsPerTorrent:        utils.Ptr(25),
+			MaxAllocPeerRequestDataPerConn: utils.Ptr(1048576),
+			PreferHeaderObfuscation:        utils.Ptr(false),
+			Seed:                           utils.Ptr(false),
+			TorrentPeersHighWater:          utils.Ptr(500),
+			TorrentPeersLowWater:           utils.Ptr(50),
+			TotalHalfOpenConns:             utils.Ptr(100),
+			UploadRateLimit:                utils.Ptr(0),
 		},
 		TorrentTrackers: utils.Ptr([]string{}),
 	}
@@ -135,6 +139,14 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 			tc.EstablishedConnsPerTorrent = dtc.EstablishedConnsPerTorrent
 			changed = true
 		}
+		if tc.HalfOpenConnsPerTorrent == nil {
+			tc.HalfOpenConnsPerTorrent = dtc.HalfOpenConnsPerTorrent
+			changed = true
+		}
+		if tc.MaxAllocPeerRequestDataPerConn == nil {
+			tc.MaxAllocPeerRequestDataPerConn = dtc.MaxAllocPeerRequestDataPerConn
+			changed = true
+		}
 		if tc.PreferHeaderObfuscation == nil {
 			tc.PreferHeaderObfuscation = dtc.PreferHeaderObfuscation
 			changed = true
@@ -145,6 +157,14 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 		}
 		if tc.TorrentPeersHighWater == nil {
 			tc.TorrentPeersHighWater = dtc.TorrentPeersHighWater
+			changed = true
+		}
+		if tc.TorrentPeersLowWater == nil {
+			tc.TorrentPeersLowWater = dtc.TorrentPeersLowWater
+			changed = true
+		}
+		if tc.TotalHalfOpenConns == nil {
+			tc.TotalHalfOpenConns = dtc.TotalHalfOpenConns
 			changed = true
 		}
 		if tc.UploadRateLimit == nil {

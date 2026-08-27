@@ -710,9 +710,13 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 			clientConfig.DownloadRateLimiter = rate.NewLimiter(rate.Limit(limit), 0)
 		}
 		clientConfig.EstablishedConnsPerTorrent = utils.Val(settings.TorrentClient.EstablishedConnsPerTorrent)
+		clientConfig.HalfOpenConnsPerTorrent = utils.Val(settings.TorrentClient.HalfOpenConnsPerTorrent)
+		clientConfig.MaxAllocPeerRequestDataPerConn = utils.Val(settings.TorrentClient.MaxAllocPeerRequestDataPerConn)
 		clientConfig.HeaderObfuscationPolicy.RequirePreferred = utils.Val(settings.TorrentClient.PreferHeaderObfuscation)
 		clientConfig.Seed = utils.Val(settings.TorrentClient.Seed)
 		clientConfig.TorrentPeersHighWater = utils.Val(settings.TorrentClient.TorrentPeersHighWater)
+		clientConfig.TorrentPeersLowWater = utils.Val(settings.TorrentClient.TorrentPeersLowWater)
+		clientConfig.TotalHalfOpenConns = utils.Val(settings.TorrentClient.TotalHalfOpenConns)
 		if limit := utils.Val(settings.TorrentClient.UploadRateLimit); limit > 0 {
 			clientConfig.UploadRateLimiter = rate.NewLimiter(rate.Limit(limit), 0)
 		}

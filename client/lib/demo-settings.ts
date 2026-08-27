@@ -23,9 +23,13 @@ export const demoDefaultSettings: Settings = {
     disableUtp: false,
     downloadRateLimit: 0,
     establishedConnsPerTorrent: 50,
+    halfOpenConnsPerTorrent: 25,
+    maxAllocPeerRequestDataPerConn: 1048576,
     preferHeaderObfuscation: false,
     seed: false,
     torrentPeersHighWater: 500,
+    torrentPeersLowWater: 50,
+    totalHalfOpenConns: 100,
     uploadRateLimit: 3145728,
   } as TorrentClient,
   torrentTrackers: [

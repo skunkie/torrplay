@@ -27,9 +27,13 @@ const buildMockSettings = (overrides = {}) => ({
     disableUtp: false,
     downloadRateLimit: 0,
     establishedConnsPerTorrent: 100,
+    halfOpenConnsPerTorrent: 25,
+    maxAllocPeerRequestDataPerConn: 1048576,
     preferHeaderObfuscation: true,
     seed: true,
     torrentPeersHighWater: 300,
+    torrentPeersLowWater: 50,
+    totalHalfOpenConns: 100,
     uploadRateLimit: 0,
   },
   torrentTrackers: ['udp://tracker.example.com:6969'],
@@ -390,8 +394,19 @@ describe('SettingsDialog', () => {
       expect(dhtSwitch).toBeChecked();
     });
 
-    const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    const peersItem = peersAccordion.closest('[data-slot="accordion-item"]');
+    if (peersItem && peersItem.getAttribute('data-state') !== 'open') {
+      fireEvent.click(peersAccordion);
+    }
     await waitFor(() => {
+      if (peersItem) {
+        expect(peersItem.getAttribute('data-state')).toBe('open');
+      }
+    });
+
+    await waitFor(() => {
+      const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
       expect(establishedInput).toHaveValue(200);
     });
 
@@ -513,6 +528,522 @@ describe('SettingsDialog', () => {
     await waitFor(() => {
       const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
       expect(logLevelSelect).toHaveTextContent('INFO');
+    });
+  });
+
+  it('Torrent Client accordion is expanded by default', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const torrentClientSection = screen.getByText('Torrent Client');
+      expect(torrentClientSection.closest('[data-state="open"]')).toBeTruthy();
+    });
+  });
+
+  it('Protocol & Discovery accordion is expanded by default', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const protocolAccordion = screen.getByRole('button', { name: /Protocol & Discovery/i });
+      expect(protocolAccordion.closest('[data-state="open"]')).toBeTruthy();
+    });
+  });
+
+  it('Rate Limits accordion is expanded by default', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const rateLimitsAccordion = screen.getByRole('button', { name: /Rate Limits/i });
+      expect(rateLimitsAccordion.closest('[data-state="open"]')).toBeTruthy();
+    });
+  });
+
+  it('Rate Limits shows download/upload inputs with current unit', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const downloadInput = screen.getByRole('spinbutton', { name: /download rate limit/i });
+      expect(downloadInput).toHaveValue(0);
+    });
+
+    const uploadInput = screen.getByRole('spinbutton', { name: /upload rate limit/i });
+    expect(uploadInput).toHaveValue(0);
+  });
+
+  it('Rate Limits unit selector changes display of rate limit inputs', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        downloadRateLimit: 10485760,
+        uploadRateLimit: 5242880,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const downloadInput = screen.getByRole<HTMLInputElement>('spinbutton', { name: /download rate limit.*MiB\/s/i });
+      expect(downloadInput).toHaveValue(10);
+    });
+
+    const uploadInput = screen.getByRole('spinbutton', { name: /upload rate limit.*MiB\/s/i });
+    expect(uploadInput).toHaveValue(5);
+  });
+
+  it('Rate Limits converts between unit options', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        downloadRateLimit: 10485760,
+        uploadRateLimit: 0,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const downloadInput = screen.getByRole('spinbutton', { name: /download rate limit/i });
+      expect(downloadInput).toHaveValue(10);
+    });
+
+    const unitSelector = screen.getByRole('combobox', { name: /rate limit unit/i });
+    selectCombobox(unitSelector, 'KiB/s');
+
+    await waitFor(() => {
+      const downloadInput = screen.getByRole('spinbutton', { name: /download rate limit/i });
+      expect(downloadInput).toHaveValue(10240);
+    });
+  });
+
+  it('Peers & Connections accordion is collapsed by default and has Advanced badge', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    await waitFor(() => {
+      expect(peersAccordion.closest('[data-state="closed"]')).toBeTruthy();
+    });
+
+    const badge = peersAccordion.closest('[data-state="closed"]')?.querySelector('[data-slot="badge"]');
+    expect(badge).toBeInTheDocument();
+  });
+
+  it('Memory & Buffers accordion is collapsed by default and has Advanced badge', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const memoryAccordion = screen.getByRole('button', { name: /memory & buffers/i });
+    await waitFor(() => {
+      expect(memoryAccordion.closest('[data-state="closed"]')).toBeTruthy();
+    });
+  });
+
+  it('User can toggle Protocol & Discovery accordion closed and open', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const dhtSwitch = screen.getByRole('switch', { name: /disable dht/i });
+    expect(dhtSwitch).toBeInTheDocument();
+
+    const protocolAccordion = screen.getByRole('button', { name: /Protocol & Discovery/i });
+    fireEvent.click(protocolAccordion);
+
+    await waitFor(() => {
+      expect(protocolAccordion.closest('[data-state="closed"]')).toBeTruthy();
+    });
+
+    expect(screen.queryByRole('switch', { name: /disable dht/i })).not.toBeInTheDocument();
+
+    fireEvent.click(protocolAccordion);
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: /disable dht/i })).toBeInTheDocument();
+    });
+  });
+
+  it('User can toggle Peers & Connections accordion open to edit values', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+      expect(establishedInput).toHaveValue(100);
+    });
+  });
+
+  it('User can toggle Memory & Buffers accordion open to edit values', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const memoryAccordion = screen.getByRole('button', { name: /memory & buffers/i });
+    fireEvent.click(memoryAccordion);
+
+    await waitFor(() => {
+      const bufferInput = screen.getByRole('spinbutton', { name: /peer request buffer/i });
+      expect(bufferInput).toHaveValue(1024);
+    });
+  });
+
+  it('User can change Connections Per Torrent value', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+      expect(establishedInput).toHaveValue(100);
+    });
+
+    const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+    fireEvent.change(establishedInput, { target: { value: '75' } });
+    expect(establishedInput).toHaveValue(75);
+  });
+
+  it('User can change Peers High Water Mark value', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const highWaterInput = screen.getByRole('spinbutton', { name: /peers high water/i });
+      expect(highWaterInput).toHaveValue(300);
+    });
+
+    const highWaterInput = screen.getByRole('spinbutton', { name: /peers high water/i });
+    fireEvent.change(highWaterInput, { target: { value: '400' } });
+    expect(highWaterInput).toHaveValue(400);
+  });
+
+  it('User can change Peers Low Water Mark value', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const lowWaterInput = screen.getByRole('spinbutton', { name: /peers low water/i });
+      expect(lowWaterInput).toHaveValue(50);
+    });
+
+    const lowWaterInput = screen.getByRole('spinbutton', { name: /peers low water/i });
+    fireEvent.change(lowWaterInput, { target: { value: '25' } });
+    expect(lowWaterInput).toHaveValue(25);
+  });
+
+  it('User can change Half-Open Conns Per Torrent value', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const halfOpenInput = screen.getByRole('spinbutton', { name: /half-open conns per torrent/i });
+      expect(halfOpenInput).toHaveValue(25);
+    });
+
+    const halfOpenInput = screen.getByRole('spinbutton', { name: /half-open conns per torrent/i });
+    fireEvent.change(halfOpenInput, { target: { value: '30' } });
+    expect(halfOpenInput).toHaveValue(30);
+  });
+
+  it('User can change Total Half-Open Conns value', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const totalHalfOpenInput = screen.getByRole('spinbutton', { name: /total half-open conns/i });
+      expect(totalHalfOpenInput).toHaveValue(100);
+    });
+
+    const totalHalfOpenInput = screen.getByRole('spinbutton', { name: /total half-open conns/i });
+    fireEvent.change(totalHalfOpenInput, { target: { value: '150' } });
+    expect(totalHalfOpenInput).toHaveValue(150);
+  });
+
+  it('User can change Peer Request Buffer value', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const memoryAccordion = screen.getByRole('button', { name: /memory & buffers/i });
+    fireEvent.click(memoryAccordion);
+
+    const bufferInput = screen.getByRole('spinbutton', { name: /peer request buffer/i });
+    await waitFor(() => {
+      expect(bufferInput).toHaveValue(1024);
+    });
+
+    fireEvent.change(bufferInput, { target: { value: '250' } });
+    expect(bufferInput).toHaveValue(250);
+  });
+
+  it('Reset button reverts Rate Limits to server values', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        downloadRateLimit: 5000000,
+        uploadRateLimit: 3000000,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const downloadInput = screen.getByRole<HTMLInputElement>('spinbutton', { name: /download rate limit.*MiB\/s/i });
+    await waitFor(() => {
+      expect(Number(downloadInput.value)).toBeCloseTo(4.77, 2);
+    });
+
+    fireEvent.change(downloadInput, { target: { value: '99' } });
+
+    await waitFor(() => {
+      expect(Number(downloadInput.value)).toBe(99);
+    });
+
+    fireEvent.click(getResetButton());
+
+    await waitFor(() => {
+      expect(Number(downloadInput.value)).toBeCloseTo(4.77, 2);
+    });
+  });
+
+  it('Reset button reverts Peers & Connections to server values', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        establishedConnsPerTorrent: 200,
+        torrentPeersHighWater: 600,
+        torrentPeersLowWater: 100,
+        halfOpenConnsPerTorrent: 50,
+        totalHalfOpenConns: 200,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+      expect(establishedInput).toHaveValue(200);
+    });
+
+    const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+    fireEvent.change(establishedInput, { target: { value: '150' } });
+
+    await waitFor(() => {
+      expect(establishedInput).toHaveValue(150);
+    });
+
+    fireEvent.click(getResetButton());
+
+    await waitFor(() => {
+      const updatedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+      expect(updatedInput).toHaveValue(200);
+    });
+  });
+
+  it('Reset button reverts Memory & Buffers to server values', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        maxAllocPeerRequestDataPerConn: 262144,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const memoryAccordion = screen.getByRole('button', { name: /memory & buffers/i });
+    fireEvent.click(memoryAccordion);
+
+    const bufferInput = screen.getByRole('spinbutton', { name: /peer request buffer/i });
+    await waitFor(() => {
+      expect(bufferInput).toHaveValue(256);
+    });
+
+    fireEvent.change(bufferInput, { target: { value: '999' } });
+
+    await waitFor(() => {
+      expect(bufferInput).toHaveValue(999);
+    });
+
+    fireEvent.click(getResetButton());
+
+    await waitFor(() => {
+      const updatedInput = screen.getByRole('spinbutton', { name: /peer request buffer/i });
+      expect(updatedInput).toHaveValue(256);
+    });
+  });
+
+  it('Reset to Defaults sets Rate Limits to zero', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        downloadRateLimit: 1000000,
+        uploadRateLimit: 500000,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      const downloadInput = screen.getByRole<HTMLInputElement>('spinbutton', { name: /download rate limit.*MiB\/s/i });
+      expect(downloadInput).toHaveValue(0);
+    });
+
+    const uploadInput = screen.getByRole('spinbutton', { name: /upload rate limit.*MiB\/s/i });
+    expect(uploadInput).toHaveValue(0);
+  });
+
+  it('Reset to Defaults sets Peers & Connections to hardcoded defaults', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        establishedConnsPerTorrent: 300,
+        torrentPeersHighWater: 1000,
+        torrentPeersLowWater: 200,
+        halfOpenConnsPerTorrent: 100,
+        totalHalfOpenConns: 500,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    fireEvent.click(peersAccordion);
+
+    await waitFor(() => {
+      const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+      expect(establishedInput).toHaveValue(300);
+    });
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      const establishedInput = screen.getByRole('spinbutton', { name: /connections per torrent/i });
+      expect(establishedInput).toHaveValue(50);
+    });
+
+    const highWaterInput = screen.getByRole('spinbutton', { name: /peers high water mark/i });
+    expect(highWaterInput).toHaveValue(500);
+
+    const lowWaterInput = screen.getByRole('spinbutton', { name: /peers low water mark/i });
+    expect(lowWaterInput).toHaveValue(50);
+
+    const halfOpenInput = screen.getByRole('spinbutton', { name: /half-open conns per torrent/i });
+    expect(halfOpenInput).toHaveValue(25);
+
+    const totalHalfOpenInput = screen.getByRole('spinbutton', { name: /total half-open conns/i });
+    expect(totalHalfOpenInput).toHaveValue(100);
+  });
+
+  it('Reset to Defaults sets Memory & Buffers to hardcoded defaults', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        maxAllocPeerRequestDataPerConn: 262144,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const memoryAccordion = screen.getByRole('button', { name: /memory & buffers/i });
+    fireEvent.click(memoryAccordion);
+
+    const bufferInput = screen.getByRole('spinbutton', { name: /peer request buffer/i });
+    await waitFor(() => {
+      expect(bufferInput).toHaveValue(256);
+    });
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      const updatedInput = screen.getByRole('spinbutton', { name: /peer request buffer/i });
+      expect(updatedInput).toHaveValue(1024);
+    });
+  });
+
+  it('Peers & Connections and Memory & Buffers accordions are collapsed by default', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const peersAccordion = screen.getByRole('button', { name: /peers & connections/i });
+    const memoryAccordion = screen.getByRole('button', { name: /memory & buffers/i });
+
+    await waitFor(() => {
+      expect(peersAccordion.closest('[data-state="closed"]')).toBeTruthy();
+      expect(memoryAccordion.closest('[data-state="closed"]')).toBeTruthy();
+    });
+  });
+
+  it('Protocol & Discovery switches are visible without expanding accordion', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const dhtSwitch = screen.getByRole('switch', { name: /disable dht/i });
+    expect(dhtSwitch).toBeInTheDocument();
+
+    const ipv6Switch = screen.getByRole('switch', { name: /disable ipv6/i });
+    expect(ipv6Switch).toBeInTheDocument();
+
+    const pexSwitch = screen.getByRole('switch', { name: /disable pex/i });
+    expect(pexSwitch).toBeInTheDocument();
+  });
+
+  it('saving after Reset to Defaults sends reset torrentClient values including new advanced fields', async () => {
+    settingsRef.current = buildMockSettings({
+      torrentClient: {
+        ...buildMockSettings().torrentClient,
+        halfOpenConnsPerTorrent: 99,
+        maxAllocPeerRequestDataPerConn: 524288,
+        torrentPeersLowWater: 99,
+        totalHalfOpenConns: 999,
+      },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    const saveButton = screen.getByRole('button', { name: /save changes/i });
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(
+        expect.objectContaining({
+          torrentClient: expect.objectContaining({
+            halfOpenConnsPerTorrent: 25,
+            maxAllocPeerRequestDataPerConn: 1048576,
+            torrentPeersLowWater: 50,
+            totalHalfOpenConns: 100,
+          }),
+        }),
+      );
     });
   });
 });
