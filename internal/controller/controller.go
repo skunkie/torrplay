@@ -58,6 +58,8 @@ const (
 	imageDownloadTimeout      = 1 * time.Minute
 	multipartFormMaxMemory    = 1 << 20
 	posterCleanupInterval     = 6 * time.Hour
+	profilerAddress           = "127.0.0.1:6060"
+	profilerShutdownTimeout   = 5 * time.Second
 	torrentTrackerTTL         = 3 * time.Hour
 )
 
@@ -111,6 +113,10 @@ type Controller struct {
 	posterCleanupTicker *time.Ticker
 	posterOpMu          sync.Mutex
 	postersPath         string
+	profilerAddr        string
+	profilerListener    net.Listener
+	profilerMu          sync.Mutex
+	profilerServer      *http.Server
 	router              *chi.Mux
 	settings            *api.Settings
 	shutdownOnce        sync.Once
@@ -156,6 +162,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
+		profilerAddr:      profilerAddress,
 		settings:          appSettings,
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
@@ -281,10 +288,6 @@ func (c *Controller) buildRouter() *chi.Mux {
 
 	if *c.settings.EnableDlna {
 		router.Mount(c.dlnaPath, c.dlna)
-	}
-
-	if *c.settings.LogLevel == slog.LevelDebug {
-		router.Mount("/debug", middleware.Profiler())
 	}
 
 	// Posters routes.
@@ -513,6 +516,7 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 func (c *Controller) Start() {
 	c.logger.Info("starting TorrPlay...")
 	c.logger.Info("build info", "commit", buildinfo.Commit, "version", buildinfo.Version, "build date", buildinfo.BuildDate)
+	c.reconcileProfiler()
 
 	addr := net.JoinHostPort(c.httpAddr, strconv.Itoa(c.resolveHTTPPort()))
 	c.httpServer = httpserver.NewServer(c.SetupRouter(), addr, c.logger)
@@ -529,8 +533,9 @@ func (c *Controller) Shutdown() {
 		c.logger.Info("shutting down TorrPlay...")
 
 		if c.httpServer != nil {
-			_ = c.httpServer.Shutdown()
+			_ = c.httpServer.Close()
 		}
+		c.stopProfiler()
 
 		if c.downloader != nil {
 			c.downloader.Stop()
@@ -554,6 +559,78 @@ func (c *Controller) Shutdown() {
 
 		c.logger.Info("TorrPlay stopped")
 	})
+}
+
+func profilerHandler() http.Handler {
+	router := chi.NewRouter()
+	router.Mount("/debug", middleware.Profiler())
+	return router
+}
+
+func (c *Controller) reconcileProfiler() {
+	c.profilerMu.Lock()
+	c.mu.RLock()
+	enabled := c.settings.LogLevel != nil && *c.settings.LogLevel == slog.LevelDebug
+	c.mu.RUnlock()
+
+	if !enabled {
+		server := c.detachProfilerLocked()
+		c.profilerMu.Unlock()
+		c.shutdownProfiler(server)
+		return
+	}
+	defer c.profilerMu.Unlock()
+
+	if c.profilerServer != nil {
+		return
+	}
+
+	listener, err := net.Listen("tcp4", c.profilerAddr)
+	if err != nil {
+		c.logger.Error("failed to start profiler server", "address", c.profilerAddr, "error", err)
+		return
+	}
+
+	server := &http.Server{
+		Handler:           profilerHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	c.profilerListener = listener
+	c.profilerServer = server
+	c.logger.Info("starting profiler server", "address", listener.Addr().String())
+
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			c.logger.Error("profiler server stopped with error", "error", err)
+		}
+	}()
+}
+
+func (c *Controller) stopProfiler() {
+	c.profilerMu.Lock()
+	server := c.detachProfilerLocked()
+	c.profilerMu.Unlock()
+	c.shutdownProfiler(server)
+}
+
+func (c *Controller) detachProfilerLocked() *http.Server {
+	server := c.profilerServer
+	c.profilerServer = nil
+	c.profilerListener = nil
+	return server
+}
+
+func (c *Controller) shutdownProfiler(server *http.Server) {
+	if server == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), profilerShutdownTimeout)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
+		c.logger.Error("failed to shut down profiler server", "error", err)
+		_ = server.Close()
+	}
 }
 
 func (c *Controller) startTorrentCleanup() {
