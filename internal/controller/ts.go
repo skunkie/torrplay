@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,7 +75,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, piece := range info.Pieces {
-		resp.Pieces[fmt.Sprint(piece.Index)] = api.TSPieceInfo{
+		resp.Pieces[strconv.Itoa(piece.Index)] = api.TSPieceInfo{
 			Completed: piece.Complete,
 			ID:        piece.Index,
 			Length:    piece.Size,
@@ -87,7 +88,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (_ *Controller) TSEcho(w http.ResponseWriter, _ *http.Request) {
+func (*Controller) TSEcho(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("MatriX.TorrPlay"))
 }
 
@@ -138,7 +139,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	}
 
 	if ih.IsZero() {
-		api.HTTPError(w, fmt.Sprintf("invalid hash %s", ih.HexString()), http.StatusBadRequest)
+		api.HTTPError(w, "invalid hash "+ih.HexString(), http.StatusBadRequest)
 		return
 	}
 
@@ -376,7 +377,7 @@ func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
 
 	req := api.TorrentAdd{
 		Category: &category,
-		Magnet:   utils.Ptr(magnetV2.String()),
+		Magnet:   new(magnetV2.String()),
 		Poster:   &poster,
 		Storage:  utils.Ptr(api.Memory),
 		Title:    &title,
@@ -681,25 +682,26 @@ func tSUploadTorrentMiddleware(next http.Handler) http.Handler {
 				if err != nil {
 					continue
 				}
-				defer file.Close()
 
 				h := make(textproto.MIMEHeader)
-				disposition := fmt.Sprintf(`form-data; name="file"; filename="%s"`, fileHeader.Filename)
+				disposition := fmt.Sprintf(`form-data; name="file"; filename=%q`, fileHeader.Filename)
 				h.Set("Content-Disposition", disposition)
 				h.Set("Content-Type", fileHeader.Header.Get("Content-Type"))
 
 				part, err := writer.CreatePart(h)
 				if err != nil {
+					_ = file.Close()
 					continue
 				}
 
 				_, _ = io.Copy(part, file)
+				_ = file.Close()
 			}
 		}
 
 		_ = writer.Close()
 
-		newReq, _ := http.NewRequest(r.Method, r.URL.String(), &buf)
+		newReq, _ := http.NewRequest(r.Method, r.URL.String(), &buf) //nolint:gosec // This request is dispatched internally and never sent over the network.
 		newReq.Header = r.Header.Clone()
 		newReq.Header.Set("Content-Type", writer.FormDataContentType())
 		newReq = newReq.WithContext(r.Context())

@@ -9,15 +9,15 @@ import (
 )
 
 type DatabaseInterface interface {
-	CreateTorrent(*Torrent) error
+	CreateTorrent(t *Torrent) error
 	GetTorrents() ([]*Torrent, error)
-	GetTorrent(metainfo.Hash) (*Torrent, error)
-	UpdateTorrent(*Torrent) error
-	DeleteTorrent(metainfo.Hash) error
-	IsPosterUsed(string) (bool, error)
+	GetTorrent(ih metainfo.Hash) (*Torrent, error)
+	UpdateTorrent(t *Torrent) error
+	DeleteTorrent(ih metainfo.Hash) error
+	IsPosterUsed(posterID string) (bool, error)
 
 	GetSettings() (*Settings, error)
-	UpdateSettings(*Settings) error
+	UpdateSettings(s *Settings) error
 
 	GetDLNAUDN() (string, error)
 	GetJWTSecret() (string, error)

@@ -53,7 +53,7 @@ func TestSlogHook_Fire(t *testing.T) {
 			err := hook.Fire(entry)
 			require.NoError(t, err)
 
-			var logOutput map[string]interface{}
+			var logOutput map[string]any
 			err = json.Unmarshal(buf.Bytes(), &logOutput)
 			require.NoError(t, err)
 
@@ -70,7 +70,7 @@ func TestSlogHook_Fire(t *testing.T) {
 	}
 }
 
-func TestSlogHook_toSlogLevel(t *testing.T) {
+func TestSlogHook_ToSlogLevel(t *testing.T) {
 	hook := NewSlogHook(nil) // No logger needed for this test
 
 	assert.Equal(t, slog.LevelDebug, hook.toSlogLevel(logrus.TraceLevel))

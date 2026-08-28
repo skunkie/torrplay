@@ -32,7 +32,7 @@ func TestDo(t *testing.T) {
 	defer server.Close()
 
 	client := New()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL, http.NoBody)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -68,7 +68,10 @@ func TestClientTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := client.Get(ctx, server.URL)
+	resp, err := client.Get(ctx, server.URL)
+	if resp != nil {
+		defer resp.Body.Close()
+	}
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }

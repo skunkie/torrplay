@@ -15,5 +15,5 @@ type ServiceInterface interface {
 	Get(id string) ([]byte, error)
 	ListIDs() ([]string, error)
 	SaveData(data []byte) (*string, error)
-	ServeHTTP(http.ResponseWriter, *http.Request)
+	ServeHTTP(w http.ResponseWriter, r *http.Request)
 }

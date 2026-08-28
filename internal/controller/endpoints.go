@@ -102,7 +102,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		category := r.FormValue("category")
 		title := r.FormValue("title")
 		poster := r.FormValue("poster")
-		storage := r.FormValue("storage")
+		storageParam := r.FormValue("storage")
 
 		// If no title provided, try to get it from the torrent.
 		if title == "" {
@@ -112,15 +112,15 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if storage == "" {
-			storage = string(api.Memory)
+		if storageParam == "" {
+			storageParam = string(api.Memory)
 		}
 
 		req = api.TorrentAdd{
 			Category: &category,
-			Magnet:   utils.Ptr(magnetV2.String()),
+			Magnet:   new(magnetV2.String()),
 			Poster:   &poster,
-			Storage:  (*api.TorrentStorage)(utils.Ptr(storage)),
+			Storage:  (*api.TorrentStorage)(new(storageParam)),
 			Title:    &title,
 		}
 
@@ -162,7 +162,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 
 		// There is no poster for octet-stream.
 		req = api.TorrentAdd{
-			Magnet:  utils.Ptr(magnetV2.String()),
+			Magnet:  new(magnetV2.String()),
 			Storage: utils.Ptr(api.Memory),
 			Title:   &title,
 		}
@@ -177,7 +177,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case req.Hash != nil:
-		req.Magnet = utils.Ptr(magnetURIfromHash(*req.Hash))
+		req.Magnet = new(utils.MagnetURIFromHash(*req.Hash))
 		fallthrough
 	case req.Magnet != nil:
 	default:
@@ -193,7 +193,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	var to *torrent.Torrent
 	if meta != nil {
 		spec := torrent.TorrentSpecFromMetaInfo(meta)
-		to, err = c.loadTorrentSpec(spec, api.TorrentStorage(utils.Val(req.Storage)))
+		to, err = c.loadTorrentSpec(spec, utils.Val(req.Storage))
 	} else {
 		to, err = c.addTorrentByMagnet(*req.Magnet)
 	}
@@ -312,7 +312,9 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 		".webm",
 		".wmv",
 	}
-	mediaExts := append(audioExtensions, videoExtensions...)
+	mediaExts := make([]string, 0, len(audioExtensions)+len(videoExtensions))
+	mediaExts = append(mediaExts, audioExtensions...)
+	mediaExts = append(mediaExts, videoExtensions...)
 
 	var opts []torrentsOpt
 	if params.Name != nil {
@@ -331,7 +333,7 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 		scheme = "https"
 	}
 	baseURL := fmt.Sprintf("%s://%s", scheme, r.Host)
-	masterPlaylist := !(params.Name != nil && strings.HasSuffix(*params.Name, suffix))
+	masterPlaylist := params.Name == nil || !strings.HasSuffix(*params.Name, suffix)
 	var m3u strings.Builder
 	_, _ = m3u.WriteString("#EXTM3U\n")
 
@@ -843,7 +845,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			p := *newSettings.FileStoragePath
 			// Create the directory if it does not exist.
 			if _, err := os.Stat(p); os.IsNotExist(err) {
-				if err := os.MkdirAll(p, 0755); err != nil {
+				if err := os.MkdirAll(p, 0o755); err != nil {
 					c.mu.Unlock()
 					api.HTTPError(w, fmt.Sprintf("failed to create file storage directory: %v", err), http.StatusBadRequest)
 					return
@@ -1104,7 +1106,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.MemoryUsagePercentage = 0
 
 		pieces := make([]api.PieceInfo, to.NumPieces())
-		for i := 0; i < to.NumPieces(); i++ {
+		for i := range to.NumPieces() {
 			p := to.Piece(i)
 			pieces[i] = api.PieceInfo{
 				Complete: p.State().Complete,
@@ -1235,11 +1237,11 @@ func (c *Controller) deleteTorrentLocked(ih metainfo.Hash) error {
 	return nil
 }
 
-func (c *Controller) handlePosterUpdate(ih metainfo.Hash, url string) {
+func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 	ctx, cancel := context.WithTimeout(context.Background(), imageDownloadTimeout)
 	defer cancel()
 
-	data, err := c.images.DownloadImageData(ctx, url)
+	data, err := c.images.DownloadImageData(ctx, urlStr)
 	if err != nil {
 		c.logger.Debug("error downloading poster image", "error", err)
 		return
@@ -1270,7 +1272,7 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, url string) {
 	}
 
 	t.Poster = imageID
-	t.UpdatedAt = utils.Ptr(time.Now())
+	t.UpdatedAt = new(time.Now())
 
 	if err := c.db.UpdateTorrent(t); err != nil {
 		c.logger.Error("failed to update torrent poster", "hash", ih, "error", err)
@@ -1367,7 +1369,7 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	if storageType == api.File && c.settings.FileStoragePath != nil && *c.settings.FileStoragePath != "" {
 		fileStoragePath := *c.settings.FileStoragePath
 		if _, err := os.Stat(fileStoragePath); os.IsNotExist(err) {
-			if err := os.MkdirAll(fileStoragePath, 0755); err != nil {
+			if err := os.MkdirAll(fileStoragePath, 0o755); err != nil {
 				c.logger.Warn("failed to create file storage directory, falling back to memory storage", "error", err)
 			}
 		}
@@ -1432,7 +1434,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 			return f.Path() == v
 		})
 		if idx < 0 {
-			api.HTTPError(w, fmt.Sprintf("invalid file path %s", v), http.StatusBadRequest)
+			api.HTTPError(w, "invalid file path "+v, http.StatusBadRequest)
 			return
 		}
 		file = to.Files()[idx]
@@ -1473,7 +1475,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		reader.SetReadahead(fileStorageReadahead)
 	} else {
 		c.mu.RLock()
-		readahead := int64(*c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100)
+		readahead := *c.settings.MaxMemory * int64(*c.settings.ReadaheadPercentage) / 100
 		c.mu.RUnlock()
 		reader.SetReadahead(readahead)
 	}
@@ -1606,11 +1608,11 @@ func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.To
 		return nil
 	}
 
-	t.UpdatedAt = utils.Ptr(time.Now())
+	t.UpdatedAt = new(time.Now())
 	if err := c.db.UpdateTorrent(t); err != nil {
 		c.posterOpMu.Unlock()
 		c.mu.Unlock()
-		return api.NewError(fmt.Sprintf("failed to update torrent with hash %s", ih.HexString()), http.StatusInternalServerError)
+		return api.NewError("failed to update torrent with hash "+ih.HexString(), http.StatusInternalServerError)
 	}
 
 	dlnaEnabled := *c.settings.EnableDlna

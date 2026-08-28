@@ -21,10 +21,11 @@ import (
 // ErrorHandler is a custom error handler for OpenAPI request validation middleware.
 // It intercepts errors from the oapi-codegen validator and formats them into consistent HTTP JSON responses.
 func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseWriter, _ *http.Request, opts nethttpmiddleware.ErrorHandlerOpts) {
-	switch e := err.(type) {
-	case *openapi3filter.RequestError:
-		var schemaError *openapi3.SchemaError
-		if errors.As(e.Err, &schemaError) {
+	var reqErr *openapi3filter.RequestError
+	var secErr *openapi3filter.SecurityRequirementsError
+	switch {
+	case errors.As(err, &reqErr):
+		if schemaError, ok := errors.AsType[*openapi3.SchemaError](reqErr.Err); ok {
 			if ext, ok := schemaError.Schema.Extensions["x-torrplay-validation-key"]; ok {
 				if ext == "torrent_trackers" {
 					api.HTTPError(w, "invalid torrent tracker format", http.StatusBadRequest)
@@ -32,14 +33,13 @@ func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseW
 				}
 			}
 		}
-		message, _ := getInnerErrorMessage(e.Err)
+		message, _ := getInnerErrorMessage(reqErr.Err)
 		api.HTTPError(w, message, opts.StatusCode)
 		return
-	case *openapi3filter.SecurityRequirementsError:
-		var authErr *api.AuthError
-		if errors.As(err, &authErr) {
+	case errors.As(err, &secErr):
+		if authErr, ok := errors.AsType[*api.AuthError](err); ok {
 			realm := "TorrPlay"
-			authHeader := fmt.Sprintf(`%s realm="%s"`, authErr.Type, realm)
+			authHeader := fmt.Sprintf(`%s realm=%q`, authErr.Type, realm)
 			w.Header().Set("WWW-Authenticate", authHeader)
 		}
 		if utils.Val(c.settings.LogLevel) == slog.LevelDebug {
@@ -59,8 +59,7 @@ func getInnerErrorMessage(err error) (string, bool) {
 		return "", false
 	}
 
-	var schemaErr *openapi3.SchemaError
-	if errors.As(err, &schemaErr) {
+	if schemaErr, ok := errors.AsType[*openapi3.SchemaError](err); ok {
 		if schemaErr.Origin != nil {
 			if msg, isSchema := getInnerErrorMessage(schemaErr.Origin); msg != "" {
 				return msg, isSchema
@@ -71,8 +70,7 @@ func getInnerErrorMessage(err error) (string, bool) {
 		}
 	}
 
-	var multiErr openapi3.MultiError
-	if errors.As(err, &multiErr) {
+	if multiErr, ok := errors.AsType[openapi3.MultiError](err); ok {
 		var firstMessage string
 		for _, me := range multiErr {
 			msg, isSchema := getInnerErrorMessage(me)

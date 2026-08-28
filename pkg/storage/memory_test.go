@@ -30,14 +30,14 @@ func newTestClient(maxMemory int64) *Client {
 }
 
 // newTestInfo creates a dummy torrent info and hash for testing.
-func newTestInfo(pieceLength int64, numPieces int) (*metainfo.Info, metainfo.Hash) {
+func newTestInfo(pieceLength int64, numPieces int) (*metainfo.Info, metainfo.Hash) { //nolint:unparam // pieceLength varies in subsequent storage tests.
 	info := &metainfo.Info{
 		PieceLength: pieceLength,
 		Pieces:      make([]byte, 20*numPieces),
 		Name:        "test_torrent",
 		Length:      pieceLength * int64(numPieces),
 	}
-	for i := 0; i < numPieces; i++ {
+	for i := range numPieces {
 		hash := sha1.Sum([]byte(fmt.Sprintf("piece_%d", i)))
 		copy(info.Pieces[i*20:(i+1)*20], hash[:])
 	}
@@ -172,7 +172,7 @@ func TestMemoryEviction(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write 3 pieces, causing eviction of the first one.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p := torrentImpl.Piece(info.Piece(i))
 		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
 		require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestClient_GetCompletedProgress(t *testing.T) {
 	require.NoError(t, err)
 
 	// Complete 2 out of 4 pieces
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		p := torrentImpl.Piece(info.Piece(i))
 		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
 		require.NoError(t, err)
@@ -221,7 +221,7 @@ func TestClient_GetMemoryUsageProgress(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write 2 pieces
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		p := torrentImpl.Piece(info.Piece(i))
 		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
 		require.NoError(t, err)
@@ -240,7 +240,7 @@ func TestClient_SetMaxMemory(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write 3 pieces
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p := torrentImpl.Piece(info.Piece(i))
 		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
 		require.NoError(t, err)
@@ -263,7 +263,7 @@ func TestClient_ForceEvict(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write 3 pieces
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p := torrentImpl.Piece(info.Piece(i))
 		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
 		require.NoError(t, err)
@@ -286,7 +286,7 @@ func TestClient_GetPiecesInMemory(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write 2 pieces
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		p := torrentImpl.Piece(info.Piece(i))
 		_, err := p.WriteAt([]byte(fmt.Sprintf("piece_%d", i)), 0)
 		require.NoError(t, err)
@@ -419,12 +419,12 @@ func TestConcurrentAccess(t *testing.T) {
 	var wg sync.WaitGroup
 	numGoroutines := 4
 	pcs := make([]storage.PieceImpl, numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		pcs[i] = torrentImpl.Piece(info.Piece(i))
 	}
 
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(p storage.PieceImpl) {
 			defer wg.Done()
 			_, _ = p.WriteAt([]byte("data"), 0)
@@ -457,7 +457,7 @@ func TestRaceWithMapIteration(t *testing.T) {
 	// Goroutine 1: Continuously get torrent memory stats
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			_, _ = client.GetTorrentMemoryStats(infoHash)
 		}
 	}()
@@ -466,7 +466,7 @@ func TestRaceWithMapIteration(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		torrentImpl, _ := client.OpenTorrent(context.Background(), info, infoHash)
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			p := torrentImpl.Piece(info.Piece(i))
 			_, _ = p.WriteAt(make([]byte, 256), 0)
 		}

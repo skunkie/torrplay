@@ -5,9 +5,7 @@
 package piececompletion
 
 import (
-	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -18,11 +16,9 @@ import (
 )
 
 func TestNew(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "piececompletion-test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+	tempDir := t.TempDir()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	// Test successful creation.
 	pc, err := New(tempDir, logger)
@@ -38,12 +34,10 @@ func TestNew(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestPieceCompletion_GetAndSet(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "piececompletion-test")
-	require.NoError(t, err)
-	defer os.RemoveAll(tempDir)
+func TestPieceCompletionPersistsState(t *testing.T) {
+	tempDir := t.TempDir()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	pc, err := New(tempDir, logger)
 	require.NoError(t, err)

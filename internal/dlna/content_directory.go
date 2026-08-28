@@ -7,6 +7,7 @@ package dlna
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log/slog"
 	"mime"
@@ -72,13 +73,25 @@ type (
 	}
 )
 
-func NewContentDirectory(db database.DatabaseInterface, images images.ServiceInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
+func clampUint(value int64) uint {
+	if value <= 0 {
+		return 0
+	}
+
+	maxUint := ^uint(0)
+	if uint64(value) > uint64(maxUint) {
+		return maxUint
+	}
+	return uint(value)
+}
+
+func NewContentDirectory(db database.DatabaseInterface, imgService images.ServiceInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
 	return &ContentDirectory{
 		baseURL:        baseURL,
 		db:             db,
-		images:         images,
+		images:         imgService,
 		postersPath:    postersPath,
-		systemUpdateID: uint(time.Now().Unix()),
+		systemUpdateID: clampUint(time.Now().Unix()),
 	}
 }
 
@@ -109,32 +122,33 @@ func (cd *ContentDirectory) BrowseMetadata(ctx context.Context, id upnpav.Object
 	}
 
 	for _, torrent := range torrents {
-		if torrent.Hash.HexString() == string(id) {
-			didl := &upnpav.DIDLLite{}
-			date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
-			if torrent.UpdatedAt != nil {
-				date = &upnpav.Date{Time: *torrent.UpdatedAt}
-			}
-
-			container := upnpav.Container{
-				ID:         id,
-				Parent:     allTorrentsContainerID,
-				Title:      torrent.Name,
-				Class:      upnpav.StorageFolder,
-				Restricted: true,
-				Searchable: true,
-				Date:       date,
-			}
-			childCount := 0
-			for _, file := range torrent.Files {
-				if isMediaFile(file) {
-					childCount++
-				}
-			}
-			container.ChildCount = childCount
-			didl.Containers = append(didl.Containers, container)
-			return didl, nil
+		if torrent.Hash.HexString() != string(id) {
+			continue
 		}
+		didl := &upnpav.DIDLLite{}
+		date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
+		if torrent.UpdatedAt != nil {
+			date = &upnpav.Date{Time: *torrent.UpdatedAt}
+		}
+
+		container := upnpav.Container{
+			ID:         id,
+			Parent:     allTorrentsContainerID,
+			Title:      torrent.Name,
+			Class:      upnpav.StorageFolder,
+			Restricted: true,
+			Searchable: true,
+			Date:       date,
+		}
+		childCount := 0
+		for _, file := range torrent.Files {
+			if isMediaFile(file) {
+				childCount++
+			}
+		}
+		container.ChildCount = childCount
+		didl.Containers = append(didl.Containers, container)
+		return didl, nil
 	}
 
 	return nil, contentdirectory.ErrNoSuchObject
@@ -432,7 +446,7 @@ func (cd *ContentDirectory) browseTorrent(_ context.Context, torrentHash upnpav.
 					ContentFormat:  mime.TypeByExtension(path.Ext(file.Path)),
 					AdditionalInfo: upnpav.ContentFeatures,
 				},
-				SizeBytes: uint(file.Length),
+				SizeBytes: clampUint(file.Length),
 			},
 		}
 
@@ -482,11 +496,11 @@ func (cd *ContentDirectory) iconURI(filepath string) (*url.URL, error) {
 	cd.mu.RLock()
 	defer cd.mu.RUnlock()
 	if cd.baseURL == nil {
-		return nil, fmt.Errorf("DLNA ContentDirectory has no base URL set, can't generate icon URI")
+		return nil, errors.New("DLNA ContentDirectory has no base URL set, can't generate icon URI")
 	}
 
-	mediaType := strings.SplitN(mime.TypeByExtension(path.Ext(filepath)), "/", 2)[0]
-	iconFilename := fmt.Sprintf("%sfile-128x128.png", mediaType)
+	mediaType, _, _ := strings.Cut(mime.TypeByExtension(path.Ext(filepath)), "/")
+	iconFilename := mediaType + "file-128x128.png"
 
 	iconURL := *cd.baseURL
 	iconURL.Path = path.Join(iconURL.Path, "/icons/media", iconFilename)

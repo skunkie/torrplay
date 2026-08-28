@@ -318,33 +318,34 @@ func (c *Client) GetTorrentMemoryStats(hash metainfo.Hash) (*TorrentMemoryStats,
 
 	// Iterate through all pieces and collect only those belonging to this torrent.
 	for key, pd := range c.pieces {
-		if key.hash == hash {
-			pd.mu.RLock()
-
-			pieceInfo := PieceInfo{
-				Index:    key.index,
-				Size:     pd.pieceSize,
-				Complete: pd.complete,
-				InMemory: pd.data != nil,
-			}
-
-			// Add to pieces list.
-			info.Pieces = append(info.Pieces, pieceInfo)
-
-			// Update totals.
-			info.TotalSize += pd.pieceSize
-
-			if pd.complete {
-				info.CompletedSize += pd.pieceSize
-			}
-
-			if pd.data != nil {
-				info.InMemory++
-				info.InMemorySize += int64(len(pd.data))
-			}
-
-			pd.mu.RUnlock()
+		if key.hash != hash {
+			continue
 		}
+		pd.mu.RLock()
+
+		pieceInfo := PieceInfo{
+			Index:    key.index,
+			Size:     pd.pieceSize,
+			Complete: pd.complete,
+			InMemory: pd.data != nil,
+		}
+
+		// Add to pieces list.
+		info.Pieces = append(info.Pieces, pieceInfo)
+
+		// Update totals.
+		info.TotalSize += pd.pieceSize
+
+		if pd.complete {
+			info.CompletedSize += pd.pieceSize
+		}
+
+		if pd.data != nil {
+			info.InMemory++
+			info.InMemorySize += int64(len(pd.data))
+		}
+
+		pd.mu.RUnlock()
 	}
 
 	// Sort pieces by index for consistent output.
@@ -380,7 +381,7 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, hash metain
 	pieceCount := info.NumPieces()
 	pieceHashes := make([]metainfo.Hash, pieceCount)
 
-	for i := 0; i < pieceCount; i++ {
+	for i := range pieceCount {
 		start := i * 20 // SHA1 is 20 bytes.
 		end := start + 20
 		if end > len(info.Pieces) {
@@ -444,10 +445,7 @@ func (c *Client) allocateMemory(size int64, hash metainfo.Hash) error {
 
 	// Check if we need to evict.
 	if c.used+size > c.maxMemory {
-		target := c.maxMemory - size
-		if target < 0 {
-			target = 0
-		}
+		target := max(c.maxMemory-size, 0)
 
 		beforeEvict := c.used
 

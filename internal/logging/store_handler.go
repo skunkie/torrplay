@@ -36,7 +36,7 @@ func (h *StoreHandler) Handle(ctx context.Context, r slog.Record) error {
 		Time:    r.Time,
 		Level:   r.Level,
 		Message: r.Message,
-		Data:    make(map[string]interface{}),
+		Data:    make(map[string]any),
 	}
 	// Add attributes from the handler itself.
 	for _, a := range h.attrs {

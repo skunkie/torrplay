@@ -6,6 +6,7 @@ package piececompletion
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -49,7 +50,7 @@ type pieceUpdate struct {
 
 func New(dir string, logger *slog.Logger) (DeletablePieceCompletion, error) {
 	dbPath := filepath.Join(dir, ".torrent.db")
-	dsn := fmt.Sprintf("%s?_busy_timeout=5000&_txlock=immediate", dbPath)
+	dsn := dbPath + "?_busy_timeout=5000&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open sqlite db: %w", err)
@@ -197,7 +198,7 @@ func (pc *PieceCompletion) Set(pk metainfo.PieceKey, complete bool) error {
 	case pc.updates <- pieceUpdate{pk: pk, complete: complete}:
 		return nil
 	case <-pc.stopCh:
-		return fmt.Errorf("piece completion is closed")
+		return errors.New("piece completion is closed")
 	}
 }
 

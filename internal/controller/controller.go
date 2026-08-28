@@ -55,8 +55,8 @@ const (
 	fileViewedUpdateThreshold = 5 * time.Minute
 	gotInfoTimeoutMsg         = "timeout waiting for torrent metadata"
 	imageDownloadTimeout      = 1 * time.Minute
-	multipartFormMaxMemory    = 1 << 20
 	multipartFormMaxBody      = 32 << 20
+	multipartFormMaxMemory    = 1 << 20
 	posterCleanupInterval     = 6 * time.Hour
 	torrentTrackerTTL         = 3 * time.Hour
 )
@@ -131,11 +131,11 @@ type Controller struct {
 	api.Unimplemented
 }
 
-func NewController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, images images.ServiceInterface, metrics *metrics.Metrics) (*Controller, error) {
-	return newController(dataDir, ipAddr, port, dbClient, images, metrics, defaultControllerRuntimeConfig())
+func NewController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, imgService images.ServiceInterface, metricsRegistry *metrics.Metrics) (*Controller, error) {
+	return newController(dataDir, ipAddr, port, dbClient, imgService, metricsRegistry, defaultControllerRuntimeConfig())
 }
 
-func newController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, images images.ServiceInterface, metrics *metrics.Metrics, runtimeConfig controllerRuntimeConfig) (*Controller, error) {
+func newController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, imgService images.ServiceInterface, metricsRegistry *metrics.Metrics, runtimeConfig controllerRuntimeConfig) (*Controller, error) {
 	defaults := defaultControllerRuntimeConfig()
 	if runtimeConfig.fetchTrackers == nil {
 		runtimeConfig.fetchTrackers = defaults.fetchTrackers
@@ -174,10 +174,10 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		runtimeConfig:     runtimeConfig,
 		db:                dbClient,
 		dlnaPath:          "/upnp/",
-		images:            images,
+		images:            imgService,
 		httpAddr:          ipAddr,
 		httpClient:        httpclient.New(),
-		metrics:           metrics,
+		metrics:           metricsRegistry,
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
@@ -195,7 +195,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	var pc piececompletion.DeletablePieceCompletion
 	if fsp := utils.Val(appSettings.FileStoragePath); fsp != "" {
 		if _, err := os.Stat(fsp); os.IsNotExist(err) {
-			if err := os.MkdirAll(fsp, 0755); err != nil {
+			if err := os.MkdirAll(fsp, 0o755); err != nil {
 				return nil, fmt.Errorf("failed to create file storage directory: %w", err)
 			}
 		}
@@ -206,7 +206,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	c.pieceCompletion = pc
 
-	c.dlna = dlna.NewService(dbClient, images, c.dlnaPath, c.postersPath, c.logger)
+	c.dlna = dlna.NewService(dbClient, imgService, c.dlnaPath, c.postersPath, c.logger)
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.
@@ -220,7 +220,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		}
 	}
 
-	c.logger.Info(fmt.Sprintf("initializing TorrPlay with data directory: %s", c.dataDir))
+	c.logger.Info("initializing TorrPlay with data directory: " + c.dataDir)
 
 	if c.settings.TorrentTrackers != nil && len(*c.settings.TorrentTrackers) > 0 {
 		for _, tracker := range *c.settings.TorrentTrackers {
@@ -508,26 +508,26 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 			defer func() {
 				// Use chi.RouteContext to get the route pattern.
 				routeCtx := chi.RouteContext(r.Context())
-				path := routeCtx.RoutePattern()
+				routePath := routeCtx.RoutePattern()
 				// Sometimes path is empty, for example for static files.
 				// In that case, we can use r.URL.Path.
-				if path == "" {
-					path = r.URL.Path
+				if routePath == "" {
+					routePath = r.URL.Path
 				}
 
 				duration := time.Since(start)
 				statusCode := strconv.Itoa(ww.Status())
 				method := r.Method
 
-				c.metrics.HTTPRequestsTotal.WithLabelValues(statusCode, method, path).Inc()
-				c.metrics.HTTPRequestDuration.WithLabelValues(statusCode, method, path).Observe(duration.Seconds())
+				c.metrics.HTTPRequestsTotal.WithLabelValues(statusCode, method, routePath).Inc()
+				c.metrics.HTTPRequestDuration.WithLabelValues(statusCode, method, routePath).Observe(duration.Seconds())
 
 				// r.ContentLength can be -1 if the size is unknown.
 				if r.ContentLength > 0 {
-					c.metrics.HTTPRequestSizeBytes.WithLabelValues(statusCode, method, path).Observe(float64(r.ContentLength))
+					c.metrics.HTTPRequestSizeBytes.WithLabelValues(statusCode, method, routePath).Observe(float64(r.ContentLength))
 				}
 
-				c.metrics.HTTPResponseSizeBytes.WithLabelValues(statusCode, method, path).Observe(float64(ww.BytesWritten()))
+				c.metrics.HTTPResponseSizeBytes.WithLabelValues(statusCode, method, routePath).Observe(float64(ww.BytesWritten()))
 			}()
 
 			next.ServeHTTP(ww, r)

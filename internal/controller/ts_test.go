@@ -108,7 +108,7 @@ func TestTSCorrectionMiddleware(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.url, nil)
+			req := httptest.NewRequest(tc.method, tc.url, http.NoBody)
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}

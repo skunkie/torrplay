@@ -75,7 +75,10 @@ func TestServer_Lifecycle(t *testing.T) {
 	assert.Equal(t, "restarted", string(body))
 
 	// Verify the old address is no longer responding.
-	_, err = http.Get("http://" + addr)
+	respOld, err := http.Get("http://" + addr)
+	if respOld != nil {
+		_ = respOld.Body.Close()
+	}
 	assert.Error(t, err, "request to old server address should fail after restart")
 
 	// Test Shutdown.
@@ -86,22 +89,23 @@ func TestServer_Lifecycle(t *testing.T) {
 	<-time.After(100 * time.Millisecond)
 
 	// Verify the server is no longer running.
-	_, err = http.Get("http://" + newAddr)
+	respShutdown, err := http.Get("http://" + newAddr)
+	if respShutdown != nil {
+		_ = respShutdown.Body.Close()
+	}
 	assert.Error(t, err, "request to shutdown server should fail")
 }
 
 func TestServer_ImmediateShutdown(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	s := NewServer(nil, "127.0.0.1:8083", logger)
 
 	// Start and immediately shut down.
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		// A clean shutdown is expected to return a nil error.
 		assert.NoError(t, s.Run(), "server.Run() should return nil on immediate shutdown")
-	}()
+	})
 
 	// Immediately shut down the server.
 	err := s.Shutdown()
@@ -110,7 +114,7 @@ func TestServer_ImmediateShutdown(t *testing.T) {
 }
 
 func TestServer_ShutdownWithoutStart(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	s := NewServer(nil, "127.0.0.1:8084", logger)
 
 	// Shutdown should be a no-op if the server hasn't started.
@@ -123,7 +127,7 @@ func TestServer_RestartFailedShutdown(t *testing.T) {
 		t.Skip("Skipping test that requires a timeout")
 	}
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8085"
 	s := NewServer(chi.NewRouter(), addr, logger)
 
@@ -150,7 +154,10 @@ func TestServer_RestartFailedShutdown(t *testing.T) {
 
 	// Make a request that will hang.
 	go func() {
-		_, _ = http.Get("http://" + addr)
+		resp, _ := http.Get("http://" + addr)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 	}()
 	// Give the request time to be accepted by the server.
 	<-time.After(50 * time.Millisecond)
@@ -162,7 +169,7 @@ func TestServer_RestartFailedShutdown(t *testing.T) {
 
 // Test that Run() returns an error for an invalid address.
 func TestServer_RunFails(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8086"
 
 	// Start a listener on the address to simulate a port conflict.
@@ -188,7 +195,7 @@ func TestServer_RunFails(t *testing.T) {
 
 // Test that calling Start() on an already running server is a no-op.
 func TestServer_DoubleStart(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	s := NewServer(nil, "127.0.0.1:8087", logger)
 
 	err := s.Start()
@@ -204,7 +211,7 @@ func TestServer_DoubleStart(t *testing.T) {
 
 // Test that calling Shutdown() multiple times is a no-op.
 func TestServer_DoubleShutdown(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	s := NewServer(nil, "127.0.0.1:8088", logger)
 
 	err := s.Start()
@@ -220,7 +227,7 @@ func TestServer_DoubleShutdown(t *testing.T) {
 
 // Test that SetRouter updates the handler on a running server without a restart.
 func TestServer_SetRouterOnRunningServer(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8089"
 
 	// Initial router.
@@ -269,7 +276,7 @@ func TestServer_SetRouterOnRunningServer(t *testing.T) {
 // TestConnStateHandling verifies that active connections are correctly tracked
 // and closed upon shutdown.
 func TestConnStateHandling(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8090"
 
 	// This handler will block, keeping the connection active.
@@ -285,12 +292,15 @@ func TestConnStateHandling(t *testing.T) {
 
 	// Make a request that will hang.
 	go func() {
-		_, _ = http.Get("http://" + addr)
+		resp, _ := http.Get("http://" + addr)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
 	}()
 	<-time.After(50 * time.Millisecond) // Give the request time to be accepted.
 
 	s.connMu.RLock()
-	assert.Equal(t, 1, len(s.activeConns), "should have one active connection")
+	assert.Len(t, s.activeConns, 1, "should have one active connection")
 	s.connMu.RUnlock()
 
 	// Shutdown should close the active connection.
@@ -298,7 +308,7 @@ func TestConnStateHandling(t *testing.T) {
 	require.NoError(t, err)
 
 	s.connMu.RLock()
-	assert.Equal(t, 0, len(s.activeConns), "should have no active connections after shutdown")
+	assert.Empty(t, s.activeConns, "should have no active connections after shutdown")
 	s.connMu.RUnlock()
 }
 

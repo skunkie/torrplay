@@ -19,10 +19,10 @@ var DefaultStore = NewStore(defaultLogStoreSize)
 // LogEntry represents a single log message with its associated metadata.
 // It is designed to be a serializable representation of a log record.
 type LogEntry struct {
-	Time    time.Time              `json:"time"`
-	Level   slog.Level             `json:"level"`
-	Message string                 `json:"msg"`
-	Data    map[string]interface{} `json:"data,omitempty"`
+	Time    time.Time      `json:"time"`
+	Level   slog.Level     `json:"level"`
+	Message string         `json:"msg"`
+	Data    map[string]any `json:"data,omitempty"`
 }
 
 // Store is a thread-safe, in-memory store for log entries.
