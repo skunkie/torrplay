@@ -1338,35 +1338,6 @@ func TestUpdateTorrentUnlocksWhenStorageSwitchTimesOut(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code)
 }
 
-func TestCalcReadaheadPct(t *testing.T) {
-	tests := []struct {
-		name      string
-		maxMemory int64
-		want      int
-	}{
-		{"below 64MB", 32 * 1024 * 1024, 50},
-		{"exactly 64MB", 64 * 1024 * 1024, 50},
-		{"midway 64-128MB (96MB)", 96 * 1024 * 1024, 55},
-		{"boundary 128MB - 1", 128*1024*1024 - 1, 59},
-		{"exactly 128MB", 128 * 1024 * 1024, 60},
-		{"midway 128-256MB (192MB)", 192 * 1024 * 1024, 65},
-		{"boundary 256MB - 1", 256*1024*1024 - 1, 69},
-		{"exactly 256MB", 256 * 1024 * 1024, 70},
-		{"midway 256-512MB (384MB)", 384 * 1024 * 1024, 72},
-		{"boundary 512MB - 1", 512*1024*1024 - 1, 74},
-		{"exactly 512MB", 512 * 1024 * 1024, 75},
-		{"1GB", 1024 * 1024 * 1024, 75},
-		{"2GB", 2048 * 1024 * 1024, 75},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := calcReadaheadPct(tt.maxMemory)
-			assert.Equal(t, tt.want, got, "maxMemory = %d", tt.maxMemory)
-		})
-	}
-}
-
 func TestTorrentActiveField(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
@@ -1429,4 +1400,33 @@ func TestTorrentActiveField(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&gotTorrent))
 	require.NotNil(t, gotTorrent.Active)
 	assert.True(t, *gotTorrent.Active)
+}
+
+func TestCalcReadaheadPct(t *testing.T) {
+	tests := []struct {
+		name      string
+		maxMemory int64
+		want      int
+	}{
+		{"below 64MB", 32 * 1024 * 1024, 50},
+		{"exactly 64MB", 64 * 1024 * 1024, 50},
+		{"midway 64-128MB (96MB)", 96 * 1024 * 1024, 55},
+		{"boundary 128MB - 1", 128*1024*1024 - 1, 59},
+		{"exactly 128MB", 128 * 1024 * 1024, 60},
+		{"midway 128-256MB (192MB)", 192 * 1024 * 1024, 65},
+		{"boundary 256MB - 1", 256*1024*1024 - 1, 69},
+		{"exactly 256MB", 256 * 1024 * 1024, 70},
+		{"midway 256-512MB (384MB)", 384 * 1024 * 1024, 72},
+		{"boundary 512MB - 1", 512*1024*1024 - 1, 74},
+		{"exactly 512MB", 512 * 1024 * 1024, 75},
+		{"1GB", 1024 * 1024 * 1024, 75},
+		{"2GB", 2048 * 1024 * 1024, 75},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := calcReadaheadPct(tt.maxMemory)
+			assert.Equal(t, tt.want, got, "maxMemory = %d", tt.maxMemory)
+		})
+	}
 }
