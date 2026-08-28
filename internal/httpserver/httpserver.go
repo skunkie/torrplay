@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,7 +24,7 @@ type Server struct {
 	closed      bool
 	connMu      sync.RWMutex
 	handler     http.Handler
-	logger      *slog.Logger
+	logger      atomic.Pointer[slog.Logger]
 	mu          sync.Mutex
 	server      *http.Server
 }
@@ -34,8 +35,8 @@ func NewServer(router http.Handler, addr string, logger *slog.Logger) *Server {
 		activeConns: make(map[net.Conn]struct{}),
 		addr:        addr,
 		handler:     router,
-		logger:      logger,
 	}
+	s.logger.Store(logger)
 	s.server = &http.Server{
 		Addr:      addr,
 		Handler:   s.handler,
@@ -64,7 +65,7 @@ func (s *Server) Addrs() []string {
 
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		s.logger.Warn("could not parse server address", "addr", addr, "error", err)
+		s.logger.Load().Warn("could not parse server address", "addr", addr, "error", err)
 		return []string{addr}
 	}
 
@@ -74,7 +75,7 @@ func (s *Server) Addrs() []string {
 
 	ifacesAddrs, err := net.InterfaceAddrs()
 	if err != nil {
-		s.logger.Warn("could not get network interfaces addresses", "error", err)
+		s.logger.Load().Warn("could not get network interfaces addresses", "error", err)
 		return []string{addr}
 	}
 
@@ -113,7 +114,7 @@ func (s *Server) Run() error {
 		return nil
 	}
 
-	s.logger.Info("starting HTTP server", "address", addr)
+	s.logger.Load().Info("starting HTTP server", "address", addr)
 	err := server.ListenAndServe()
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
@@ -143,7 +144,7 @@ func (s *Server) Start() error {
 
 	go func() {
 		if err := s.Run(); err != nil {
-			s.logger.Error("HTTP server error", "error", err)
+			s.logger.Load().Error("HTTP server error", "error", err)
 		}
 	}()
 
@@ -152,7 +153,7 @@ func (s *Server) Start() error {
 
 // Restart gracefully restarts the server.
 func (s *Server) Restart() error {
-	s.logger.Info("restarting HTTP server")
+	s.logger.Load().Info("restarting HTTP server")
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -184,10 +185,10 @@ func (s *Server) Shutdown() error {
 		return nil
 	}
 
-	s.logger.Info("shutting down HTTP server")
+	s.logger.Load().Info("shutting down HTTP server")
 
 	s.connMu.RLock()
-	s.logger.Debug("closing active connections", "count", len(s.activeConns))
+	s.logger.Load().Debug("closing active connections", "count", len(s.activeConns))
 	for c := range s.activeConns {
 		c.Close()
 	}
@@ -199,7 +200,7 @@ func (s *Server) Shutdown() error {
 	err := s.server.Shutdown(ctx)
 	s.server = nil
 	if err == nil {
-		s.logger.Info("HTTP server stopped")
+		s.logger.Load().Info("HTTP server stopped")
 	}
 	return err
 }
@@ -209,6 +210,13 @@ func (s *Server) SetAddr(addr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.addr = addr
+}
+
+// SetLogger updates the logger used for server lifecycle messages.
+func (s *Server) SetLogger(logger *slog.Logger) {
+	if logger != nil {
+		s.logger.Store(logger)
+	}
 }
 
 // SetRouter updates the server's router.
