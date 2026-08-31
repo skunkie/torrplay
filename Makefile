@@ -14,13 +14,25 @@ LDFLAGS = -X '$(MODULE)/internal/buildinfo.BuildDate=$(BUILD_DATE)' -X '$(MODULE
 all: android docker
 
 client:
-	docker build --file ./client.Dockerfile --tag $(NAME)-client:$(VERSION) .
-	docker create --name $(NAME)-client-build-$(VERSION) $(NAME)-client:$(VERSION)
-	docker start --attach $(NAME)-client-build-$(VERSION)
-	mkdir -p ./web/static
-	find ./web/static -not -path ./web/static/README.md -mindepth 1 -delete
-	docker cp $(NAME)-client-build-$(VERSION):/$(BUILD_DIR)/client/out/. ./web/static/
-	docker rm $(NAME)-client-build-$(VERSION)
+	@if command -v pnpm >/dev/null 2>&1; then \
+		echo "Building client using local pnpm..."; \
+		(cd client && pnpm install --frozen-lockfile && pnpm build) && \
+		mkdir -p ./web/static && \
+		find ./web/static -mindepth 1 -not -path ./web/static/README.md -delete && \
+		cp -r ./client/out/. ./web/static/; \
+	elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then \
+		echo "pnpm not available. Falling back to Docker build..."; \
+		docker build --file ./client.Dockerfile --tag $(NAME)-client:$(VERSION) . && \
+		docker create --name $(NAME)-client-build-$(VERSION) $(NAME)-client:$(VERSION) && \
+		docker start --attach $(NAME)-client-build-$(VERSION) && \
+		mkdir -p ./web/static && \
+		find ./web/static -mindepth 1 -not -path ./web/static/README.md -delete && \
+		docker cp $(NAME)-client-build-$(VERSION):/$(BUILD_DIR)/client/out/. ./web/static/ && \
+		docker rm $(NAME)-client-build-$(VERSION); \
+	else \
+		echo "Error: Neither pnpm nor Docker is available to build client." >&2; \
+		exit 1; \
+	fi
 
 android: client
 	docker buildx build --platform=linux/amd64 --file ./android.Dockerfile --tag $(NAME)-android:$(VERSION) .

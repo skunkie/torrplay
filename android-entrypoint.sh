@@ -20,7 +20,7 @@ CGO_LDFLAGS="-static-libstdc++" gomobile bind \
     /build/pkg/torrplay
 
 cd /build/client
-pnpm install --frozen-lockfile --ignore-scripts
+pnpm install --frozen-lockfile
 pnpm build
 npx cap telemetry off
 npx cap sync android
