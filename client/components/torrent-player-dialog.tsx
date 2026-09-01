@@ -8,7 +8,7 @@ import React, { useCallback, useMemo, useRef, useState } from 'react';
 
 import { getTorrentStreamUrl } from '@/lib/api/torrents';
 import { type Torrent, type TorrentFile } from '@/lib/types/api';
-import { getInitialVideoFile, getVideoFiles, getVideoType } from '@/lib/video-utils';
+import { getInitialVideoFile, getSubtitleTracksForVideo, getVideoFiles, getVideoType } from '@/lib/video-utils';
 
 import { TorrentPlayerDialogLayout } from './torrent-player-dialog-layout';
 
@@ -49,6 +49,7 @@ export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlay
 
   const videoPlayerOptions = useMemo(() => {
     if (selectedFile && torrent) {
+      const subtitleTracks = getSubtitleTracksForVideo(selectedFile, torrent.files, torrent.hash);
       return {
         src: {
           src: getTorrentStreamUrl(torrent.hash, selectedFile.path),
@@ -56,6 +57,7 @@ export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlay
         },
         title: selectedFile.name,
         autoPlay: true,
+        tracks: subtitleTracks,
       };
     }
     return null;

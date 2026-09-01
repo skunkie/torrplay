@@ -1,0 +1,11 @@
+/* SPDX-FileCopyrightText: 2026 TorrPlay
+ * SPDX-License-Identifier: MIT */
+
+/* Extracted plain text has no authored positioning. Give each cue the full
+ * overlay width instead of relying on the renderer's measured static position. */
+.vds-captions[data-embedded] [data-part='cue-display'] {
+  left: 0;
+  right: 0;
+  width: 100%;
+  text-align: center;
+}

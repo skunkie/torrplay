@@ -7,8 +7,10 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 
 import { TorrentPlayerDialogLayout } from '@/components/torrent-player-dialog-layout';
+import { getDemoVideoSource } from '@/lib/demo-media';
+import { getDemoSubtitleTracks } from '@/lib/demo-subtitles';
 import type { Torrent, TorrentFile } from '@/lib/types/api';
-import { getInitialVideoFile, getVideoFiles, getVideoType } from '@/lib/video-utils';
+import { getInitialVideoFile, getVideoFiles } from '@/lib/video-utils';
 
 interface DemoTorrentPlayerDialogProps {
   torrent: Torrent | null,
@@ -41,12 +43,10 @@ export function DemoTorrentPlayerDialog({ torrent, open, onOpenChange }: DemoTor
   const videoPlayerOptions = useMemo(() => {
     if (selectedFile && torrent) {
       return {
-        src: {
-          src: 'data:video/mp4;base64,AAAAIGZ0eXBpcG1wAAACAG1pcHJwAAAAUGlwcm9wAAAA7XfSZXZ0AAAAiXVzZSAKbW92dm0gd2lkZQAAAAAAANB3bWhkAAAAAAAAAAAAAAAAAAAAAA==',
-          type: getVideoType(selectedFile.name),
-        },
+        src: getDemoVideoSource(),
         title: selectedFile.name,
         autoPlay: true,
+        tracks: getDemoSubtitleTracks(selectedFile, torrent.files),
       };
     }
     return null;
