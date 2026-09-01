@@ -337,6 +337,7 @@ func (c *Controller) buildRouter() *chi.Mux {
 	router.Get("/demo", web.ServeStatic(func(r *http.Request) {
 		r.URL.Path = "static/demo.html"
 	}))
+	router.Get("/demo/*", web.ServeStatic())
 	router.Get("/{file:.*\\.(html|md|png|svg|txt)}", web.ServeStatic())
 	router.Get("/_next/*", web.ServeStatic())
 

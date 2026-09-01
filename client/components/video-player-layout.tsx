@@ -7,6 +7,7 @@
 import { type VideoSrc } from '@vidstack/react';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import DemoVideoPlayer from './demo-video-player';
 import VideoPlayer from './video-player';
@@ -17,7 +18,8 @@ interface VideoPlayerLayoutProps {
   options: {
     src: VideoSrc,
     title?: string,
-    autoPlay?: boolean
+    autoPlay?: boolean,
+    tracks?: SubtitleTrackInfo[]
   },
   onExit?: () => void,
   isDemo?: boolean
