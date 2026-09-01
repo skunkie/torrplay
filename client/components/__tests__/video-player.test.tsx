@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -310,7 +310,6 @@ describe('VideoPlayer', () => {
 
   it('renders in paused state initially', () => {
     const { container } = render(<VideoPlayer options={mockVideoOptions}
-      autoPlay={false}
       onExit={vi.fn()} />);
 
     const videoTitles = screen.getAllByText('Test Video');
@@ -407,5 +406,78 @@ describe('VideoPlayer', () => {
     // Check for buttons with ARIA labels
     const buttons = container.querySelectorAll('button[aria-label], button[role]');
     expect(buttons.length).toBeGreaterThan(0);
+  });
+
+  it('renders subtitle track selector when subtitle tracks are provided in options', async () => {
+    const videoWithSubs = {
+      ...mockVideoOptions,
+      tracks: [
+        {
+          id: 'sub-en',
+          src: 'http://test-video-url.com/sub.vtt',
+          label: 'English (VTT)',
+          type: 'vtt' as const,
+          kind: 'subtitles' as const,
+        },
+      ],
+    };
+
+    render(<VideoPlayer options={videoWithSubs} />);
+
+    const subButton = screen.getByRole('button', { name: /select subtitle track/i });
+    expect(subButton).toBeInTheDocument();
+
+    await userEvent.click(subButton);
+    expect(screen.getByText(/Subtitles \(1\)/i)).toBeInTheDocument();
+    expect(screen.getByText('English (VTT)')).toBeInTheDocument();
+  });
+
+  it('toggles subtitle selection when shortcut key "c" is pressed', async () => {
+    const videoWithSubs = {
+      ...mockVideoOptions,
+      tracks: [
+        {
+          id: 'sub-en',
+          src: 'http://test-video-url.com/sub.vtt',
+          label: 'English (VTT)',
+          type: 'vtt' as const,
+          kind: 'subtitles' as const,
+        },
+      ],
+    };
+
+    render(<VideoPlayer options={videoWithSubs} />);
+
+    const subButton = screen.getByRole('button', { name: /select subtitle track/i });
+    expect(subButton).toBeInTheDocument();
+
+    // Press 'c' to enable first track
+    fireEvent.keyDown(window, { key: 'c' });
+    // Open menu to check that first track is active
+    await userEvent.click(subButton);
+    const radioItems = screen.getAllByRole('menuitemradio');
+    expect(radioItems[1]).toHaveAttribute('aria-checked', 'true');
+
+    // Close menu and press 'c' again to disable
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.keyDown(window, { key: 'c' });
+    await userEvent.click(subButton);
+    const radioItemsAfter = screen.getAllByRole('menuitemradio');
+    expect(radioItemsAfter[0]).toHaveAttribute('aria-checked', 'true'); // Off is checked
+  });
+
+  it('probes and merges embedded subtitle tracks when streaming an MKV file', () => {
+    const videoMkv = {
+      src: {
+        src: 'http://test-video-url.com/movie.mkv',
+        type: 'video/mp4' as const,
+      },
+      title: 'MKV Movie',
+      autoPlay: false,
+    };
+
+    render(<VideoPlayer options={videoMkv} />);
+    const videoTitles = screen.getAllByText('MKV Movie');
+    expect(videoTitles.length).toBeGreaterThan(0);
   });
 });

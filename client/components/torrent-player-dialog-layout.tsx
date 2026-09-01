@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { type TorrentFile } from '@/lib/types/api';
+import { type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import { Button } from './ui/button';
 import { VideoPlayerLayout } from './video-player-layout';
@@ -27,7 +28,8 @@ interface TorrentPlayerDialogLayoutProps {
   videoPlayerOptions: {
     src: VideoSrc,
     title?: string,
-    autoPlay?: boolean
+    autoPlay?: boolean,
+    tracks?: SubtitleTrackInfo[]
   } | null,
   handleExit?: () => void,
   isDemo?: boolean

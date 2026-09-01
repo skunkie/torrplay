@@ -22,6 +22,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/go-chi/chi/v5"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -126,6 +127,21 @@ func createMultipartForm(t *testing.T, filePath string, fields map[string]string
 func doGet(t *testing.T, router http.Handler, url string) *httptest.ResponseRecorder {
 	response := testutil.NewRequest().Get(url).WithAcceptJson().GoWithHTTPHandler(t, router)
 	return response.Recorder
+}
+
+func TestDemoStaticAssetRoute(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	found := false
+	err := chi.Walk(ctrl.router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if method == http.MethodGet && route == "/demo/*" {
+			found = true
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, found, "nested demo assets must be served by the static handler")
 }
 
 func addAllSampleTorrents(t *testing.T, router http.Handler) {
