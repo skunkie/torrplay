@@ -445,6 +445,26 @@ jobs:
           name: release-artifacts-android
           path: ./client/android/app/build/outputs/apk/release/*.apk
 
+  changelog:
+    name: Generate Changelog
+    runs-on: ubuntu-latest
+    outputs:
+      release_body: ${{ steps.git-cliff.outputs.content }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Generate a changelog
+        uses: orhun/git-cliff-action@v4
+        id: git-cliff
+        with:
+          config: cliff.toml
+          args: -vv --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+          GITHUB_REPO: ${{ github.repository }}
+
   create-release:
     name: Create GitHub Release
     needs:
@@ -456,6 +476,7 @@ jobs:
         build-packages,
         build-tauri,
         build-and-push-docker-image,
+        changelog,
       ]
     runs-on: ubuntu-latest
     permissions:
@@ -474,5 +495,5 @@ jobs:
             release-artifacts/*
             release-artifacts/**/*
           name: ${{ github.ref_name }}
-          generate_release_notes: true
+          body: ${{ needs.changelog.outputs.release_body }}
           make_latest: true
