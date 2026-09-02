@@ -6,24 +6,46 @@
 
 set -e
 
+if ! getent group torrplay >/dev/null 2>&1; then
+    groupadd --system torrplay
+fi
+
 if ! id -u torrplay >/dev/null 2>&1; then
-    echo "Creating user torrplay..."
-    useradd --system --user-group --no-create-home --shell /bin/false torrplay
+    useradd --system --gid torrplay --no-create-home --shell /bin/false torrplay
 fi
 
-DATA_DIR="/var/lib/torrplay"
-if [ ! -d "$DATA_DIR" ]; then
-    echo "Creating data directory $DATA_DIR..."
-    mkdir -p "$DATA_DIR"
+# StateDirectory= handles this; only fixes trees left by older packages.
+if [ -d /var/lib/torrplay ] && [ "$(stat -c %U /var/lib/torrplay 2>/dev/null)" != torrplay ]; then
+    chown -R torrplay:torrplay /var/lib/torrplay
 fi
 
-chown -R torrplay:torrplay "$DATA_DIR"
+# deb-systemd-* honour policy-rc.d; systemctl is the fallback elsewhere.
+sd_enable() {
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        deb-systemd-helper "$@" || true
+    elif [ -d /run/systemd/system ]; then
+        systemctl "$@" || true
+    fi
+}
 
-echo "Reloading systemd daemon..."
-systemctl daemon-reload
+sd_invoke() {
+    [ -d /run/systemd/system ] || return 0
 
-echo "Enabling TorrPlay service..."
-systemctl enable torrplay.service
+    if [ -x /usr/bin/deb-systemd-invoke ]; then
+        deb-systemd-invoke "$@" || true
+    else
+        systemctl "$@" || true
+    fi
+}
 
-echo "Starting TorrPlay service..."
-systemctl start torrplay.service
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || true
+fi
+
+# First install only: deb "configure" with no old version, rpm "1".
+if { [ "$1" = "configure" ] && [ -z "$2" ]; } || [ "$1" = "1" ]; then
+    sd_enable enable torrplay.service
+    sd_invoke start torrplay.service
+else
+    sd_invoke try-restart torrplay.service
+fi
