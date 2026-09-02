@@ -18,7 +18,7 @@ const dialogVariants = cva(
       variant: {
         default: 'max-w-[calc(100%-2rem)] sm:max-w-lg',
         video:
-          'aspect-video max-w-6xl overflow-hidden border-0 bg-transparent p-0',
+          'aspect-video max-w-[min(calc(100vw-1rem),calc((100dvh-1rem)*16/9),72rem)] overflow-hidden border-0 bg-transparent p-0',
       },
     },
     defaultVariants: {

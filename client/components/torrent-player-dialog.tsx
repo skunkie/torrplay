@@ -64,6 +64,19 @@ export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlay
   }, [selectedFile, torrent]);
 
   const isPlayerVisible = !!videoPlayerOptions;
+  const selectedFileIndex = selectedFile
+    ? videoFiles.findIndex(file => file.path === selectedFile.path)
+    : -1;
+  const playlistNavigation = videoFiles.length > 1 && selectedFileIndex >= 0
+    ? {
+      onPrevious: selectedFileIndex > 0
+        ? () => setUserSelectedFile(videoFiles[selectedFileIndex - 1])
+        : undefined,
+      onNext: selectedFileIndex < videoFiles.length - 1
+        ? () => setUserSelectedFile(videoFiles[selectedFileIndex + 1])
+        : undefined,
+    }
+    : undefined;
 
   return (
     <TorrentPlayerDialogLayout
@@ -75,6 +88,7 @@ export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlay
       isPlayerVisible={isPlayerVisible}
       videoPlayerOptions={videoPlayerOptions}
       handleExit={handleExit}
+      playlistNavigation={playlistNavigation}
     />
   );
 };

@@ -22,10 +22,21 @@ interface VideoPlayerLayoutProps {
     tracks?: SubtitleTrackInfo[]
   },
   onExit?: () => void,
+  playlistNavigation?: {
+    onPrevious?: () => void,
+    onNext?: () => void
+  },
   isDemo?: boolean
 }
 
-export const VideoPlayerLayout = ({ open, onOpenChange, options, onExit, isDemo = false }: VideoPlayerLayoutProps) => {
+export const VideoPlayerLayout = ({
+  open,
+  onOpenChange,
+  options,
+  onExit,
+  playlistNavigation,
+  isDemo = false,
+}: VideoPlayerLayoutProps) => {
   return (
     <Dialog open={open}
       onOpenChange={onOpenChange}>
@@ -36,10 +47,12 @@ export const VideoPlayerLayout = ({ open, onOpenChange, options, onExit, isDemo 
         {open && (
           isDemo ? (
             <DemoVideoPlayer options={options}
-              onExit={onExit} />
+              onExit={onExit}
+              playlistNavigation={playlistNavigation} />
           ) : (
             <VideoPlayer options={options}
-              onExit={onExit} />
+              onExit={onExit}
+              playlistNavigation={playlistNavigation} />
           )
         )}
       </DialogContent>

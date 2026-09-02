@@ -59,6 +59,9 @@ describe('VideoPlayerLayout', () => {
 
     const videoTitles = screen.getAllByText('Test Video');
     expect(videoTitles.length).toBeGreaterThan(0);
+    expect(screen.getByRole('dialog')).toHaveClass(
+      'max-w-[min(calc(100vw-1rem),calc((100dvh-1rem)*16/9),72rem)]'
+    );
   });
 
   it('does not make network requests', () => {
