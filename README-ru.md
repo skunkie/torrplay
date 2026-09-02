@@ -56,6 +56,7 @@ docker run -d \
 - **Мобильная версия** — есть приложение для Android
 - **Совместимость с qBittorrent API** — работает с Prowlarr, Radarr, Sonarr
 - **Замена TorrServer** — совместимость с клиентами TorrServer
+- **Плагин Stremio** — воспроизведение библиотеки прямо в приложениях Stremio на ПК, смартфонах и Smart TV
 - **Два режима хранения** — в оперативной памяти или на диске
 - **Model Context Protocol (MCP)** — управление и стриминг торрентов через ИИ-ассистентов (Claude Desktop, Cursor и др.)
 

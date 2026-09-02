@@ -25,6 +25,9 @@ func TestDefault(t *testing.T) {
 	require.NotNil(t, d.EnableDownloader)
 	assert.False(t, *d.EnableDownloader)
 
+	require.NotNil(t, d.EnableStremio)
+	assert.False(t, *d.EnableStremio)
+
 	require.NotNil(t, d.FileStoragePath)
 	assert.Empty(t, *d.FileStoragePath)
 

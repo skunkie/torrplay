@@ -56,6 +56,7 @@ More options: [Download prebuilt binaries](https://torrplay.github.io/download/)
 - **Mobile** — Android app available
 - **qBittorrent API** — works with Prowlarr, Radarr, Sonarr
 - **TorrServer compatible** — works with TorrServer clients
+- **Stremio Addon** — stream your library directly within Stremio apps on desktop, mobile, and smart TVs
 - **Dual storage** — RAM or disk
 - **Model Context Protocol (MCP)** — control and stream torrents directly via AI assistants (Claude Desktop, Cursor, etc.)
 
