@@ -7,6 +7,7 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -71,7 +72,7 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 	require.NoError(t, err)
 
 	// Disable auth.
-	ctrl.settings.Auth.Enabled = utils.Ptr(false)
+	ctrl.settings.Auth.Enabled = new(false)
 	err = ctrl.db.UpdateSettings(database.FromAPISettings(ctrl.settings))
 	require.NoError(t, err)
 
@@ -94,7 +95,7 @@ func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, fu
 	return ctrl, cleanup
 }
 
-func createMultipartForm(t *testing.T, filePath string, fields map[string]string, fileFieldName ...string) (*bytes.Buffer, *multipart.Writer) {
+func createMultipartForm(t *testing.T, fields map[string]string, fileFieldName ...string) (*bytes.Buffer, *multipart.Writer) {
 	t.Helper()
 
 	fieldName := "file"
@@ -105,11 +106,11 @@ func createMultipartForm(t *testing.T, filePath string, fields map[string]string
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
-	file, err := os.Open(filePath)
+	file, err := os.Open(sintelTorrentFile)
 	require.NoError(t, err)
 	defer file.Close()
 
-	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+	part, err := writer.CreateFormFile(fieldName, filepath.Base(sintelTorrentFile))
 	require.NoError(t, err)
 
 	_, err = io.Copy(part, file)
@@ -125,6 +126,7 @@ func createMultipartForm(t *testing.T, filePath string, fields map[string]string
 }
 
 func doGet(t *testing.T, router http.Handler, url string) *httptest.ResponseRecorder {
+	t.Helper()
 	response := testutil.NewRequest().Get(url).WithAcceptJson().GoWithHTTPHandler(t, router)
 	return response.Recorder
 }
@@ -159,7 +161,7 @@ func TestAddTorrentFromFile(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	body, writer := createMultipartForm(t, sintelTorrentFile, nil)
+	body, writer := createMultipartForm(t, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -189,7 +191,7 @@ func TestAddTorrentWhileStreaming(t *testing.T) {
 
 	// 1. Start streaming the torrent before it is added to the database.
 	streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ih)
-	req, err := http.NewRequest(http.MethodGet, streamURL, nil)
+	req, err := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Range", "bytes=0-")
 
@@ -217,7 +219,7 @@ func TestAddTorrentWhileStreaming(t *testing.T) {
 	// 2. Add the torrent to the database while it is actively being streamed.
 	addBody, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
 	require.NoError(t, err)
-	addReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/api/v1/torrents", server.URL), bytes.NewBuffer(addBody))
+	addReq, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/torrents", bytes.NewBuffer(addBody))
 	require.NoError(t, err)
 	addReq.Header.Set("Content-Type", "application/json")
 
@@ -428,7 +430,7 @@ func TestGetTorrentStatistics(t *testing.T) {
 
 	assert.NotNil(t, result.Pieces)
 	assert.NotNil(t, result.MemoryStats)
-	assert.Greater(t, result.MemoryStats.MaxMemory, int64(0))
+	assert.Positive(t, result.MemoryStats.MaxMemory)
 	assert.GreaterOrEqual(t, result.MemoryStats.UsedMemory, int64(0))
 	assert.GreaterOrEqual(t, result.TotalPeers, 0)
 	assert.GreaterOrEqual(t, result.ActivePeers, 0)
@@ -463,7 +465,7 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	body, writer := createMultipartForm(t, sintelTorrentFile, nil, "torrents")
+	body, writer := createMultipartForm(t, nil, "torrents")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v2/torrents/add", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -525,12 +527,10 @@ func TestDeleteTorrentWhileStreamingConcurrently(t *testing.T) {
 
 	streamErrChan := make(chan error, 1)
 	var wg sync.WaitGroup
-	wg.Add(1)
 
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ih)
-		req, _ := http.NewRequest(http.MethodGet, streamURL, nil)
+		req, _ := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
 		req.Header.Set("Range", "bytes=0-")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -542,12 +542,12 @@ func TestDeleteTorrentWhileStreamingConcurrently(t *testing.T) {
 
 		_, readErr := io.Copy(io.Discard, resp.Body)
 		streamErrChan <- readErr
-	}()
+	})
 
 	time.Sleep(5 * time.Second)
 
 	deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ih)
-	req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+	req, _ := http.NewRequest(http.MethodDelete, deleteURL, http.NoBody)
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -557,7 +557,7 @@ func TestDeleteTorrentWhileStreamingConcurrently(t *testing.T) {
 
 	err = <-streamErrChan
 	if err != nil {
-		require.True(t, err == io.EOF || err == io.ErrUnexpectedEOF, "unexpected error: %v", err)
+		require.True(t, errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF), "unexpected error: %v", err)
 	}
 }
 
@@ -581,7 +581,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ihSintel)
-		req, _ := http.NewRequest(http.MethodGet, streamURL, nil)
+		req, _ := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
 		req.Header.Set("Range", "bytes=0-")
 
 		resp, err := http.DefaultClient.Do(req)
@@ -598,7 +598,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ihBunny)
-		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+		req, _ := http.NewRequest(http.MethodDelete, deleteURL, http.NoBody)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -608,7 +608,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		deleteURL := fmt.Sprintf("%s/api/v1/torrents/%s", server.URL, ihCosmos)
-		req, _ := http.NewRequest(http.MethodDelete, deleteURL, nil)
+		req, _ := http.NewRequest(http.MethodDelete, deleteURL, http.NoBody)
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -627,7 +627,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 
 	var listSintel api.ListTorrents
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&listSintel))
-	assert.Equal(t, 1, len(listSintel.Torrents))
+	assert.Len(t, listSintel.Torrents, 1)
 	resp.Body.Close()
 
 	listURL = fmt.Sprintf("%s/api/v1/torrents?hashes=%s,%s", server.URL, ihBunny.HexString(), ihCosmos.HexString())
@@ -637,7 +637,7 @@ func TestStreamAndConcurrentlyDelete(t *testing.T) {
 
 	var torrentsList api.ListTorrents
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&torrentsList))
-	assert.Equal(t, 0, len(torrentsList.Torrents))
+	assert.Empty(t, torrentsList.Torrents)
 	resp.Body.Close()
 }
 
@@ -657,7 +657,7 @@ func TestDeleteTorrents(t *testing.T) {
 	rr = doGet(t, ctrl.router, "/api/v1/torrents")
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
-	require.Greater(t, len(result.Torrents), 0)
+	require.NotEmpty(t, result.Torrents)
 
 	for _, torrent := range result.Torrents {
 		rr = testutil.NewRequest().Delete("/api/v1/torrents/"+torrent.Hash.HexString()).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -667,7 +667,7 @@ func TestDeleteTorrents(t *testing.T) {
 	rr = doGet(t, ctrl.router, "/api/v1/torrents")
 	require.Equal(t, http.StatusOK, rr.Code)
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
-	assert.Equal(t, 0, len(result.Torrents))
+	assert.Empty(t, result.Torrents)
 	assert.Equal(t, 0, result.Total)
 }
 
@@ -691,18 +691,19 @@ func TestUpdateTorrentPosterRepeatedly(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			return false
 		}
-		var torrent api.Torrent
-		if err := json.NewDecoder(rr.Body).Decode(&torrent); err != nil {
+		var torrentResp api.Torrent
+		if err := json.NewDecoder(rr.Body).Decode(&torrentResp); err != nil {
 			return false
 		}
-		return torrent.Poster != nil
+		return torrentResp.Poster != nil
 	}, 2*time.Second, 100*time.Millisecond, "poster should be fetched")
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&createdTorrent))
 	require.NotNil(t, createdTorrent.Poster)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
+		_ = i
 		updateReq := api.TorrentUpdate{Poster: &posterURL}
 		rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
 		require.Equal(t, http.StatusNoContent, rr.Code)
@@ -728,8 +729,8 @@ func TestUpdateTorrentPosterRepeatedlyWithDifferentPosters(t *testing.T) {
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusCreated, rr.Code)
 
-	var torrent api.Torrent
-	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrent))
+	var torrentResp api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrentResp))
 
 	// Wait for the poster to be fetched
 	require.Eventually(t, func() bool {
@@ -745,9 +746,9 @@ func TestUpdateTorrentPosterRepeatedlyWithDifferentPosters(t *testing.T) {
 	}, 2*time.Second, 100*time.Millisecond, "poster should be fetched")
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
-	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrent))
-	require.NotNil(t, torrent.Poster)
-	posterA_URL := *torrent.Poster
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrentResp))
+	require.NotNil(t, torrentResp.Poster)
+	posterA_URL := *torrentResp.Poster
 
 	updateReqB := api.TorrentUpdate{Poster: &posterB}
 	rr = testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReqB).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -767,9 +768,9 @@ func TestUpdateTorrentPosterRepeatedlyWithDifferentPosters(t *testing.T) {
 	}, 2*time.Second, 100*time.Millisecond, "poster should be updated to B")
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
-	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrent))
-	assert.NotEqual(t, posterA_URL, *torrent.Poster)
-	posterB_URL := *torrent.Poster
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrentResp))
+	assert.NotEqual(t, posterA_URL, *torrentResp.Poster)
+	posterB_URL := *torrentResp.Poster
 
 	updateReqA := api.TorrentUpdate{Poster: &posterA}
 	rr = testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReqA).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -789,8 +790,8 @@ func TestUpdateTorrentPosterRepeatedlyWithDifferentPosters(t *testing.T) {
 	}, 2*time.Second, 100*time.Millisecond, "poster should be updated to A")
 
 	rr = doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih))
-	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrent))
-	assert.Equal(t, posterA_URL, *torrent.Poster)
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrentResp))
+	assert.Equal(t, posterA_URL, *torrentResp.Poster)
 }
 
 func TestUpdateTorrentWithSharedPoster(t *testing.T) {
@@ -886,14 +887,14 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusCreated, rr.Code)
 
-	var torrent api.Torrent
-	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrent))
+	var torrentResp api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&torrentResp))
 
-	filepath := torrent.Files[0].Path
+	targetPath := torrentResp.Files[0].Path
 	updateReq := api.TorrentUpdate{
 		Files: &[]api.TorrentFileUpdate{
 			{
-				Path:   filepath,
+				Path:   targetPath,
 				Viewed: true,
 			},
 		},
@@ -908,7 +909,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 
 	var viewedFile api.TorrentFile
 	for _, f := range updatedTorrent.Files {
-		if f.Path == filepath {
+		if f.Path == targetPath {
 			viewedFile = f
 			break
 		}
@@ -921,7 +922,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	firstUpdate := *viewedFile.ViewedAt
 	updateReq.Files = &[]api.TorrentFileUpdate{
 		{
-			Path:   filepath,
+			Path:   targetPath,
 			Viewed: true,
 		},
 	}
@@ -933,7 +934,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&updatedTorrent))
 
 	for _, f := range updatedTorrent.Files {
-		if f.Path == filepath {
+		if f.Path == targetPath {
 			viewedFile = f
 			break
 		}
@@ -943,7 +944,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 
 	updateReq.Files = &[]api.TorrentFileUpdate{
 		{
-			Path:   filepath,
+			Path:   targetPath,
 			Viewed: false,
 		},
 	}
@@ -955,7 +956,7 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&updatedTorrent))
 
 	for _, f := range updatedTorrent.Files {
-		if f.Path == filepath {
+		if f.Path == targetPath {
 			viewedFile = f
 			break
 		}
@@ -970,8 +971,8 @@ func TestUpdateSettings(t *testing.T) {
 	defer cleanup()
 
 	newSettings := api.Settings{
-		FriendlyName:   utils.Ptr("My New TorrPlay"),
-		HTTPServerPort: utils.Ptr(9090),
+		FriendlyName:   new("My New TorrPlay"),
+		HTTPServerPort: new(9090),
 	}
 
 	rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(newSettings).GoWithHTTPHandler(t, ctrl.router).Recorder
@@ -1103,7 +1104,7 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 
-	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{"poster": posterURL})
+	body, writer := createMultipartForm(t, map[string]string{"poster": posterURL})
 
 	req := httptest.NewRequest(http.MethodPost, "/torrent/upload", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
@@ -1113,14 +1114,14 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	var result map[string]interface{}
+	var result map[string]any
 	err := json.NewDecoder(rr.Body).Decode(&result)
 	require.NoError(t, err)
 	assert.Equal(t, ih.HexString(), result["hash"])
 
 	// Wait for the poster to be fetched asynchronously
 	require.Eventually(t, func() bool {
-		getRR := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih.HexString()))
+		getRR := doGet(t, ctrl.router, "/api/v1/torrents/"+ih.HexString())
 		if getRR.Code != http.StatusOK {
 			return false
 		}
@@ -1132,7 +1133,7 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 	}, 5*time.Second, 200*time.Millisecond, "poster should be fetched and not be empty")
 
 	// Final check to ensure the poster is still there
-	getRR := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih.HexString()))
+	getRR := doGet(t, ctrl.router, "/api/v1/torrents/"+ih.HexString())
 	require.Equal(t, http.StatusOK, getRR.Code)
 
 	var finalTorrent api.Torrent
@@ -1179,7 +1180,7 @@ func TestUpdateTorrent_Deadlock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		time.Sleep(100 * time.Millisecond) // Give the stream time to start.
-		updateReq := api.TorrentUpdate{Title: utils.Ptr("new title")}
+		updateReq := api.TorrentUpdate{Title: new("new title")}
 		rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
 		assert.Equal(t, http.StatusNoContent, rr.Code)
 	}()
@@ -1189,7 +1190,7 @@ func TestUpdateTorrent_Deadlock(t *testing.T) {
 
 func TestUpdateTorrentStorage(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = utils.Ptr(t.TempDir())
+		c.settings.FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 
@@ -1228,13 +1229,13 @@ func TestUpdateTorrentStorage(t *testing.T) {
 func TestController_TorrentInfoBytes(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = utils.Ptr(tmpDir)
+		c.settings.FileStoragePath = new(tmpDir)
 		err := c.db.UpdateSettings(database.FromAPISettings(c.settings))
 		require.NoError(t, err)
 	})
 	defer cleanup()
 
-	body, writer := createMultipartForm(t, sintelTorrentFile, map[string]string{
+	body, writer := createMultipartForm(t, map[string]string{
 		"storage": string(api.File),
 	})
 
@@ -1253,12 +1254,12 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, dbTorrent.InfoBytes, "InfoBytes should be saved for new torrent with file storage")
 
-	delReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/torrents/%s", resp.Hash.HexString()), nil)
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/"+resp.Hash.HexString(), http.NoBody)
 	delW := httptest.NewRecorder()
 	ctrl.router.ServeHTTP(delW, delReq)
 	require.Equal(t, http.StatusNoContent, delW.Code)
 
-	body, writer = createMultipartForm(t, sintelTorrentFile, map[string]string{
+	body, writer = createMultipartForm(t, map[string]string{
 		"storage": string(api.Memory),
 	})
 
@@ -1290,7 +1291,7 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 		Storage: utils.Ptr(api.File),
 	}
 
-	rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", resp.Hash.HexString())).WithJsonBody(updateReqBody).GoWithHTTPHandler(t, ctrl.router).Recorder
+	rr := testutil.NewRequest().Patch("/api/v1/torrents/"+resp.Hash.HexString()).WithJsonBody(updateReqBody).GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusNoContent, rr.Code)
 
 	time.Sleep(100 * time.Millisecond)
@@ -1464,7 +1465,7 @@ func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
 	ctrl.torrentTracker.mu.RUnlock()
 
 	assert.True(t, exists, "active torrent should not be dropped during cleanup")
-	assert.True(t, time.Since(info.lastUsedAt) < 1*time.Minute, "lastUsedAt should have been refreshed")
+	assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
 }
 
 func TestUpdateTorrent_NoConfiguredFileStorage_Unlocks(t *testing.T) {
@@ -1497,7 +1498,7 @@ func TestUpdateTorrent_StorageSwitch_GotInfoTimeout_Unlocks(t *testing.T) {
 	defer func() { gotInfoTimeout = origTimeout }()
 
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = utils.Ptr(t.TempDir())
+		c.settings.FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 

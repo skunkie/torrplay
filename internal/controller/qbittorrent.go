@@ -17,7 +17,7 @@ import (
 )
 
 func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(multipartFormMaxMemory); err != nil {
+	if err := parseMultipartForm(w, r); err != nil {
 		api.HTTPError(w, fmt.Sprintf("failed to parse multipart form: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -26,8 +26,8 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 
 	// Handle torrent URLs.
 	if urls := r.FormValue("urls"); urls != "" {
-		magnets := strings.Split(urls, "\n")
-		for _, magnet := range magnets {
+		magnets := strings.SplitSeq(urls, "\n")
+		for magnet := range magnets {
 			magnet = strings.TrimSpace(magnet)
 			if magnet == "" {
 				continue

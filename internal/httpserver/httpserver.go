@@ -37,12 +37,17 @@ func NewServer(router http.Handler, addr string, logger *slog.Logger) *Server {
 		handler:     router,
 	}
 	s.logger.Store(logger)
-	s.server = &http.Server{
-		Addr:      addr,
-		Handler:   s.handler,
-		ConnState: s.connStateHandler,
-	}
+	s.server = s.newHTTPServer()
 	return s
+}
+
+func (s *Server) newHTTPServer() *http.Server {
+	return &http.Server{
+		Addr:              s.addr,
+		Handler:           s.handler,
+		ConnState:         s.connStateHandler,
+		ReadHeaderTimeout: defaultTimeout,
+	}
 }
 
 func (s *Server) connStateHandler(c net.Conn, cs http.ConnState) {
@@ -136,11 +141,7 @@ func (s *Server) Start() error {
 		return nil // Already running.
 	}
 
-	s.server = &http.Server{
-		Addr:      s.addr,
-		Handler:   s.handler, // Re-use the existing handler.
-		ConnState: s.connStateHandler,
-	}
+	s.server = s.newHTTPServer()
 
 	go func() {
 		if err := s.Run(); err != nil {

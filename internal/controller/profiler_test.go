@@ -25,7 +25,7 @@ func TestProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
 	})
 
 	publicResponse := httptest.NewRecorder()
-	ctrl.SetupRouter().ServeHTTP(publicResponse, httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
+	ctrl.SetupRouter().ServeHTTP(publicResponse, httptest.NewRequest(http.MethodGet, "/debug/pprof/", http.NoBody))
 	assert.Equal(t, http.StatusNotFound, publicResponse.Code)
 
 	ctrl.profilerMu.Lock()

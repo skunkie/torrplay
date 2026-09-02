@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
-	"github.com/torrplay/torrplay/internal/utils"
 )
 
 func TestTSCorrectionMiddleware(t *testing.T) {
@@ -116,7 +115,7 @@ func TestTSCorrectionMiddleware(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.url, nil)
+			req := httptest.NewRequest(tc.method, tc.url, http.NoBody)
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}
@@ -305,7 +304,8 @@ func TestTSViewed_Deadlock(t *testing.T) {
 		defer close(done)
 		var wg sync.WaitGroup
 		wg.Add(goroutines * 2)
-		for i := 0; i < goroutines; i++ {
+		for i := range goroutines {
+			_ = i
 			// Concurrent set-viewed requests.
 			go func() {
 				defer wg.Done()
@@ -346,7 +346,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 	magnet := samples[ih]
 
 	// 1. Add via /torrents with magnet link
-	addReq := map[string]interface{}{
+	addReq := map[string]any{
 		"action":     "add",
 		"link":       magnet,
 		"title":      "Sintel Test",
@@ -358,7 +358,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 		GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	getRR := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih.HexString()))
+	getRR := doGet(t, ctrl.router, "/api/v1/torrents/"+ih.HexString())
 	require.Equal(t, http.StatusOK, getRR.Code)
 
 	var fetchedTorrent api.Torrent
@@ -368,7 +368,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 
 	// 2. Add via /torrents with hash field
 	ih2 := metainfo.NewHashFromHex("dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c")
-	addHashReq := map[string]interface{}{
+	addHashReq := map[string]any{
 		"action":     "add",
 		"hash":       ih2.HexString(),
 		"title":      "Bunny Test",
@@ -380,7 +380,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 		GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusOK, rr2.Code)
 
-	getRR2 := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih2.HexString()))
+	getRR2 := doGet(t, ctrl.router, "/api/v1/torrents/"+ih2.HexString())
 	require.Equal(t, http.StatusOK, getRR2.Code)
 
 	var fetchedTorrent2 api.Torrent
@@ -401,7 +401,7 @@ func TestTSTorrentsAddWhileStreaming(t *testing.T) {
 
 	// 1. Stream the torrent before adding to database.
 	streamURL := fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&play&index=6", server.URL, ih.HexString())
-	req, err := http.NewRequest(http.MethodGet, streamURL, nil)
+	req, err := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Range", "bytes=0-")
 
@@ -430,12 +430,12 @@ func TestTSTorrentsAddWhileStreaming(t *testing.T) {
 	addReq := api.TSTorrentRequest{
 		Action:   "add",
 		Link:     &magnet,
-		Title:    utils.Ptr("Sintel Test"),
-		SaveToDB: utils.Ptr(true),
+		Title:    new("Sintel Test"),
+		SaveToDB: new(true),
 	}
 	addBody, err := json.Marshal(addReq)
 	require.NoError(t, err)
-	addHTTPReq, err := http.NewRequest(http.MethodPost, fmt.Sprintf("%s/torrents", server.URL), bytes.NewBuffer(addBody))
+	addHTTPReq, err := http.NewRequest(http.MethodPost, server.URL+"/torrents", bytes.NewBuffer(addBody))
 	require.NoError(t, err)
 	addHTTPReq.Header.Set("Content-Type", "application/json")
 

@@ -53,7 +53,7 @@ func TestSlogHook_Fire(t *testing.T) {
 			err := hook.Fire(entry)
 			require.NoError(t, err)
 
-			var logOutput map[string]interface{}
+			var logOutput map[string]any
 			err = json.Unmarshal(buf.Bytes(), &logOutput)
 			require.NoError(t, err)
 

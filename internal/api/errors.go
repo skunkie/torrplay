@@ -20,9 +20,9 @@ func (e AuthError) Error() string {
 	return e.Message
 }
 
-func NewError(error string, code int) Error {
+func NewError(message string, code int) Error {
 	return Error{
-		Message: error,
+		Message: message,
 		Code:    code,
 	}
 }

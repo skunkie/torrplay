@@ -40,7 +40,7 @@ func GenerateToken(username string, secret []byte) (string, error) {
 
 // ValidateToken validates a JWT token and returns the claims if the token is valid.
 func ValidateToken(tokenString string, secret []byte) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (any, error) {
 		return secret, nil
 	})
 	if err != nil {

@@ -75,7 +75,7 @@ func TestAddTrackersToSpec(t *testing.T) {
 
 			AddTrackersToSpec(spec, tt.defaultTrackers)
 
-			assert.Equal(t, tt.expectedNumTiers, len(spec.Trackers), "number of tiers should match")
+			assert.Len(t, spec.Trackers, tt.expectedNumTiers, "number of tiers should match")
 
 			// Since the order of trackers is not guaranteed, we check for presence and total count.
 			var totalTrackers int

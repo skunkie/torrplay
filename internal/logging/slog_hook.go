@@ -7,6 +7,7 @@ package logging
 import (
 	"context"
 	"log/slog"
+	"maps"
 
 	"github.com/sirupsen/logrus"
 )
@@ -40,10 +41,8 @@ func (h *SlogHook) Fire(entry *logrus.Entry) error {
 	slogLevel := h.toSlogLevel(entry.Level)
 
 	// Add the log entry to the in-memory store.
-	logData := make(map[string]interface{}, len(entry.Data))
-	for k, v := range entry.Data {
-		logData[k] = v
-	}
+	logData := make(map[string]any, len(entry.Data))
+	maps.Copy(logData, entry.Data)
 	DefaultStore.Add(LogEntry{
 		Time:    entry.Time,
 		Level:   slogLevel,

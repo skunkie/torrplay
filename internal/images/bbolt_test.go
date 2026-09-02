@@ -45,14 +45,14 @@ func TestService_DownloadAndSaveData(t *testing.T) {
 	assert.NotEqual(t, *id, *id2)
 
 	// Test getting the images.
-	req := httptest.NewRequest(http.MethodGet, "/"+*id, nil)
+	req := httptest.NewRequest(http.MethodGet, "/"+*id, http.NoBody)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
 
-	req = httptest.NewRequest(http.MethodGet, "/"+*id2, nil)
+	req = httptest.NewRequest(http.MethodGet, "/"+*id2, http.NoBody)
 	rr = httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
@@ -130,8 +130,9 @@ func TestService_WithCookieJar(t *testing.T) {
 	defer s.Close()
 
 	// Login to get the cookie.
-	_, err = s.httpClient.Get(ctx, server.URL+"/login")
+	resp, err := s.httpClient.Get(ctx, server.URL+"/login")
 	require.NoError(t, err)
+	defer resp.Body.Close()
 
 	// Try to get the image, which should now work.
 	data, err := s.DownloadImageData(ctx, server.URL+"/image.jpg")

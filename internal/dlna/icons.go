@@ -35,15 +35,21 @@ func deviceIcons(fsys fs.FS, dir string, baseURL *url.URL) ([]upnp.Icon, error) 
 		}
 
 		iconPath := path.Join(dir, file.Name())
-		f, err := fsys.Open(iconPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open icon file: %w", err)
-		}
-		defer f.Close()
+		img, err := func() (image.Image, error) {
+			f, err := fsys.Open(iconPath)
+			if err != nil {
+				return nil, fmt.Errorf("failed to open icon file: %w", err)
+			}
+			defer f.Close()
 
-		img, _, err := image.Decode(f)
+			img, _, err := image.Decode(f)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode image: %w", err)
+			}
+			return img, nil
+		}()
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode image: %w", err)
+			return nil, err
 		}
 
 		icons = append(icons, upnp.Icon{

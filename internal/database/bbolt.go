@@ -39,7 +39,7 @@ type BBoltDB struct {
 }
 
 func NewBBoltDB(path string) (*BBoltDB, error) {
-	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 1 * time.Second})
+	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -76,7 +76,7 @@ func (b *BBoltDB) CreateTorrent(t *Torrent) error {
 		}
 
 		if t.CreatedAt == nil {
-			t.CreatedAt = utils.Ptr(time.Now())
+			t.CreatedAt = new(time.Now())
 		}
 
 		encoded, err := json.Marshal(t)

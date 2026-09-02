@@ -63,7 +63,7 @@ func NewBBoltDBService(path string) (*BBoltDBService, error) {
 
 // NewServiceWithClient creates a new Service with a custom HTTP client.
 func NewServiceWithClient(path string, client *httpclient.Client) (*BBoltDBService, error) {
-	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 1 * time.Second})
+	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -71,7 +71,7 @@ func NewServiceWithClient(path string, client *httpclient.Client) (*BBoltDBServi
 	err = db.Update(func(tx *bbolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists([]byte(imagesBucket))
 		if err != nil {
-			return fmt.Errorf("failed to create images bucket: %v", err)
+			return fmt.Errorf("failed to create images bucket: %w", err)
 		}
 
 		return nil
@@ -203,7 +203,7 @@ func (s *BBoltDBService) SaveData(data []byte) (*string, error) {
 		return bucket.Put([]byte(id), data)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to save data: %v", err)
+		return nil, fmt.Errorf("failed to save data: %w", err)
 	}
 
 	return &id, nil

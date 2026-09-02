@@ -1,0 +1,210 @@
+# SPDX-FileCopyrightText: 2026 TorrPlay
+#
+# SPDX-License-Identifier: MIT
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+output:
+  show-stats: true
+  sort-order:
+    - linter
+    - severity
+    - file
+
+linters:
+  default: none
+  enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - canonicalheader
+    - copyloopvar
+    - decorder
+    - dupword
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - errname
+    - errorlint
+    - exptostd
+    - fatcontext
+    - gocheckcompilerdirectives
+    - gochecksumtype
+    - gocritic
+    - godot
+    - goprintffuncname
+    - gosec
+    - gosmopolitan
+    - govet
+    - grouper
+    - importas
+    - inamedparam
+    - ineffassign
+    - intrange
+    - iotamixing
+    - loggercheck
+    - makezero
+    - mirror
+    - misspell
+    - modernize
+    - musttag
+    - nakedret
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
+    - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - recvcheck
+    - revive
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - staticcheck
+    - tagalign
+    - testableexamples
+    - testifylint
+    - thelper
+    - tparallel
+    - unconvert
+    - unparam
+    - unqueryvet
+    - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
+    - whitespace
+
+  settings:
+    errcheck:
+      check-type-assertions: false
+      check-blank: false
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*github.com/swaggest/swgui/v5emb.Handler).ServeHTTP
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Printf
+        - fmt.Println
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - hugeParam # slog.Record (288B) is passed by value by standard library slog.Handler interface design
+        - paramTypeCombine
+        - unnamedResult
+        - whyNoLint
+    gosec:
+      excludes:
+        - G104 # Unhandled errors are comprehensively checked by errcheck
+        - G117 # JSON marshaling of struct fields containing secret names
+        - G124 # Cookie without Secure flag (supports local HTTP network streaming)
+        - G401 # BitTorrent v1 protocol mandates SHA-1 infohash and pieces
+        - G505 # crypto/sha1 import required by BitTorrent v1 protocol
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    importas:
+      alias:
+        - pkg: github.com/ProfChaos/torrent-name-parser
+          alias: torrentparser
+        - pkg: github.com/oapi-codegen/nethttp-middleware
+          alias: nethttpmiddleware
+        - pkg: github.com/oapi-codegen/runtime/types
+          alias: openapi_types
+        - pkg: github.com/torrplay/torrplay/internal/testutil
+          alias: tputil
+        - pkg: github.com/torrplay/torrplay/pkg/storage
+          alias: memstorage
+    modernize:
+      disable:
+        - newexpr
+    revive:
+      rules:
+        - name: blank-imports
+          disabled: false
+        - name: context-as-argument
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+          disabled: true
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+          disabled: true
+        - name: var-declaration
+        - name: package-comments
+          disabled: true
+        - name: range
+        - name: receiver-naming
+          disabled: true
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: unused-parameter
+          disabled: true
+    testifylint:
+      enable-all: true
+      disable:
+        - require-error
+        - float-compare
+        - go-require
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+  exclusions:
+    generated: lax
+    warn-unused: true
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - gosec
+        text: 'G107|G112|G115|G120'
+        path: _test\.go
+      - linters:
+          - revive
+        text: 'blank-imports'
+        path: internal/(dlna/icons|piececompletion/piece_completion)\.go
+      - linters:
+          - canonicalheader
+        text: '\.dlna\.org'
+        path: internal/dlna/
+
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    warn-unused: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

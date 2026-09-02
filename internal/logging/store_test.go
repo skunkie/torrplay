@@ -26,14 +26,14 @@ func TestNewStore(t *testing.T) {
 		store := NewStore(0)
 		assert.NotNil(t, store)
 		assert.Equal(t, 0, store.size)
-		assert.Len(t, store.entries, 0)
+		assert.Empty(t, store.entries)
 	})
 
 	t.Run("negative size", func(t *testing.T) {
 		store := NewStore(-1)
 		assert.NotNil(t, store)
 		assert.Equal(t, 0, store.size)
-		assert.Len(t, store.entries, 0)
+		assert.Empty(t, store.entries)
 	})
 }
 
@@ -53,7 +53,7 @@ func TestStore_Add_And_Entries(t *testing.T) {
 
 	t.Run("add to make store full", func(t *testing.T) {
 		store := NewStore(3)
-		for i := 0; i < 3; i++ {
+		for i := range 3 {
 			store.Add(LogEntry{Message: fmt.Sprintf("message %d", i)})
 		}
 
@@ -66,7 +66,7 @@ func TestStore_Add_And_Entries(t *testing.T) {
 
 	t.Run("add to already full store", func(t *testing.T) {
 		store := NewStore(3)
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			store.Add(LogEntry{Message: fmt.Sprintf("message %d", i)})
 		}
 
@@ -87,7 +87,7 @@ func TestStore_Add_And_Entries(t *testing.T) {
 func TestStore_Resize(t *testing.T) {
 	t.Run("resize to larger", func(t *testing.T) {
 		store := NewStore(3)
-		for i := 0; i < 5; i++ { // Overfill
+		for i := range 5 { // Overfill
 			store.Add(LogEntry{Message: fmt.Sprintf("message %d", i)})
 		}
 		// store has ["message 2", "message 3", "message 4"].
@@ -108,7 +108,7 @@ func TestStore_Resize(t *testing.T) {
 
 	t.Run("resize to smaller", func(t *testing.T) {
 		store := NewStore(5)
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			store.Add(LogEntry{Message: fmt.Sprintf("message %d", i)})
 		}
 
@@ -154,34 +154,33 @@ func TestStore_Concurrency(t *testing.T) {
 	numGoroutines := 20
 	numWritesPerGoroutine := 100
 
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < numWritesPerGoroutine; j++ {
+	for i := range numGoroutines {
+		_ = i
+		wg.Go(func() {
+			for j := range numWritesPerGoroutine {
+				_ = j
 				store.Add(LogEntry{
 					Message: "concurrent log",
 					Level:   slog.LevelInfo,
 					Time:    time.Now(),
 				})
 			}
-		}()
+		})
 	}
 
 	var readCount int
 	var readWg sync.WaitGroup
-	readWg.Add(1)
-	go func() {
-		defer readWg.Done()
-		for i := 0; i < 50; i++ {
+	readWg.Go(func() {
+		for i := range 50 {
+			_ = i
 			readCount += len(store.Entries())
 			time.Sleep(10 * time.Millisecond)
 		}
-	}()
+	})
 
 	wg.Wait()
 	readWg.Wait()
 
 	finalEntries := store.Entries()
-	assert.True(t, len(finalEntries) <= 1000)
+	assert.LessOrEqual(t, len(finalEntries), 1000)
 }

@@ -62,6 +62,17 @@ docker: application
 generate:
 	go generate ./...
 
+lint:
+	@if ! command -v golangci-lint >/dev/null 2>&1 && ! [ -x "$$(go env GOPATH)/bin/golangci-lint" ]; then \
+		echo "golangci-lint not found. Installing..."; \
+		curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$$(go env GOPATH)/bin" v2.13.2; \
+	fi; \
+	if command -v golangci-lint >/dev/null 2>&1; then \
+		golangci-lint run; \
+	else \
+		"$$(go env GOPATH)/bin/golangci-lint" run; \
+	fi
+
 help:
 	@echo "TorrPlay Build System"
 	@echo "====================="
@@ -73,6 +84,7 @@ help:
 	@echo "  android      - Build the Android APK files"
 	@echo "  docker       - Build the multi-platform Docker image"
 	@echo "  generate     - Run go generate to generate code"
+	@echo "  lint         - Run golangci-lint static analysis"
 	@echo "  help         - Show this help message"
 	@echo ""
 	@echo "Variables:"
@@ -83,6 +95,7 @@ help:
 	@echo "  make VERSION=2.0.0 application     # Build with specific version"
 	@echo "  make android                       # Build the Android APK"
 	@echo "  make docker                        # Build the Docker image"
+	@echo "  make lint                          # Run linter"
 	@echo ""
 
-.PHONY: all android application client docker generate help
+.PHONY: all android application client docker generate help lint
