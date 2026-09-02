@@ -97,6 +97,20 @@ fix(controller): move debug profiler to loopback-only listener
 - **Synchronous Service Lifecycle**:
   - Ensure `Service.Stop()` releases mutex locks before waiting on `broadcastDone.Wait()` to prevent deadlocks and eliminate leaked background broadcast goroutines.
 
+## Model Context Protocol (MCP) Standards
+
+- **Stdio Stream Isolation**:
+  - In stdio transport mode (`torrplay mcp`), reserve `stdout` exclusively for JSON-RPC protocol framing.
+  - Route all application diagnostics, informational logs, and errors strictly to `os.Stderr` to prevent corrupting MCP client message parsing.
+- **Client-Application Decoupling**:
+  - The built-in MCP server must interface with the active TorrPlay application instance over HTTP/REST rather than directly opening internal databases.
+  - Never open `config.db` or initialize BitTorrent engines directly inside `torrplay mcp` to prevent BBolt file lock (`flock`) conflicts and port collisions with the running application.
+- **API & Tool Parity**:
+  - Maintain parity between new `/api/v1` endpoints and corresponding MCP tools and resources in `internal/mcp`.
+- **Transport Security & Listener Isolation**:
+  - SSE transport (`ServeSSE`) must bind strictly to a loopback address to prevent accidental remote network exposure.
+  - Remote access requires an authenticated reverse proxy or mutual TLS tunnel in front of the loopback listener, as MCP sessions share application credentials configured at startup.
+
 ## Downloader & Torrent Metadata Invariants
 
 - **Streaming Bandwidth Prioritization**:

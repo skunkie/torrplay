@@ -57,6 +57,7 @@ docker run -d \
 - **Совместимость с qBittorrent API** — работает с Prowlarr, Radarr, Sonarr
 - **Замена TorrServer** — совместимость с клиентами TorrServer
 - **Два режима хранения** — в оперативной памяти или на диске
+- **Model Context Protocol (MCP)** — управление и стриминг торрентов через ИИ-ассистентов (Claude Desktop, Cursor и др.)
 
 ## Ссылки
 
