@@ -40,6 +40,8 @@ interface SettingsDialogLayoutProps {
 
   dlnaEnabled: boolean,
   setDlnaEnabled: (value: boolean) => void,
+  stremioEnabled: boolean,
+  setStremioEnabled: (value: boolean) => void,
   downloaderEnabled: boolean,
   setDownloaderEnabled: (value: boolean) => void,
   friendlyName: string,
@@ -81,6 +83,8 @@ export function SettingsDialogLayout({
   onResetToDefaults,
   dlnaEnabled,
   setDlnaEnabled,
+  stremioEnabled,
+  setStremioEnabled,
   downloaderEnabled,
   setDownloaderEnabled,
   friendlyName,
@@ -109,6 +113,21 @@ export function SettingsDialogLayout({
 }: SettingsDialogLayoutProps) {
   const IS_NATIVE = Capacitor.isNativePlatform();
   const IS_TAURI = isTauri();
+
+  const stremioManifestUrl = (() => {
+    const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
+    try {
+      const baseUrl = new URL(apiUrl || fallbackOrigin);
+      const tokenSegment = settings?.auth.enabled && settings.stremioToken
+        ? `${encodeURIComponent(settings.stremioToken)}/`
+        : '';
+      return new URL(`/stremio/${tokenSegment}manifest.json`, baseUrl).toString();
+    } catch {
+      return '/stremio/manifest.json';
+    }
+  })();
+
+  const stremioInstallUrl = stremioManifestUrl.replace(/^https?:\/\//, 'stremio://');
   const isLoadingSettings = open && !settings && !error;
   const canSaveServerSettings = settings != null;
   const [rateLimitUnit, setRateLimitUnit] = useState('MiB/s');
@@ -331,6 +350,50 @@ export function SettingsDialogLayout({
                         maxLength={64}
                       />
                       <p className='text-sm text-muted-foreground'>Display name for DLNA devices (1-64 characters).</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className='space-y-4'>
+                  <h3 className='text-lg font-medium text-foreground'>Stremio Integration</h3>
+
+                  <div className='flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between'>
+                    <div className='space-y-0.5'>
+                      <Label htmlFor='stremio-enabled'>Enable Stremio Addon</Label>
+                      <p className='text-sm text-muted-foreground'>
+                        Allow browsing and streaming TorrPlay library via Stremio Addon protocol.
+                      </p>
+                    </div>
+                    <Switch id='stremio-enabled'
+                      checked={stremioEnabled}
+                      onCheckedChange={setStremioEnabled} />
+                  </div>
+
+                  {stremioEnabled && (
+                    <div className='space-y-2'>
+                      <Label htmlFor='stremio-addon-url'>Addon Installation URL</Label>
+                      <div className='flex items-center gap-2'>
+                        <Input
+                          id='stremio-addon-url'
+                          readOnly
+                          value={stremioManifestUrl}
+                          className='font-mono text-xs'
+                        />
+                        <Button
+                          variant='outline'
+                          type='button'
+                          onClick={() => {
+                            if (typeof window !== 'undefined') {
+                              window.open(stremioInstallUrl, '_blank');
+                            }
+                          }}
+                        >
+                          Install in Stremio
+                        </Button>
+                      </div>
+                      <p className='text-sm text-muted-foreground'>
+                        Click &ldquo;Install in Stremio&rdquo; or copy this URL into Stremio&apos;s addon search bar.
+                      </p>
                     </div>
                   )}
                 </div>

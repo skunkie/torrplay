@@ -24,6 +24,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   const [initialized, setInitialized] = useState(false);
 
   const [dlnaEnabled, setDlnaEnabled] = useState(false);
+  const [stremioEnabled, setStremioEnabled] = useState(false);
   const [downloaderEnabled, setDownloaderEnabled] = useState(false);
   const [friendlyName, setFriendlyName] = useState('');
   const [maxMemory, setMaxMemory] = useState(512);
@@ -58,6 +59,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
 
     if (settings) {
       setDlnaEnabled(settings.enableDlna ?? false);
+      setStremioEnabled(settings.enableStremio ?? defaultSettings.enableStremio ?? false);
       setDownloaderEnabled(settings.enableDownloader ?? false);
       setFriendlyName(settings.friendlyName || 'TorrPlay');
       setMaxMemory(settings.maxMemory / (1024 * 1024));
@@ -74,6 +76,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   const handleSave = () => {
     updateSettings({
       enableDlna: dlnaEnabled,
+      enableStremio: stremioEnabled,
       enableDownloader: downloaderEnabled,
       friendlyName: friendlyName,
       maxMemory: maxMemory * 1024 * 1024,
@@ -91,6 +94,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   const handleReset = () => {
     if (!settings) return;
     setDlnaEnabled(settings.enableDlna ?? defaultSettings.enableDlna);
+    setStremioEnabled(settings.enableStremio ?? defaultSettings.enableStremio ?? false);
     setDownloaderEnabled(settings.enableDownloader ?? defaultSettings.enableDownloader);
     setFriendlyName(settings.friendlyName || defaultSettings.friendlyName);
     setMaxMemory((settings.maxMemory / (1024 * 1024)) || (defaultSettings.maxMemory / (1024 * 1024)));
@@ -105,6 +109,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
 
   const handleResetToDefaults = () => {
     setDlnaEnabled(defaultSettings.enableDlna);
+    setStremioEnabled(defaultSettings.enableStremio ?? false);
     setDownloaderEnabled(defaultSettings.enableDownloader);
     setFriendlyName(defaultSettings.friendlyName);
     setMaxMemory(defaultSettings.maxMemory / (1024 * 1024));
@@ -134,6 +139,8 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       onResetTorrentHandlerChoice={() => {}}
       dlnaEnabled={dlnaEnabled}
       setDlnaEnabled={setDlnaEnabled}
+      stremioEnabled={stremioEnabled}
+      setStremioEnabled={setStremioEnabled}
       downloaderEnabled={downloaderEnabled}
       setDownloaderEnabled={setDownloaderEnabled}
       friendlyName={friendlyName}
