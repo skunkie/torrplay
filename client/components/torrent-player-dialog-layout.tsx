@@ -32,6 +32,10 @@ interface TorrentPlayerDialogLayoutProps {
     tracks?: SubtitleTrackInfo[]
   } | null,
   handleExit?: () => void,
+  playlistNavigation?: {
+    onPrevious?: () => void,
+    onNext?: () => void
+  },
   isDemo?: boolean
 }
 
@@ -43,6 +47,7 @@ export const TorrentPlayerDialogLayout = ({
   isPlayerVisible,
   videoPlayerOptions,
   handleExit,
+  playlistNavigation,
   isDemo = false,
 }: TorrentPlayerDialogLayoutProps) => {
   if (isPlayerVisible && videoPlayerOptions) {
@@ -58,6 +63,7 @@ export const TorrentPlayerDialogLayout = ({
         }}
         options={videoPlayerOptions}
         onExit={handleExit}
+        playlistNavigation={playlistNavigation}
         isDemo={isDemo}
       />
     );

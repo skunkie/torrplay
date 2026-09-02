@@ -80,6 +80,27 @@ describe('DemoTorrentPlayerDialog', () => {
     expect(screen.getAllByText('demo_video1.mp4').length).toBeGreaterThan(0);
   });
 
+  it('navigates between videos in demo mode', async () => {
+    render(
+      <DemoTorrentPlayerDialog
+        torrent={mockDemoMultiTorrent}
+        open={true}
+        onOpenChange={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByText('demo_video1.mp4'));
+    const nextButton = await screen.findByRole('button', { name: 'Next video' });
+
+    expect(screen.getByRole('button', { name: 'Previous video' })).toBeDisabled();
+    fireEvent.click(nextButton);
+
+    await waitFor(() => {
+      expect(screen.getAllByText('demo_video2.mp4').length).toBeGreaterThan(0);
+    });
+    expect(screen.getByRole('button', { name: 'Next video' })).toBeDisabled();
+  });
+
   it('plays single-file torrent directly', () => {
     const onOpenChange = vi.fn();
 
