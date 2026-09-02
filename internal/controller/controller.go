@@ -42,6 +42,7 @@ import (
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	"github.com/torrplay/torrplay/internal/settings"
+	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
@@ -124,6 +125,7 @@ type Controller struct {
 	startedAt           time.Time
 	storageClient       *memstorage.Client
 	streamPool          *stream.Pool
+	stremio             *stremio.Service
 	torrentTracker      torrentTracker
 	trackers            [][]string
 
@@ -237,10 +239,36 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 		c.downloader.Start()
 	}
 
+	c.stremio = stremio.NewService(
+		dbClient,
+		imgService,
+		c.postersPath,
+		c.logger,
+		func(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdx int) {
+			c.streamFile(w, r, ih, fileIdx)
+		},
+		c.validateStremioToken,
+	)
+
 	go c.startTorrentCleanup()
 	go c.startPosterCleanup()
 
 	return c, nil
+}
+
+func (c *Controller) validateStremioToken(token string) bool {
+	c.mu.RLock()
+	authEnabled := c.settings != nil && c.settings.Auth != nil && utils.Val(c.settings.Auth.Enabled)
+	c.mu.RUnlock()
+	if !authEnabled {
+		return true
+	}
+
+	secret, err := c.db.GetJWTSecret()
+	if err != nil || secret == "" {
+		return false
+	}
+	return stremio.ValidateAccessToken(token, secret)
 }
 
 func (c *Controller) Logger() *slog.Logger {
@@ -289,6 +317,10 @@ func (c *Controller) buildRouter() *chi.Mux {
 
 	if *c.settings.EnableDlna {
 		router.Mount(c.dlnaPath, c.dlna)
+	}
+
+	if utils.Val(c.settings.EnableStremio) && c.stremio != nil {
+		router.Mount("/stremio", c.stremio)
 	}
 
 	// Posters routes.

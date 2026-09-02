@@ -36,6 +36,7 @@ import (
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/piececompletion"
+	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
@@ -385,8 +386,6 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 
 func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	redactedSettings := *c.settings
 	if c.settings.Auth != nil {
 		redactedAuth := *c.settings.Auth
@@ -394,6 +393,17 @@ func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
 			redactedAuth.Password = new("********")
 		}
 		redactedSettings.Auth = &redactedAuth
+	}
+	authEnabled := redactedSettings.Auth != nil && utils.Val(redactedSettings.Auth.Enabled)
+	c.mu.RUnlock()
+
+	if authEnabled {
+		secret, err := c.db.GetJWTSecret()
+		if err != nil || secret == "" {
+			api.HTTPError(w, "failed to get Stremio access token", http.StatusInternalServerError)
+			return
+		}
+		redactedSettings.StremioToken = utils.Ptr(stremio.AccessToken(secret))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -803,6 +813,9 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reqSettings.EnableDownloader != nil {
 		newSettings.EnableDownloader = reqSettings.EnableDownloader
 	}
+	if reqSettings.EnableStremio != nil {
+		newSettings.EnableStremio = reqSettings.EnableStremio
+	}
 	if reqSettings.FriendlyName != nil {
 		newSettings.FriendlyName = reqSettings.FriendlyName
 	}
@@ -859,6 +872,10 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		restartHTTPServer = true
 	}
 	if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
+		saveSettings = true
+	}
+	if utils.Differ(oldSettings.EnableStremio, newSettings.EnableStremio) {
+		restartHTTPServer = true
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.FriendlyName, newSettings.FriendlyName) {

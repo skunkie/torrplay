@@ -6,6 +6,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/torrplay/torrplay/internal/auth"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/metrics"
+	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -223,3 +225,57 @@ func TestNewAuthenticator(t *testing.T) {
 		})
 	}
 }
+
+func TestStremioAuthenticationFollowsCurrentSettings(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{
+			Enabled:  new(true),
+			Type:     utils.Ptr(api.Basic),
+			Username: new("admin"),
+			Password: new("password"),
+		}
+	})
+	defer cleanup()
+
+	secret, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	token := stremio.AccessToken(secret)
+
+	assert.True(t, controller.validateStremioToken(token))
+	assert.False(t, controller.validateStremioToken("invalid"))
+
+	controller.mu.Lock()
+	controller.settings.Auth.Enabled = new(false)
+	controller.mu.Unlock()
+	assert.True(t, controller.validateStremioToken(""))
+
+	controller.mu.Lock()
+	controller.settings.Auth.Enabled = new(true)
+	controller.mu.Unlock()
+	assert.False(t, controller.validateStremioToken(""))
+}
+
+func TestGetSettingsIncludesScopedStremioToken(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{
+			Enabled:  new(true),
+			Type:     utils.Ptr(api.Basic),
+			Username: new("admin"),
+			Password: new("password"),
+		}
+	})
+	defer cleanup()
+
+	rr := httptest.NewRecorder()
+	controller.GetSettings(rr, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var got api.Settings
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&got))
+	require.NotNil(t, got.StremioToken)
+	secret, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	assert.Equal(t, stremio.AccessToken(secret), *got.StremioToken)
+	assert.NotEqual(t, secret, *got.StremioToken)
+}
+>>>>>>> 1ee093a (feat(stremio): add native stremio addon protocol support)

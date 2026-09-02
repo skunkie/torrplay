@@ -17,6 +17,7 @@ func Default() api.Settings {
 		Auth:             &api.Auth{Enabled: new(false)},
 		EnableDlna:       new(false),
 		EnableDownloader: new(false),
+		EnableStremio:    new(false),
 		FileStoragePath:  new(""),
 		FriendlyName:     new("TorrPlay"),
 		HTTPServerPort:   new(8090),
@@ -69,6 +70,10 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 	}
 	if target.EnableDownloader == nil {
 		target.EnableDownloader = defaults.EnableDownloader
+		changed = true
+	}
+	if target.EnableStremio == nil {
+		target.EnableStremio = defaults.EnableStremio
 		changed = true
 	}
 	if target.FileStoragePath == nil {
