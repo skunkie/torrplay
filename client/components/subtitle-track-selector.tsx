@@ -75,7 +75,7 @@ export const SubtitleTrackSelector: React.FC<SubtitleTrackSelectorProps> = ({
           <div
             role='menu'
             aria-label='Subtitles'
-            className='absolute right-0 bottom-12 z-50 min-w-[220px] rounded-lg border border-white/20 bg-black/90 p-1.5 text-xs text-white shadow-2xl backdrop-blur-md animate-in fade-in-0 zoom-in-95'
+            className='absolute right-0 bottom-10 sm:bottom-12 z-50 w-[min(220px,calc(100vw-1rem))] rounded-lg border border-white/20 bg-black/90 p-1.5 text-xs text-white shadow-2xl backdrop-blur-md animate-in fade-in-0 zoom-in-95'
             onClick={e => e.stopPropagation()}
           >
             <div className='px-2.5 py-1.5 font-semibold text-white/70 uppercase tracking-wider text-[10px] border-b border-white/10 mb-1'>
