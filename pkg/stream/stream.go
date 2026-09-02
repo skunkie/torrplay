@@ -395,67 +395,68 @@ func (p *Pool) Acquire(file *torrent.File, mode StorageMode) (io.ReadSeeker, Rel
 
 	// Try to reuse an idle reader for the same torrent file.
 	for key, sr := range p.readers {
-		if key.infoHash == infoHash && key.filePath == file.Path() && !sr.active {
-			sr.active = true
-			sr.idleSince = time.Time{}
-			sr.isFileStorage = isFileStorage
-			sr.file = file
-
-			// Reset lastOffset so refreshReadaheadLocked/ReaderPositions don't
-			// read a stale offset from a previous activation.
-			_, _ = sr.reader.Seek(0, io.SeekStart)
-			sr.lastOffset = 0
-			sr.lastPieceIdx = -1
-			// Clear the old wrapper's callback so it cannot invoke
-			// updateActiveRange on a reader that is no longer active.
-			if sr.wrapper != nil {
-				sr.wrapper.mu.Lock()
-				sr.wrapper.onOffsetChange = nil
-				sr.wrapper.mu.Unlock()
-			}
-			sr.wrapper = &readAtWrapper{
-				reader: sr.reader,
-				offset: 0,
-				onOffsetChange: func(newOffset int64) {
-					p.updateActiveRange(infoHash, key, file, newOffset)
-				},
-			}
-
-			if isFileStorage {
-				sr.readahead = p.cfg.FileReadaheadBytes
-				sr.reader.SetReadahead(p.cfg.FileReadaheadBytes)
-				p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0)
-			} else {
-				p.refreshReadaheadLocked(p.readaheadBudget)
-			}
-
-			// If total readers for this file exceed the cap (e.g. from previous concurrent bursts),
-			// evict excess idle readers to bring the pool back to the configured limit.
-			if p.cfg.MaxReadersPerFile > 0 {
-				limit := p.cfg.MaxReadersPerFile
-				count := p.countReadersLocked(infoHash, file.Path())
-				for count > limit {
-					if !p.evictOldestIdleLocked(infoHash, file.Path()) {
-						break
-					}
-					count--
-				}
-			}
-
-			p.logger.Debug("reused idle reader",
-				slog.String("hash", infoHash.HexString()),
-				slog.String("file", file.Path()),
-				slog.Uint64("readerID", sr.readerID),
-				slog.Int64("readahead", sr.readahead))
-
-			var once sync.Once
-			release := func() {
-				once.Do(func() { p.release(infoHash, file.Path(), sr.readerID) })
-			}
-
-			sectionReader := io.NewSectionReader(sr.wrapper, 0, file.Length())
-			return sectionReader, release, nil
+		if key.infoHash != infoHash || key.filePath != file.Path() || sr.active {
+			continue
 		}
+		sr.active = true
+		sr.idleSince = time.Time{}
+		sr.isFileStorage = isFileStorage
+		sr.file = file
+
+		// Reset lastOffset so refreshReadaheadLocked/ReaderPositions don't
+		// read a stale offset from a previous activation.
+		_, _ = sr.reader.Seek(0, io.SeekStart)
+		sr.lastOffset = 0
+		sr.lastPieceIdx = -1
+		// Clear the old wrapper's callback so it cannot invoke
+		// updateActiveRange on a reader that is no longer active.
+		if sr.wrapper != nil {
+			sr.wrapper.mu.Lock()
+			sr.wrapper.onOffsetChange = nil
+			sr.wrapper.mu.Unlock()
+		}
+		sr.wrapper = &readAtWrapper{
+			reader: sr.reader,
+			offset: 0,
+			onOffsetChange: func(newOffset int64) {
+				p.updateActiveRange(infoHash, key, file, newOffset)
+			},
+		}
+
+		if isFileStorage {
+			sr.readahead = p.cfg.FileReadaheadBytes
+			sr.reader.SetReadahead(p.cfg.FileReadaheadBytes)
+			p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0)
+		} else {
+			p.refreshReadaheadLocked(p.readaheadBudget)
+		}
+
+		// If total readers for this file exceed the cap (e.g. from previous concurrent bursts),
+		// evict excess idle readers to bring the pool back to the configured limit.
+		if p.cfg.MaxReadersPerFile > 0 {
+			limit := p.cfg.MaxReadersPerFile
+			count := p.countReadersLocked(infoHash, file.Path())
+			for count > limit {
+				if !p.evictOldestIdleLocked(infoHash, file.Path()) {
+					break
+				}
+				count--
+			}
+		}
+
+		p.logger.Debug("reused idle reader",
+			slog.String("hash", infoHash.HexString()),
+			slog.String("file", file.Path()),
+			slog.Uint64("readerID", sr.readerID),
+			slog.Int64("readahead", sr.readahead))
+
+		var once sync.Once
+		release := func() {
+			once.Do(func() { p.release(infoHash, file.Path(), sr.readerID) })
+		}
+
+		sectionReader := io.NewSectionReader(sr.wrapper, 0, file.Length())
+		return sectionReader, release, nil
 	}
 
 	// No idle reader found for reuse. All existing readers for this file are active.
@@ -712,10 +713,7 @@ func (p *Pool) computeReadahead(totalBudget int64) int64 {
 	if activeCount < 1 {
 		activeCount = 1
 	}
-	readahead := totalBudget / int64(activeCount)
-	if readahead < 1 {
-		readahead = 1
-	}
+	readahead := max(totalBudget/int64(activeCount), 1)
 	return readahead
 }
 
@@ -729,10 +727,7 @@ func computeRange(file *torrent.File, pieceLength, readahead, byteOffset int64) 
 	if pieceLength <= 0 {
 		pieceLength = 1
 	}
-	readaheadPieces := readahead / pieceLength
-	if readaheadPieces < 1 {
-		readaheadPieces = 1
-	}
+	readaheadPieces := max(readahead/pieceLength, 1)
 	beginPiece := int64(file.BeginPieceIndex())
 	// EndPieceIndex is exclusive; ActiveRangeRegistry endpoints are inclusive.
 	endPieceMax := int64(file.EndPieceIndex()) - 1
@@ -740,26 +735,11 @@ func computeRange(file *torrent.File, pieceLength, readahead, byteOffset int64) 
 		return int(beginPiece), int(beginPiece)
 	}
 
-	positionPiece := byteOffset/pieceLength + beginPiece
-	if positionPiece < beginPiece {
-		positionPiece = beginPiece
-	}
-	if positionPiece > endPieceMax {
-		positionPiece = endPieceMax
-	}
-	trailing := readaheadPieces / trailingReadaheadDivisor
-	if trailing < 1 {
-		trailing = 1
-	}
+	positionPiece := min(max(byteOffset/pieceLength+beginPiece, beginPiece), endPieceMax)
+	trailing := max(readaheadPieces/trailingReadaheadDivisor, 1)
 
-	startPiece := positionPiece - trailing
-	endPiece := positionPiece + readaheadPieces
-	if startPiece < beginPiece {
-		startPiece = beginPiece
-	}
-	if endPiece > endPieceMax {
-		endPiece = endPieceMax
-	}
+	startPiece := max(positionPiece-trailing, beginPiece)
+	endPiece := min(positionPiece+readaheadPieces, endPieceMax)
 	return int(startPiece), int(endPiece)
 }
 
@@ -819,10 +799,7 @@ func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead in
 func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction, nearFraction float64) []prioritizedPiece {
 	n, nowCount, target, currentPiece := priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax, fraction, nearFraction)
 
-	planCapacity := int(target - (currentPiece + 1))
-	if planCapacity < 0 {
-		planCapacity = 0
-	}
+	planCapacity := max(int(target-(currentPiece+1)), 0)
 	planned := make([]prioritizedPiece, 0, planCapacity)
 	count := 0
 	for idx := currentPiece + 1; idx < target; idx++ {
@@ -931,7 +908,7 @@ func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	if key.torrent == nil {
 		return
 	}
-	piece := key.torrent.Piece(metainfo.PieceIndex(key.index))
+	piece := key.torrent.Piece(key.index)
 	if piece != nil {
 		piece.SetPriority(priority)
 	}
@@ -948,32 +925,15 @@ func priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax in
 	if pieceLength <= 0 {
 		pieceLength = 1
 	}
-	readaheadPieces := readahead / pieceLength
-	if readaheadPieces < 1 {
-		readaheadPieces = 1
-	}
-	n = int(float64(readaheadPieces) * fraction)
-	if n < 1 {
-		n = 1
-	}
+	readaheadPieces := max(readahead/pieceLength, 1)
+	n = max(int(float64(readaheadPieces)*fraction), 1)
 	if nearFraction <= 0 {
 		nearFraction = 0.3
 	}
-	if nearFraction > 1 {
-		nearFraction = 1
-	}
-	nowCount = int(float64(n) * nearFraction)
-	if nowCount < 1 {
-		nowCount = 1
-	}
+	nearFraction = min(nearFraction, 1)
+	nowCount = max(int(float64(n)*nearFraction), 1)
 	currentPiece = byteOffset/pieceLength + beginPiece
-	target = currentPiece + 1 + int64(n)
-	if target > endPieceMax {
-		target = endPieceMax
-	}
-	if target < currentPiece+1 {
-		target = currentPiece + 1
-	}
+	target = max(min(currentPiece+1+int64(n), endPieceMax), currentPiece+1)
 	return n, nowCount, target, currentPiece
 }
 
@@ -1067,37 +1027,35 @@ func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 
 	var result []ReaderPosition
 	for key, sr := range p.readers {
-		if key.infoHash == infoHash {
-			if sr.file == nil || sr.file.Torrent() == nil {
-				continue
-			}
-			if sr.file.EndPieceIndex() <= sr.file.BeginPieceIndex() {
-				continue
-			}
-			info := sr.file.Torrent().Info()
-			if info == nil {
-				continue
-			}
-			byteOffset := sr.lastOffset
-			pieceLength := info.PieceLength
-			if pieceLength <= 0 {
-				pieceLength = 1
-			}
-			start, end := computeRange(sr.file, pieceLength, sr.readahead, byteOffset)
-			position := int(byteOffset/pieceLength) + sr.file.BeginPieceIndex()
-			if position < sr.file.BeginPieceIndex() {
-				position = sr.file.BeginPieceIndex()
-			}
-			lastPiece := sr.file.EndPieceIndex() - 1
-			if position > lastPiece {
-				position = lastPiece
-			}
-			result = append(result, ReaderPosition{
-				End:      end,
-				Position: position,
-				Start:    start,
-			})
+		if key.infoHash != infoHash {
+			continue
 		}
+		if sr.file == nil || sr.file.Torrent() == nil {
+			continue
+		}
+		if sr.file.EndPieceIndex() <= sr.file.BeginPieceIndex() {
+			continue
+		}
+		info := sr.file.Torrent().Info()
+		if info == nil {
+			continue
+		}
+		byteOffset := sr.lastOffset
+		pieceLength := info.PieceLength
+		if pieceLength <= 0 {
+			pieceLength = 1
+		}
+		start, end := computeRange(sr.file, pieceLength, sr.readahead, byteOffset)
+		position := max(int(byteOffset/pieceLength)+sr.file.BeginPieceIndex(), sr.file.BeginPieceIndex())
+		lastPiece := sr.file.EndPieceIndex() - 1
+		if position > lastPiece {
+			position = lastPiece
+		}
+		result = append(result, ReaderPosition{
+			End:      end,
+			Position: position,
+			Start:    start,
+		})
 	}
 	return result
 }

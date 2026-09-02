@@ -63,7 +63,7 @@ func TestNewAuthenticator(t *testing.T) {
 		{
 			name: "Auth Disabled",
 			settings: &api.Settings{
-				Auth: &api.Auth{Enabled: utils.Ptr(false)},
+				Auth: &api.Auth{Enabled: new(false)},
 			},
 			requestPath:   "/api/v1/torrents",
 			expectedError: "",
@@ -72,10 +72,10 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Basic Auth - Success",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Basic),
-					Username: utils.Ptr("admin"),
-					Password: utils.Ptr("password"),
+					Username: new("admin"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -88,10 +88,10 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Basic Auth - Invalid Credentials",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Basic),
-					Username: utils.Ptr("admin"),
-					Password: utils.Ptr("password"),
+					Username: new("admin"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -104,10 +104,10 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Basic Auth - Not Enabled",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Bearer),
-					Username: utils.Ptr("admin"),
-					Password: utils.Ptr("password"),
+					Username: new("admin"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -120,10 +120,10 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Bearer Auth - Success",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Bearer),
-					Username: utils.Ptr("admin"),
-					Password: utils.Ptr("password"),
+					Username: new("admin"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -134,10 +134,10 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Bearer Auth - Invalid Token",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Bearer),
-					Username: utils.Ptr("admin"),
-					Password: utils.Ptr("password"),
+					Username: new("admin"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -149,10 +149,10 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Bearer Auth - Not Enabled",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Basic),
-					Username: utils.Ptr("admin"),
-					Password: utils.Ptr("password"),
+					Username: new("admin"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -163,9 +163,9 @@ func TestNewAuthenticator(t *testing.T) {
 			name: "Config Error - Missing Username",
 			settings: &api.Settings{
 				Auth: &api.Auth{
-					Enabled:  utils.Ptr(true),
+					Enabled:  new(true),
 					Type:     utils.Ptr(api.Basic),
-					Password: utils.Ptr("password"),
+					Password: new("password"),
 				},
 			},
 			requestPath:   "/api/v1/torrents",
@@ -185,7 +185,7 @@ func TestNewAuthenticator(t *testing.T) {
 
 			authenticator := controller.NewAuthenticator()
 
-			req := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
+			req := httptest.NewRequest(http.MethodGet, tc.requestPath, http.NoBody)
 
 			if tc.username != "" && tc.password != "" {
 				req.SetBasicAuth(tc.username, tc.password)

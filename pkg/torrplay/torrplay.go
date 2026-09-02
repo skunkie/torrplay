@@ -36,7 +36,7 @@ type App struct {
 // setting stored in the database if the value is not less than 1 and not
 // greater than 65535.
 func New(dataDir string, ipAddr string, port int) (*App, error) {
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("could not create data directory: %w", err)
 	}
 
@@ -57,9 +57,9 @@ func New(dataDir string, ipAddr string, port int) (*App, error) {
 		return nil, fmt.Errorf("failed to create images service: %w", err)
 	}
 
-	metrics := metrics.New()
+	metricsRegistry := metrics.New()
 
-	c, err := controller.NewController(dataDir, ipAddr, port, configClient, imagesSvc, metrics)
+	c, err := controller.NewController(dataDir, ipAddr, port, configClient, imagesSvc, metricsRegistry)
 	if err != nil {
 		_ = configClient.Close()
 		_ = imagesSvc.Close()

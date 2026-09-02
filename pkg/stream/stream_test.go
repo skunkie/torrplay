@@ -48,7 +48,7 @@ type stubRegistry struct {
 
 func (r *stubRegistry) SetActiveRange(_ metainfo.Hash, _ uint64, start, end int) {
 	r.sets++
-	r.last = activeRange{startPiece: int(start), endPiece: int(end)}
+	r.last = activeRange{startPiece: start, endPiece: end}
 }
 
 func (r *stubRegistry) ClearActiveRange(_ metainfo.Hash, _ uint64) {
@@ -92,6 +92,7 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 func newTestPool(t *testing.T, cfg Config) *Pool {
+	t.Helper()
 	p := New(cfg)
 	t.Cleanup(func() {
 		p.Close()
@@ -189,7 +190,7 @@ func TestReadAtWrapper_ReadAt_PartialReadWithEOF(t *testing.T) {
 	// Request 10 bytes starting at offset 0 — only 3 available.
 	buf := make([]byte, 10)
 	n, err := rw.ReadAt(buf, 0)
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
 	if n != 3 {
@@ -348,7 +349,7 @@ func TestReadAtWrapper_ReadAt_LargeReadPartialWithEOF(t *testing.T) {
 
 	buf := make([]byte, reqSize)
 	n, err := rw.ReadAt(buf, 0)
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Fatalf("expected io.EOF, got %v", err)
 	}
 	if n != dataSize {
@@ -904,7 +905,7 @@ func TestReadAtWrapper_ConcurrentReadAt(t *testing.T) {
 	const goroutines = 8
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for i := range goroutines {
 		go func(idx int) {
 			defer wg.Done()
 			off := int64(idx * 100)
@@ -922,7 +923,7 @@ func TestReadAtWrapper_ConcurrentReadAt(t *testing.T) {
 	// Each callback should have offset = start + 10 bytes read.
 	// Order is not deterministic, so check that every expected offset is present.
 	expected := make(map[int64]int)
-	for i := 0; i < goroutines; i++ {
+	for i := range goroutines {
 		e := int64(i*100 + 10)
 		expected[e]++
 	}
@@ -1598,7 +1599,7 @@ func TestPool_UpdateActiveRangeVsRelease_Concurrent(t *testing.T) {
 	var releaseMu sync.Mutex
 
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -1862,7 +1863,7 @@ func BenchmarkReadAtWrapper_ReadAt(b *testing.B) {
 			b.ResetTimer()
 
 			var off int64
-			for i := 0; i < b.N; i++ {
+			for range b.N {
 				if off+int64(tc.size) > totalSize {
 					off = 0
 				}
@@ -1889,7 +1890,7 @@ func BenchmarkReadAtWrapper_RandomCacheMiss(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 
-	for i := 0; i < b.N; i++ {
+	for i := range b.N {
 		// A coprime stride visits every 256 KiB window before repeating, forcing
 		// a cache refill rather than measuring the sequential cache-hit path.
 		window := (i * 17) % windowCount
@@ -1931,9 +1932,9 @@ func BenchmarkPriorityPlanBuild(b *testing.B) {
 	const readahead = 32 * 1024 * 1024
 	for _, pieceLength := range []int64{16 * 1024, 256 * 1024, 1024 * 1024} {
 		b.Run(fmt.Sprintf("PieceSize_%dKB", pieceLength/1024), func(b *testing.B) {
-			endPiece := int64(4 * 1024 * 1024 * 1024 / pieceLength)
+			endPiece := 4 * 1024 * 1024 * 1024 / pieceLength
 			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
+			for i := range b.N {
 				benchmarkPriorityPlan = buildPriorityPlan(
 					int64(i%1024)*pieceLength,
 					readahead,
@@ -1970,7 +1971,7 @@ func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 
 			b.ReportAllocs()
 			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for i := range b.N {
 				if i > 0 {
 					refill()
 				}

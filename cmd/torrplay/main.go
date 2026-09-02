@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -65,10 +66,12 @@ func runMetadataTool() error {
 	posterOpt := mdCmd.Bool("poster", false, "Update poster")
 	titleOpt := mdCmd.Bool("title", false, "Update title")
 
-	mdCmd.Parse(os.Args[2:])
+	if err := mdCmd.Parse(os.Args[2:]); err != nil {
+		return err
+	}
 
 	if (*posterOpt || *titleOpt) && *backupApiKey == "" {
-		return fmt.Errorf("api-key is required when updating posters or updating titles")
+		return errors.New("api-key is required when updating posters or updating titles")
 	}
 
 	inputFile, err := os.Open(*backupFile)

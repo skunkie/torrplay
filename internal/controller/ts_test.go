@@ -7,7 +7,6 @@ package controller
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -115,7 +114,7 @@ func TestTSCorrectionMiddleware(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.url, nil)
+			req := httptest.NewRequest(tc.method, tc.url, http.NoBody)
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}
@@ -305,7 +304,8 @@ func TestTSViewedDoesNotDeadlock(t *testing.T) {
 		defer close(done)
 		var wg sync.WaitGroup
 		wg.Add(goroutines * 2)
-		for i := 0; i < goroutines; i++ {
+		for i := range goroutines {
+			_ = i
 			// Concurrent set-viewed requests.
 			go func() {
 				defer wg.Done()
@@ -347,7 +347,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 	magnet := samples[ih]
 
 	// 1. Add via /torrents with magnet link
-	addReq := map[string]interface{}{
+	addReq := map[string]any{
 		"action":     "add",
 		"link":       magnet,
 		"title":      "Sintel Test",
@@ -359,7 +359,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 		GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	getRR := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih.HexString()))
+	getRR := doGet(t, ctrl.router, "/api/v1/torrents/"+ih.HexString())
 	require.Equal(t, http.StatusOK, getRR.Code)
 
 	var fetchedTorrent api.Torrent
@@ -370,7 +370,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 	// 2. Add via /torrents with hash field
 	ih2 := bunnyHash
 	primeSampleMetadata(t, ctrl, ih2)
-	addHashReq := map[string]interface{}{
+	addHashReq := map[string]any{
 		"action":     "add",
 		"hash":       ih2.HexString(),
 		"title":      "Bunny Test",
@@ -382,7 +382,7 @@ func TestTSTorrentsAddMagnetField(t *testing.T) {
 		GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusOK, rr2.Code)
 
-	getRR2 := doGet(t, ctrl.router, fmt.Sprintf("/api/v1/torrents/%s", ih2.HexString()))
+	getRR2 := doGet(t, ctrl.router, "/api/v1/torrents/"+ih2.HexString())
 	require.Equal(t, http.StatusOK, getRR2.Code)
 
 	var fetchedTorrent2 api.Torrent

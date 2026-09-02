@@ -6,6 +6,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -91,7 +92,7 @@ func (c *Controller) RestoreTorrents(w http.ResponseWriter, r *http.Request) {
 
 	for _, t := range backupData.Torrents {
 		if err := c.db.CreateTorrent(database.FromAPITorrent(t)); err != nil {
-			if err == database.ErrTorrentExists {
+			if errors.Is(err, database.ErrTorrentExists) {
 				if err := c.db.UpdateTorrent(database.FromAPITorrent(t)); err != nil {
 					c.logger.Error("failed to update torrent on restore", "err", err, "hash", t.Hash.HexString())
 				}
