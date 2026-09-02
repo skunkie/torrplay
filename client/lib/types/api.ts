@@ -29,11 +29,13 @@ interface Settings {
   auth: Auth,
   enableDlna: boolean,
   enableDownloader: boolean,
+  enableStremio: boolean,
   fileStoragePath: string,
   friendlyName: string,
   logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
   logFormat?: 'json' | 'text',
   maxMemory: number,
+  stremioToken?: string,
   torrentClient: TorrentClient,
   torrentTrackers: string[]
 }

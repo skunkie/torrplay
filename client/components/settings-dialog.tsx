@@ -42,6 +42,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
   // State for settings.
   const [dlnaEnabled, setDlnaEnabled] = useState(false);
+  const [stremioEnabled, setStremioEnabled] = useState(false);
   const [downloaderEnabled, setDownloaderEnabled] = useState(false);
   const [friendlyName, setFriendlyName] = useState('');
   const [maxMemory, setMaxMemory] = useState(512);
@@ -90,6 +91,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
     if (settings) {
       setDlnaEnabled(settings.enableDlna ?? false);
+      setStremioEnabled(settings.enableStremio ?? false);
       setDownloaderEnabled(settings.enableDownloader ?? false);
       setFriendlyName(settings.friendlyName || 'TorrPlay');
       setMaxMemory(settings.maxMemory / (1024 * 1024));
@@ -179,6 +181,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       const settingsToUpdate: Partial<Settings> = {};
 
       if (dlnaEnabled !== settings.enableDlna) settingsToUpdate.enableDlna = dlnaEnabled;
+      if (stremioEnabled !== settings.enableStremio) settingsToUpdate.enableStremio = stremioEnabled;
       if (downloaderEnabled !== settings.enableDownloader) settingsToUpdate.enableDownloader = downloaderEnabled;
       if (fileStoragePath !== settings.fileStoragePath) settingsToUpdate.fileStoragePath = fileStoragePath;
       if (friendlyName !== settings.friendlyName) settingsToUpdate.friendlyName = friendlyName;
@@ -257,6 +260,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     // Reset server settings fields if they were loaded.
     if (settings) {
       setDlnaEnabled(settings.enableDlna ?? false);
+      setStremioEnabled(settings.enableStremio ?? false);
       setDownloaderEnabled(settings.enableDownloader ?? false);
       setFileStoragePath(settings.fileStoragePath || '');
       setFriendlyName(settings.friendlyName || 'TorrPlay');
@@ -279,6 +283,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
 
     setDlnaEnabled(false);
+    setStremioEnabled(false);
     setDownloaderEnabled(false);
     setFileStoragePath('');
     setFriendlyName('TorrPlay');
@@ -330,6 +335,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       onResetTorrentHandlerChoice={handleResetTorrentHandlerChoice}
       dlnaEnabled={dlnaEnabled}
       setDlnaEnabled={setDlnaEnabled}
+      stremioEnabled={stremioEnabled}
+      setStremioEnabled={setStremioEnabled}
       downloaderEnabled={downloaderEnabled}
       setDownloaderEnabled={setDownloaderEnabled}
       friendlyName={friendlyName}

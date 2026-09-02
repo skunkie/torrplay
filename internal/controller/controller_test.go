@@ -823,6 +823,7 @@ func TestUpdateSettings(t *testing.T) {
 	defer cleanup()
 
 	newSettings := api.Settings{
+		EnableStremio:  new(true),
 		FriendlyName:   new("My New TorrPlay"),
 		HTTPServerPort: new(9090),
 	}
@@ -842,6 +843,8 @@ func TestUpdateSettings(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &updatedSettings))
 	assert.Equal(t, *newSettings.FriendlyName, *updatedSettings.FriendlyName)
 	assert.Equal(t, *newSettings.HTTPServerPort, *updatedSettings.HTTPServerPort)
+	require.NotNil(t, updatedSettings.EnableStremio)
+	assert.True(t, *updatedSettings.EnableStremio)
 }
 
 func TestUpdateSettingsWithTrackers(t *testing.T) {

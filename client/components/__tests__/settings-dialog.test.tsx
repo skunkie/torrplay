@@ -14,6 +14,8 @@ const buildMockSettings = (overrides = {}) => ({
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
   enableDlna: true,
   enableDownloader: true,
+  enableStremio: true,
+  stremioToken: 'scoped-addon-token',
   fileStoragePath: '/torrplay',
   friendlyName: 'MyDLNA',
   logLevel: 'DEBUG',
@@ -272,6 +274,39 @@ describe('SettingsDialog', () => {
     await waitFor(() => {
       expect(dlnaSwitch).not.toBeChecked();
     });
+  });
+
+  it('Reset to Defaults button disables Stremio', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const stremioSwitch = screen.getByRole('switch', { name: /enable stremio addon/i });
+    expect(stremioSwitch).toBeChecked();
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      expect(stremioSwitch).not.toBeChecked();
+    });
+  });
+
+  it('includes the scoped token in Stremio installation URLs when auth is enabled', async () => {
+    settingsRef.current = buildMockSettings({
+      auth: { enabled: true, type: 'basic', username: 'admin', password: '********' },
+    });
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const addonUrl = screen.getByRole('textbox', { name: /addon installation url/i });
+    expect(addonUrl).toHaveValue('http://localhost:8090/stremio/scoped-addon-token/manifest.json');
+
+    fireEvent.click(screen.getByRole('button', { name: /install in stremio/i }));
+    expect(openSpy).toHaveBeenCalledWith(
+      'stremio://localhost:8090/stremio/scoped-addon-token/manifest.json',
+      '_blank'
+    );
   });
 
   it('Reset to Defaults resets torrent trackers to default values', async () => {

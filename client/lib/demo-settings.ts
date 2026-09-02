@@ -10,6 +10,8 @@ export const demoDefaultSettings: Settings = {
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
   enableDlna: false,
   enableDownloader: false,
+  enableStremio: false,
+  stremioToken: 'demo-stremio-token',
   fileStoragePath: '',
   friendlyName: 'TorrPlay',
   logLevel: 'INFO',
