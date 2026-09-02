@@ -38,13 +38,17 @@ export interface VideoPlayerProps {
     tracks?: SubtitleTrackInfo[]
   },
   onExit?: () => void,
+  playlistNavigation?: {
+    onPrevious?: () => void,
+    onNext?: () => void
+  },
   internalOnly?: boolean
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();
 const IS_TAURI = isTauri();
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, internalOnly = false }) => {
+const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavigation, internalOnly = false }) => {
   const player = useRef<MediaPlayerInstance>(null);
   const intentLaunched = useRef(false);
   const [useExternalPlayer, setUseExternalPlayer] = useState(false);
@@ -375,6 +379,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, internalOnly
         subtitleTracks={allSubtitleTracks}
         selectedSubtitleTrack={selectedSubtitleTrack}
         onSelectSubtitleTrack={handleSelectSubtitleTrack}
+        playlistNavigation={playlistNavigation}
       />
     </MediaPlayer>
   );

@@ -122,6 +122,44 @@ describe('TorrentPlayerDialog', () => {
     });
   });
 
+  it('navigates between videos and disables controls at playlist boundaries', async () => {
+    render(
+      <TorrentPlayerDialog
+        torrent={mockTorrentMultipleVideos}
+        open={true}
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('video2.mp4'));
+
+    const previousButton = await screen.findByRole('button', { name: 'Previous video' });
+    const nextButton = screen.getByRole('button', { name: 'Next video' });
+    expect(previousButton).toHaveClass('h-10', 'w-10');
+    expect(previousButton).toBeEnabled();
+    expect(nextButton).toBeEnabled();
+
+    fireEvent.click(nextButton);
+    await waitFor(() => expect(screen.getAllByText('video3.mkv')).toHaveLength(2));
+    expect(screen.getByRole('button', { name: 'Next video' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous video' }));
+    await waitFor(() => expect(screen.getAllByText('video2.mp4')).toHaveLength(2));
+  });
+
+  it('does not show playlist navigation for a single video file', () => {
+    render(
+      <TorrentPlayerDialog
+        torrent={mockTorrentSingleVideo}
+        open={true}
+        onOpenChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'Previous video' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next video' })).not.toBeInTheDocument();
+  });
+
   it('returns to file selection dialog when closing video player with multiple files', async () => {
     const onOpenChange = vi.fn();
     render(
