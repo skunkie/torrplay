@@ -130,6 +130,13 @@ describe('VideoPlayer', () => {
     expect(timeSliderControls.length).toBeGreaterThan(0);
   });
 
+  it('hides the volume slider on narrow screens', () => {
+    const { container } = render(<VideoPlayer options={mockVideoOptions}
+      onExit={vi.fn()} />);
+
+    expect(container.querySelector('[data-media-volume-slider]')).toHaveClass('hidden', 'sm:inline-flex');
+  });
+
   it('shows video player with proper aspect ratio', () => {
     const { container } = render(<VideoPlayer options={mockVideoOptions}
       onExit={vi.fn()} />);
