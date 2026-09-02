@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
-	"github.com/torrplay/torrplay/internal/utils"
 )
 
 func TestDefault(t *testing.T) {
@@ -27,7 +26,7 @@ func TestDefault(t *testing.T) {
 	assert.False(t, *d.EnableDownloader)
 
 	require.NotNil(t, d.FileStoragePath)
-	assert.Equal(t, "", *d.FileStoragePath)
+	assert.Empty(t, *d.FileStoragePath)
 
 	require.NotNil(t, d.FriendlyName)
 	assert.Equal(t, "TorrPlay", *d.FriendlyName)
@@ -88,9 +87,9 @@ func TestMerge(t *testing.T) {
 		customPort := 9999
 		target := &api.Settings{
 			HTTPServerPort: &customPort,
-			FriendlyName:   utils.Ptr("MyCustomTorrPlay"),
+			FriendlyName:   new("MyCustomTorrPlay"),
 			TorrentClient: &api.TorrentClient{
-				DownloadRateLimit: utils.Ptr(1024),
+				DownloadRateLimit: new(1024),
 			},
 		}
 

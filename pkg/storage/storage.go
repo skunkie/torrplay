@@ -522,10 +522,7 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 
 	// Check if we need to evict.
 	if c.used+size > c.maxMemory {
-		target := c.maxMemory - size
-		if target < 0 {
-			target = 0
-		}
+		target := max(c.maxMemory-size, 0)
 
 		beforeEvict := c.used
 
@@ -580,16 +577,17 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 	// Remove all pieces for this torrent.
 	var totalEvicted int64
 	for key, pd := range c.pieces {
-		if key.infoHash == infoHash && pd.torrent == state {
-			// Read pd.data under the piece lock so len() is consistent
-			// with any concurrent piece mutations (avoid races with
-			// SetPiece/evict operations).
-			pd.mu.RLock()
-			size := int64(len(pd.data))
-			pd.mu.RUnlock()
-			c.evictPieceLocked(key, pd)
-			totalEvicted += size
+		if key.infoHash != infoHash || pd.torrent != state {
+			continue
 		}
+		// Read pd.data under the piece lock so len() is consistent
+		// with any concurrent piece mutations (avoid races with
+		// SetPiece/evict operations).
+		pd.mu.RLock()
+		size := int64(len(pd.data))
+		pd.mu.RUnlock()
+		c.evictPieceLocked(key, pd)
+		totalEvicted += size
 	}
 
 	// Remove active ranges for this torrent.
@@ -928,7 +926,7 @@ const maxWriteAllocRetries = 3
 // WriteAt implements the storage.PieceImpl interface.
 func (p *pieceImpl) WriteAt(b []byte, off int64) (n int, err error) {
 	var lastErr error
-	for attempt := 0; attempt < maxWriteAllocRetries; attempt++ {
+	for range maxWriteAllocRetries {
 		pd, getErr := p.getOrCreatePieceData()
 		if getErr != nil {
 			return 0, getErr

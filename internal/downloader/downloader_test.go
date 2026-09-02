@@ -7,7 +7,6 @@ package downloader
 import (
 	"bytes"
 	"crypto/rand"
-	"io"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -47,12 +46,12 @@ func (m *MockDB) GetTorrents() ([]*database.Torrent, error) {
 	return m.torrents, m.err
 }
 
-func newTestTorrent(t *testing.T, name string, totalSize int64) *metainfo.MetaInfo {
+func newTestTorrent(t *testing.T, totalSize int64) *metainfo.MetaInfo {
 	t.Helper()
 	pieceLength := int64(16 * 1024)
 	numPieces := (totalSize + pieceLength - 1) / pieceLength
 	info := metainfo.Info{
-		Name:        name,
+		Name:        "test-torrent",
 		Length:      totalSize,
 		PieceLength: pieceLength,
 		Pieces:      make([]byte, 20*numPieces),
@@ -94,13 +93,13 @@ func newTestTorrentClient(t *testing.T, dataDir string) *torrent.Client {
 }
 
 func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
-	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
+	testMetaInfo := newTestTorrent(t, 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 	storageType := api.File
 	testApiTorrent := &database.Torrent{
 		Torrent: api.Torrent{
 			Hash:    testHash,
-			Magnet:  testMetaInfo.Magnet(nil, nil).String(),
+			Magnet:  utils.MagnetURIFromHash(testHash),
 			Storage: &storageType,
 		},
 	}
@@ -111,11 +110,11 @@ func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
 		torrents: []*database.Torrent{testApiTorrent},
 	}
 	m := metrics.New()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	// Use a real torrent client, but configured to not touch the network.
 	client := newTestTorrentClient(t, td)
@@ -152,7 +151,7 @@ func TestDownloader_AddAndRemoveStreaming(t *testing.T) {
 		streamings: make(map[metainfo.Hash]int),
 	}
 
-	hash := newTestTorrent(t, "test-torrent", 1).HashInfoBytes()
+	hash := newTestTorrent(t, 1).HashInfoBytes()
 
 	d.AddStreaming(hash)
 	assert.Equal(t, 1, d.streamings[hash])
@@ -175,7 +174,7 @@ func TestDownloader_hasStreamings(t *testing.T) {
 
 	assert.False(t, d.hasStreamings())
 
-	hash := newTestTorrent(t, "test-torrent", 1).HashInfoBytes()
+	hash := newTestTorrent(t, 1).HashInfoBytes()
 	d.AddStreaming(hash)
 	assert.True(t, d.hasStreamings())
 
@@ -184,7 +183,7 @@ func TestDownloader_hasStreamings(t *testing.T) {
 }
 
 func TestDownloader_Stop(t *testing.T) {
-	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
+	testMetaInfo := newTestTorrent(t, 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 
 	td := t.TempDir()
@@ -193,12 +192,12 @@ func TestDownloader_Stop(t *testing.T) {
 	defer pc.Close()
 
 	m := metrics.New()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	client := newTestTorrentClient(t, td)
 
 	db := &MockDB{
-		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
 	}
 	downloader := New(client, db, logger, m, pc, td, nil)
 	downloader.downloading[testHash] = struct{}{}
@@ -218,13 +217,13 @@ func TestDownloader_Stop(t *testing.T) {
 }
 
 func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
-	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
+	testMetaInfo := newTestTorrent(t, 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 	storageType := api.File
 	testApiTorrent := &database.Torrent{
 		Torrent: api.Torrent{
 			Hash:    testHash,
-			Magnet:  testMetaInfo.Magnet(nil, nil).String(),
+			Magnet:  utils.MagnetURIFromHash(testHash),
 			Storage: &storageType,
 		},
 	}
@@ -235,11 +234,12 @@ func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(false)}},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(false)}},
 		torrents: []*database.Torrent{testApiTorrent},
 	}
+
 	m := metrics.New()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	client := newTestTorrentClient(t, td)
 
@@ -260,13 +260,13 @@ func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
 }
 
 func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
-	testMetaInfo := newTestTorrent(t, "test-torrent", 1024)
+	testMetaInfo := newTestTorrent(t, 1024)
 	testHash := testMetaInfo.HashInfoBytes()
 	storageType := api.File
 	testApiTorrent := &database.Torrent{
 		Torrent: api.Torrent{
 			Hash:    testHash,
-			Magnet:  testMetaInfo.Magnet(nil, nil).String(),
+			Magnet:  utils.MagnetURIFromHash(testHash),
 			Storage: &storageType,
 		},
 	}
@@ -277,11 +277,12 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
 		torrents: []*database.Torrent{testApiTorrent},
 	}
+
 	m := metrics.New()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	client := newTestTorrentClient(t, td)
 
@@ -309,17 +310,18 @@ func TestDownloader_StartStop_CleanExit(t *testing.T) {
 	defer pc.Close()
 
 	db := &MockDB{
-		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(false)}},
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(false)}},
 	}
+
 	m := metrics.New()
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	client := newTestTorrentClient(t, td)
 
 	downloader := New(client, db, logger, m, pc, td, nil)
 
 	// Start and stop multiple times in quick succession
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		downloader.Start()
 		downloader.Stop()
 	}

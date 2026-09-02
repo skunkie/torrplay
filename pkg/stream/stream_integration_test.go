@@ -644,10 +644,8 @@ func TestPool_ConcurrentAcquire(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var successCount atomic.Int32
-	for i := 0; i < iterations; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range iterations {
+		wg.Go(func() {
 			reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
 			if reader == nil {
 				t.Error("expected non-nil reader")
@@ -655,7 +653,7 @@ func TestPool_ConcurrentAcquire(t *testing.T) {
 			}
 			successCount.Add(1)
 			release()
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -723,7 +721,7 @@ func TestComputeRange_Integration(t *testing.T) {
 	// start = max(0, 0 - 4096) = 0, end = 0 + 16384 = 16384, but end clamped to the
 	// final inclusive piece index (EndPieceIndex-1 = 8)
 	// position = 0 + beginPiece = 0
-	wantEnd := int(f.EndPieceIndex() - 1)
+	wantEnd := f.EndPieceIndex() - 1
 	if ri.End != wantEnd {
 		t.Fatalf("expected End=%d (last inclusive piece), got %d", wantEnd, ri.End)
 	}
@@ -796,7 +794,7 @@ func TestComputeRange_Integration_MidFile(t *testing.T) {
 	}
 
 	// End must be clamped to the final inclusive file piece.
-	wantEnd := int(f.EndPieceIndex() - 1)
+	wantEnd := f.EndPieceIndex() - 1
 	if ri.End != wantEnd {
 		t.Fatalf("expected End=%d (last inclusive piece), got %d", wantEnd, ri.End)
 	}

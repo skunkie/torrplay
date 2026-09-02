@@ -6,6 +6,7 @@ package dlna
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -33,6 +34,12 @@ func (m *mockImages) SaveData(data []byte) (*string, error) {
 }
 
 func (m *mockImages) ServeHTTP(w http.ResponseWriter, r *http.Request) {}
+
+func TestClampUint(t *testing.T) {
+	assert.Zero(t, clampUint(-1))
+	assert.Zero(t, clampUint(0))
+	assert.Equal(t, uint(42), clampUint(42))
+}
 
 func TestContentDirectory_BrowseMetadata(t *testing.T) {
 	service, cleanup := newTestService(t)
@@ -78,7 +85,7 @@ func TestContentDirectory_BrowseMetadata(t *testing.T) {
 	})
 
 	t.Run("item metadata", func(t *testing.T) {
-		itemID := upnpav.ObjectID(fmt.Sprintf("%s/0", testTorrentHash.HexString()))
+		itemID := upnpav.ObjectID(testTorrentHash.HexString() + "/0")
 		didl, err := service.contentDirectory.BrowseMetadata(ctx, itemID, nil)
 		require.NoError(t, err)
 		require.NotNil(t, didl)
@@ -91,7 +98,7 @@ func TestContentDirectory_BrowseMetadata(t *testing.T) {
 		_, err := service.contentDirectory.BrowseMetadata(ctx, "0000000000000000000000000000000000000000/0", nil)
 		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
 
-		_, err = service.contentDirectory.BrowseMetadata(ctx, upnpav.ObjectID(fmt.Sprintf("%s/99", testTorrentHash.HexString())), nil)
+		_, err = service.contentDirectory.BrowseMetadata(ctx, upnpav.ObjectID(testTorrentHash.HexString()+"/99"), nil)
 		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
 	})
 }
@@ -328,7 +335,7 @@ func TestContentDirectory_BrowseChildren_Pagination(t *testing.T) {
 		require.Equal(t, uint(1), totalMatches)
 		require.Len(t, didl.Items, 1)
 		assert.Equal(t, testTorrentFileName, didl.Items[0].Title)
-		assert.Equal(t, upnpav.ObjectID(fmt.Sprintf("%s/0", testTorrentHash.HexString())), didl.Items[0].ID)
+		assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()+"/0"), didl.Items[0].ID)
 
 		didlEmpty, totalMatchesEmpty, err := service.contentDirectory.BrowseChildren(ctx, upnpav.ObjectID(testTorrentHash.HexString()), 1, 1, nil)
 		require.NoError(t, err)
@@ -370,9 +377,9 @@ func TestContentDirectory_Capabilities(t *testing.T) {
 
 func TestRecentlyAddedAndRecentlyViewedTorrents(t *testing.T) {
 	now := time.Now()
-	var allTorrents []*database.Torrent
+	allTorrents := make([]*database.Torrent, 0, 15)
 
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		createdAt := now.Add(time.Duration(i) * time.Minute)
 		viewedAt := now.Add(time.Duration(i) * time.Hour)
 		torrent := &database.Torrent{
@@ -494,7 +501,7 @@ func (m *mockDBWithCategories) GetTorrent(ih metainfo.Hash) (*database.Torrent, 
 			return t, nil
 		}
 	}
-	return nil, fmt.Errorf("not found")
+	return nil, errors.New("not found")
 }
 
 func TestContentDirectory_Categories(t *testing.T) {
@@ -686,7 +693,7 @@ func TestContentDirectory_Categories(t *testing.T) {
 	})
 
 	t.Run("browse item metadata when category has slash", func(t *testing.T) {
-		itemID := upnpav.ObjectID(fmt.Sprintf("%s/0", hash4.HexString()))
+		itemID := upnpav.ObjectID(hash4.HexString() + "/0")
 		didl, err := cd.BrowseMetadata(ctx, itemID, nil)
 		require.NoError(t, err)
 		require.NotNil(t, didl)

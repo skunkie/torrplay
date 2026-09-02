@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
-	"github.com/torrplay/torrplay/internal/utils"
 	"go.etcd.io/bbolt"
 )
 
@@ -36,7 +35,7 @@ func TestBBoltDB(t *testing.T) {
 			torrent := &api.Torrent{
 				Hash:   metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10"),
 				Name:   "Sintel",
-				Poster: utils.Ptr("poster123.jpg"),
+				Poster: new("poster123.jpg"),
 			}
 
 			err := db.CreateTorrent(FromAPITorrent(torrent))
@@ -57,8 +56,8 @@ func TestBBoltDB(t *testing.T) {
 			torrent2 := &api.Torrent{
 				Hash:      metainfo.NewHashFromHex("1111111111111111111111111111111111111111"),
 				Name:      "Tears of Steel",
-				CreatedAt: utils.Ptr(now.Add(-1 * time.Hour)),
-				UpdatedAt: utils.Ptr(now.Add(1 * time.Hour)),
+				CreatedAt: new(now.Add(-1 * time.Hour)),
+				UpdatedAt: new(now.Add(1 * time.Hour)),
 			}
 			err := db.CreateTorrent(FromAPITorrent(torrent2))
 			require.NoError(t, err)
@@ -66,7 +65,7 @@ func TestBBoltDB(t *testing.T) {
 			torrent3 := &api.Torrent{
 				Hash:      metainfo.NewHashFromHex("2222222222222222222222222222222222222222"),
 				Name:      "Cosmos",
-				CreatedAt: utils.Ptr(now.Add(2 * time.Hour)),
+				CreatedAt: new(now.Add(2 * time.Hour)),
 			}
 			err = db.CreateTorrent(FromAPITorrent(torrent3))
 			require.NoError(t, err)
@@ -74,7 +73,7 @@ func TestBBoltDB(t *testing.T) {
 			torrent4 := &api.Torrent{
 				Hash:      metainfo.NewHashFromHex("3333333333333333333333333333333333333333"),
 				Name:      "Equal Time",
-				CreatedAt: utils.Ptr(now.Add(2 * time.Hour)),
+				CreatedAt: new(now.Add(2 * time.Hour)),
 			}
 			err = db.CreateTorrent(FromAPITorrent(torrent4))
 			require.NoError(t, err)
@@ -82,7 +81,7 @@ func TestBBoltDB(t *testing.T) {
 			torrent5 := &api.Torrent{
 				Hash:      metainfo.NewHashFromHex("4444444444444444444444444444444444444444"),
 				Name:      "Past Movie",
-				CreatedAt: utils.Ptr(now.Add(-5 * time.Hour)),
+				CreatedAt: new(now.Add(-5 * time.Hour)),
 			}
 			err = db.CreateTorrent(FromAPITorrent(torrent5))
 			require.NoError(t, err)

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	torrentparser "github.com/ProfChaos/torrent-name-parser"
 	openapi_types "github.com/oapi-codegen/runtime/types"
@@ -49,7 +50,7 @@ func (c *TVDBClient) login() error {
 		return err
 	}
 
-	resp, err := c.httpPost(fmt.Sprintf("%s/login", thetvdbBaseURL), loginBody)
+	resp, err := c.httpPost(thetvdbBaseURL+"/login", loginBody)
 	if err != nil {
 		return err
 	}
@@ -75,7 +76,7 @@ func (c *TVDBClient) Search(name string, year int, searchType string, language s
 	params := url.Values{}
 	params.Add("query", name)
 	if year > 0 {
-		params.Add("year", fmt.Sprintf("%d", year))
+		params.Add("year", strconv.Itoa(year))
 	}
 	params.Add("type", searchType)
 	if language != "" {
@@ -85,8 +86,8 @@ func (c *TVDBClient) Search(name string, year int, searchType string, language s
 	return c.httpGet(fmt.Sprintf("%s/search?%s", thetvdbBaseURL, params.Encode()))
 }
 
-func (c *TVDBClient) httpGet(url string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+func (c *TVDBClient) httpGet(urlStr string) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, urlStr, http.NoBody)
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +103,8 @@ func (c *TVDBClient) httpGet(url string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func (c *TVDBClient) httpPost(url string, body []byte) (*http.Response, error) {
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(body))
+func (c *TVDBClient) httpPost(urlStr string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, urlStr, bytes.NewBuffer(body))
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +118,7 @@ func (c *TVDBClient) setAuthHeader(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	if c.token != "" {
-		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 }
 
@@ -202,16 +203,16 @@ func (c *TVDBClient) UpdateMetadata(backup api.Backup, opts Options) (api.Backup
 
 				if posterURL != "" {
 					fmt.Printf("fetching poster from: %s\n", posterURL)
-					resp, err := http.Get(posterURL)
+					posterData, err := func() ([]byte, error) {
+						resp, err := http.Get(posterURL) //nolint:gosec // The poster URL comes from the authenticated TVDB API response.
+						if err != nil {
+							return nil, err
+						}
+						defer resp.Body.Close()
+						return io.ReadAll(resp.Body)
+					}()
 					if err != nil {
 						fmt.Printf("failed to fetch poster image: %v\n", err)
-						continue
-					}
-					defer resp.Body.Close()
-
-					posterData, err := io.ReadAll(resp.Body)
-					if err != nil {
-						fmt.Printf("failed to read poster image data: %v\n", err)
 						continue
 					}
 

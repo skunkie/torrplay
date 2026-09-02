@@ -78,13 +78,25 @@ type (
 	}
 )
 
-func NewContentDirectory(db database.DatabaseInterface, images images.ServiceInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
+func clampUint(value int64) uint {
+	if value <= 0 {
+		return 0
+	}
+
+	maxUint := ^uint(0)
+	if uint64(value) > uint64(maxUint) {
+		return maxUint
+	}
+	return uint(value)
+}
+
+func NewContentDirectory(db database.DatabaseInterface, imgService images.ServiceInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
 	return &ContentDirectory{
 		baseURL:        baseURL,
 		db:             db,
-		images:         images,
+		images:         imgService,
 		postersPath:    postersPath,
-		systemUpdateID: uint(time.Now().Unix()),
+		systemUpdateID: clampUint(time.Now().Unix()),
 	}
 }
 
@@ -296,7 +308,7 @@ func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criter
 						ContentFormat:  mime.TypeByExtension(path.Ext(file.Path)),
 						AdditionalInfo: upnpav.ContentFeatures,
 					},
-					SizeBytes: uint(file.Length),
+					SizeBytes: clampUint(file.Length),
 				},
 			}
 
@@ -450,7 +462,7 @@ func (cd *ContentDirectory) browseRoot(_ context.Context, startingIndex, request
 func (cd *ContentDirectory) browseCategories(_ context.Context, all []*database.Torrent, startingIndex, requestedCount uint) (*upnpav.DIDLLite, uint, error) {
 	categories := getCategories(all)
 
-	var containers []upnpav.Container
+	containers := make([]upnpav.Container, 0, len(categories))
 	for _, cat := range categories {
 		catTorrents := getTorrentsByCategory(all, cat)
 		containers = append(containers, upnpav.Container{
@@ -536,32 +548,34 @@ func (cd *ContentDirectory) browseContainerMetadata(_ context.Context, id upnpav
 		}, nil
 	default:
 		for _, torrent := range all {
-			if torrent.Hash.HexString() == string(id) {
-				date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
-				if torrent.UpdatedAt != nil {
-					date = &upnpav.Date{Time: *torrent.UpdatedAt}
-				}
-
-				var containerIcon *upnpav.URL
-				if torrent.Poster != nil && *torrent.Poster != "" {
-					containerIcon = cd.posterURI(*torrent.Poster)
-				}
-
-				container := upnpav.Container{
-					ID:         id,
-					Parent:     allTorrentsContainerID,
-					Title:      torrent.Name,
-					Class:      upnpav.StorageFolder,
-					Restricted: true,
-					Searchable: true,
-					Date:       date,
-					Icon:       containerIcon,
-					ChildCount: len(getMediaFiles(torrent.Files)),
-				}
-				return &upnpav.DIDLLite{
-					Containers: []upnpav.Container{container},
-				}, nil
+			if torrent.Hash.HexString() != string(id) {
+				continue
 			}
+
+			date := &upnpav.Date{Time: utils.Val(torrent.CreatedAt)}
+			if torrent.UpdatedAt != nil {
+				date = &upnpav.Date{Time: *torrent.UpdatedAt}
+			}
+
+			var containerIcon *upnpav.URL
+			if torrent.Poster != nil && *torrent.Poster != "" {
+				containerIcon = cd.posterURI(*torrent.Poster)
+			}
+
+			container := upnpav.Container{
+				ID:         id,
+				Parent:     allTorrentsContainerID,
+				Title:      torrent.Name,
+				Class:      upnpav.StorageFolder,
+				Restricted: true,
+				Searchable: true,
+				Date:       date,
+				Icon:       containerIcon,
+				ChildCount: len(getMediaFiles(torrent.Files)),
+			}
+			return &upnpav.DIDLLite{
+				Containers: []upnpav.Container{container},
+			}, nil
 		}
 		return nil, contentdirectory.ErrNoSuchObject
 	}
@@ -640,7 +654,7 @@ func (cd *ContentDirectory) browseItemMetadata(_ context.Context, id upnpav.Obje
 				ContentFormat:  mime.TypeByExtension(path.Ext(file.Path)),
 				AdditionalInfo: upnpav.ContentFeatures,
 			},
-			SizeBytes: uint(file.Length),
+			SizeBytes: clampUint(file.Length),
 		},
 	}
 
@@ -774,7 +788,7 @@ func (cd *ContentDirectory) browseTorrent(_ context.Context, torrentHash upnpav.
 					ContentFormat:  mime.TypeByExtension(path.Ext(file.Path)),
 					AdditionalInfo: upnpav.ContentFeatures,
 				},
-				SizeBytes: uint(file.Length),
+				SizeBytes: clampUint(file.Length),
 			},
 		}
 
@@ -831,8 +845,8 @@ func (cd *ContentDirectory) iconURI(filepath string) *upnpav.URL {
 		return nil
 	}
 
-	mediaType := strings.SplitN(mime.TypeByExtension(path.Ext(filepath)), "/", 2)[0]
-	iconFilename := fmt.Sprintf("%sfile-128x128.png", mediaType)
+	mediaType, _, _ := strings.Cut(mime.TypeByExtension(path.Ext(filepath)), "/")
+	iconFilename := mediaType + "file-128x128.png"
 
 	iconURL := *cd.baseURL
 	iconURL.Path = path.Join(iconURL.Path, "/icons/media", iconFilename)

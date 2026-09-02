@@ -38,7 +38,7 @@ func TestMetrics_Handler(t *testing.T) {
 	m.HTTPRequestSizeBytes.WithLabelValues("200", "GET", "/metrics").Observe(123)
 	m.HTTPResponseSizeBytes.WithLabelValues("200", "GET", "/metrics").Observe(456)
 
-	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
 	rr := httptest.NewRecorder()
 
 	m.Handler().ServeHTTP(rr, req)

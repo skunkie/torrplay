@@ -6,6 +6,7 @@ package dlna
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +43,7 @@ type Service struct {
 	postersPath      string
 }
 
-func NewService(db database.DatabaseInterface, images images.ServiceInterface, basePath, postersPath string, logger *slog.Logger) *Service {
+func NewService(db database.DatabaseInterface, imgService images.ServiceInterface, basePath, postersPath string, logger *slog.Logger) *Service {
 	// Configure the global logrus logger used by helix to use our slog hook.
 	logrus.SetOutput(io.Discard)
 	logrus.AddHook(logging.NewSlogHook(logger))
@@ -49,7 +51,7 @@ func NewService(db database.DatabaseInterface, images images.ServiceInterface, b
 	return &Service{
 		basePath:    basePath,
 		db:          db,
-		images:      images,
+		images:      imgService,
 		logger:      logger,
 		postersPath: postersPath,
 	}
@@ -126,7 +128,7 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 	defer s.mu.Unlock()
 
 	if s.cancel != nil {
-		return fmt.Errorf("DLNA service is already running")
+		return errors.New("DLNA service is already running")
 	}
 
 	s.logger.Info("starting DLNA service")
@@ -134,15 +136,14 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 	var ipAddr string
 	// Use the specified IP address for DLNA, or discover a private IP address if the HTTP server is bound to 0.0.0.0.
 	if net.ParseIP(httpAddr).IsUnspecified() {
-		s.logger.Info(fmt.Sprintf("HTTP server is listening on all interfaces (%s), attempting to find a private IP address for DLNA", httpAddr))
+		s.logger.Info("HTTP server is listening on all interfaces (" + httpAddr + "), attempting to find a private IP address for DLNA")
 		ip, err := utils.GetOutboundIP()
 		if err != nil {
 			s.logger.Warn("could not find outbound IP address, DLNA service will be disabled", "err", err)
 			return nil // Return nil so the app can start without DLNA.
-		} else {
-			ipAddr = ip
-			s.logger.Info("found outbound IP address for DLNA", "ip", ipAddr)
 		}
+		ipAddr = ip
+		s.logger.Info("found outbound IP address for DLNA", "ip", ipAddr)
 	} else {
 		ipAddr = httpAddr
 	}
@@ -155,9 +156,9 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 		return fmt.Errorf("DLNA service can only be used on private networks, IP address: %s", ipAddr)
 	}
 
-	host := net.JoinHostPort(ipAddr, fmt.Sprintf("%d", port))
+	host := net.JoinHostPort(ipAddr, strconv.Itoa(port))
 
-	baseURL, err := url.Parse(fmt.Sprintf("http://%s", host))
+	baseURL, err := url.Parse("http://" + host)
 	baseURL.Path = s.basePath
 	if err != nil {
 		return fmt.Errorf("failed to parse base URL: %w", err)
@@ -180,18 +181,16 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 
-	s.broadcastDone.Add(1)
-	go func() {
-		defer s.broadcastDone.Done()
+	s.broadcastDone.Go(func() {
 		if err := upnp.BroadcastDevice(ctx, device, baseURL.String(), nil, notifyInterval); err != nil {
 			s.logger.Error("failed to broadcast DLNA device", "err", err)
 		}
-	}()
+	})
 
 	s.device = device
 	s.handler = device.HTTPHandler(s.basePath)
 	s.contentDirectory = cd
-	s.device.SetBootID(uint(time.Now().Unix()))
+	s.device.SetBootID(clampUint(time.Now().Unix()))
 
 	s.logger.Info("DLNA service is running")
 

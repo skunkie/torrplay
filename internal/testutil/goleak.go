@@ -32,8 +32,8 @@ func VerifyTestMain(m *testing.M, excludedSubstrings ...string) {
 		}
 
 		lastLeaks = nil
-		goroutines := strings.Split(err.Error(), "Goroutine ")
-		for _, gr := range goroutines {
+		goroutines := strings.SplitSeq(err.Error(), "Goroutine ")
+		for gr := range goroutines {
 			if !strings.Contains(gr, "github.com/torrplay/torrplay") {
 				continue
 			}

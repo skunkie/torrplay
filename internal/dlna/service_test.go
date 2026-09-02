@@ -52,15 +52,15 @@ type mockDB struct {
 func (m *mockDB) GetSettings() (*database.Settings, error) {
 	return &database.Settings{
 		Settings: api.Settings{
-			EnableDlna:     utils.Ptr(true),
-			FriendlyName:   utils.Ptr("test-server"),
-			HTTPServerPort: utils.Ptr(8080),
+			EnableDlna:     new(true),
+			FriendlyName:   new("test-server"),
+			HTTPServerPort: new(8080),
 			LogLevel:       utils.Ptr(slog.LevelInfo),
-			MaxMemory:      utils.Ptr(int64(1024 * 1024 * 1024)),
+			MaxMemory:      new(int64(1024 * 1024 * 1024)),
 			TorrentClient: &api.TorrentClient{
-				DisableIPv6:                utils.Ptr(false),
-				EstablishedConnsPerTorrent: utils.Ptr(50),
-				TorrentPeersHighWater:      utils.Ptr(100),
+				DisableIPv6:                new(false),
+				EstablishedConnsPerTorrent: new(50),
+				TorrentPeersHighWater:      new(100),
 			},
 		},
 	}, nil
@@ -166,7 +166,7 @@ func TestService_ServeHTTP(t *testing.T) {
 	service, cleanup := newTestService(t)
 	defer cleanup()
 
-	req := httptest.NewRequest(http.MethodGet, "/upnp/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/upnp/", http.NoBody)
 	rw := httptest.NewRecorder()
 
 	service.ServeHTTP(rw, req)
@@ -195,7 +195,7 @@ func TestService_ConnectionManagerAndRegistrar(t *testing.T) {
 
 func TestAddHeader(t *testing.T) {
 	t.Run("no DLNA headers", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 		rec := httptest.NewRecorder()
 		AddHeader(rec, req)
 		assert.Empty(t, rec.Header().Get("contentFeatures.dlna.org"))
@@ -203,7 +203,7 @@ func TestAddHeader(t *testing.T) {
 	})
 
 	t.Run("getContentFeatures requested", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 		req.Header.Set("getContentFeatures.dlna.org", "1")
 		rec := httptest.NewRecorder()
 		AddHeader(rec, req)
@@ -212,7 +212,7 @@ func TestAddHeader(t *testing.T) {
 	})
 
 	t.Run("custom transferMode provided", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 		req.Header.Set("transferMode.dlna.org", "Background")
 		rec := httptest.NewRecorder()
 		AddHeader(rec, req)
@@ -221,7 +221,7 @@ func TestAddHeader(t *testing.T) {
 	})
 
 	t.Run("both headers provided", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 		req.Header.Set("getContentFeatures.dlna.org", "1")
 		req.Header.Set("transferMode.dlna.org", "Interactive")
 		rec := httptest.NewRecorder()
@@ -253,7 +253,7 @@ func TestService_IncrementSystemUpdateID(t *testing.T) {
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
 	}
-	defer service.Stop()
+	defer func() { _ = service.Stop() }()
 
 	initialID, err := service.contentDirectory.SystemUpdateID(t.Context())
 	assert.NoError(t, err)
@@ -276,7 +276,7 @@ func TestService_SendUpdateNotification(t *testing.T) {
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
 	}
-	defer service.Stop()
+	defer func() { _ = service.Stop() }()
 
 	service.SendUpdateNotification()
 }
@@ -287,7 +287,7 @@ func TestService_ServeHTTP_IconsAndNotFound(t *testing.T) {
 	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
 
 	t.Run("handler is nil when stopped", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/upnp/test", nil)
+		req := httptest.NewRequest(http.MethodGet, "/upnp/test", http.NoBody)
 		rec := httptest.NewRecorder()
 		service.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusNotFound, rec.Code)
@@ -297,9 +297,9 @@ func TestService_ServeHTTP_IconsAndNotFound(t *testing.T) {
 		if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 			t.Fatalf("service.Start() returned an error: %v", err)
 		}
-		defer service.Stop()
+		defer func() { _ = service.Stop() }()
 
-		req := httptest.NewRequest(http.MethodGet, "/upnp/icons/device/icon-128x128.png", nil)
+		req := httptest.NewRequest(http.MethodGet, "/upnp/icons/device/icon-128x128.png", http.NoBody)
 		rec := httptest.NewRecorder()
 		service.ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusOK, rec.Code)
