@@ -57,6 +57,7 @@ More options: [Download prebuilt binaries](https://torrplay.github.io/download/)
 - **qBittorrent API** — works with Prowlarr, Radarr, Sonarr
 - **TorrServer compatible** — works with TorrServer clients
 - **Dual storage** — RAM or disk
+- **Model Context Protocol (MCP)** — control and stream torrents directly via AI assistants (Claude Desktop, Cursor, etc.)
 
 ## Links
 
