@@ -27,6 +27,7 @@ interface PieceInfo {
 
 interface Settings {
   auth: Auth,
+  corsAllowedOrigins?: string[],
   enableDlna: boolean,
   enableDownloader: boolean,
   enableStremio: boolean,

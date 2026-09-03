@@ -12,6 +12,7 @@ const mockUpdateSettings = vi.fn().mockResolvedValue(undefined);
 
 const buildMockSettings = (overrides = {}) => ({
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
+  corsAllowedOrigins: ['https://ui.example.com'],
   enableDlna: true,
   enableDownloader: true,
   enableStremio: true,
@@ -307,6 +308,22 @@ describe('SettingsDialog', () => {
       'stremio://localhost:8090/stremio/scoped-addon-token/manifest.json',
       '_blank'
     );
+  });
+
+  it('saves additional trusted web origins', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const origins = screen.getByRole('textbox', { name: /additional web origins/i });
+    expect(origins).toHaveValue('https://ui.example.com');
+    fireEvent.change(origins, { target: { value: 'https://one.example.com\nhttps://two.example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        corsAllowedOrigins: ['https://one.example.com', 'https://two.example.com'],
+      }));
+    });
   });
 
   it('Reset to Defaults resets torrent trackers to default values', async () => {
