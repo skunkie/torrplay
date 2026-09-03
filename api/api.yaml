@@ -1593,6 +1593,14 @@ components:
       properties:
         auth:
           $ref: "#/components/schemas/Auth"
+        cors_allowed_origins:
+          type: array
+          description: Additional web origins allowed to access the application API. Loopback, Tauri, and Capacitor origins are always trusted.
+          items:
+            type: string
+            format: uri
+          example:
+            - "https://torrplay.example.com"
         torrent_client:
           $ref: "#/components/schemas/TorrentClient"
         enable_dlna:
