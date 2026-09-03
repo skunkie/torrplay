@@ -36,6 +36,7 @@ interface Settings {
   logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
   logFormat?: 'json' | 'text',
   maxMemory: number,
+  playbackToken?: string,
   stremioToken?: string,
   torrentClient: TorrentClient,
   torrentTrackers: string[]
@@ -53,6 +54,16 @@ interface SystemMetrics {
   activeTorrents: number,
   downloadSpeed: number,
   uploadSpeed: number
+}
+
+interface CreateTokenRequest {
+  scope: 'playback'
+}
+
+interface ScopedToken {
+  expiresAt: string,
+  scope: string,
+  token: string
 }
 
 interface TokenRequest {
@@ -178,9 +189,11 @@ interface TorrentUpdate {
 
 export type {
   Auth,
+  CreateTokenRequest,
   MemoryStats,
   PieceInfo,
   ReaderInfo,
+  ScopedToken,
   Settings,
   SystemInfo,
   SystemMetrics,

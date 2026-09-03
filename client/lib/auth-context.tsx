@@ -41,9 +41,15 @@ function useAuthStore(isDemo = false) {
       }
       setSettings(fetchedSettings);
       setAuth(fetchedSettings.auth);
+      if (fetchedSettings.playbackToken) {
+        localStorage.setItem('playback_token', fetchedSettings.playbackToken);
+      } else {
+        localStorage.removeItem('playback_token');
+      }
       setIsOffline(false);
     } catch (error) {
       if (error instanceof HttpError && error.status === 401) {
+        localStorage.removeItem('playback_token');
         setAuth({ enabled: true } as Auth);
       } else {
         console.error('Failed to fetch settings:', error);
@@ -111,6 +117,7 @@ function useAuthStore(isDemo = false) {
     }
     localStorage.removeItem('jwt_token');
     localStorage.removeItem('basic_auth');
+    localStorage.removeItem('playback_token');
     window.location.reload();
   };
 
@@ -137,6 +144,7 @@ function useAuthStore(isDemo = false) {
     if (settingsToUpdate.auth) {
       localStorage.removeItem('jwt_token');
       localStorage.removeItem('basic_auth');
+      localStorage.removeItem('playback_token');
     }
 
     fetchSettings();
