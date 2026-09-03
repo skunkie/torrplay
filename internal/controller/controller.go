@@ -26,7 +26,6 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 	"github.com/swaggest/swgui/v5emb"
 	"github.com/torrplay/torrplay/internal/api"
@@ -300,18 +299,7 @@ func (c *Controller) buildRouter() *chi.Mux {
 	router.Use(middleware.Recoverer)
 
 	// CORS setup.
-	corsMiddleware := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "SUBSCRIBE", "UNSUBSCRIBE", "NOTIFY"},
-		AllowedHeaders: []string{
-			"Accept", "Accept-Ranges", "Accept-Language", "Access-Control-Request-Private-Network",
-			"Authorization", "Content-Language", "Content-Type", "Content-Length", "Origin", "Range",
-		},
-		ExposedHeaders:   []string{"Content-Range"},
-		AllowCredentials: true,
-		MaxAge:           600,
-	})
-	router.Use(corsMiddleware.Handler)
+	router.Use(c.corsMiddleware)
 	router.Use(tSCorrectionMiddleware)
 	router.Use(tSUploadTorrentMiddleware)
 

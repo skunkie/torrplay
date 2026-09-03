@@ -14,17 +14,18 @@ import (
 // Default returns a new api.Settings populated with default application values.
 func Default() api.Settings {
 	return api.Settings{
-		Auth:             &api.Auth{Enabled: new(false)},
-		EnableDlna:       new(false),
-		EnableDownloader: new(false),
-		EnableStremio:    new(false),
-		FileStoragePath:  new(""),
-		FriendlyName:     new("TorrPlay"),
-		HTTPServerPort:   new(8090),
-		LogFormat:        utils.Ptr(api.Text),
-		LogLevel:         utils.Ptr(slog.LevelInfo),
-		LogStoreSize:     new(100),
-		MaxMemory:        new(int64(64 * 1024 * 1024)),
+		Auth:               &api.Auth{Enabled: new(false)},
+		CorsAllowedOrigins: new([]string{}),
+		EnableDlna:         new(false),
+		EnableDownloader:   new(false),
+		EnableStremio:      new(false),
+		FileStoragePath:    new(""),
+		FriendlyName:       new("TorrPlay"),
+		HTTPServerPort:     new(8090),
+		LogFormat:          utils.Ptr(api.Text),
+		LogLevel:           utils.Ptr(slog.LevelInfo),
+		LogStoreSize:       new(100),
+		MaxMemory:          new(int64(64 * 1024 * 1024)),
 		TorrentClient: &api.TorrentClient{
 			DisableDHT:                     new(false),
 			DisableIPv6:                    new(true),
@@ -63,6 +64,10 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 			target.Auth.Enabled = defaults.Auth.Enabled
 			changed = true
 		}
+	}
+	if target.CorsAllowedOrigins == nil {
+		target.CorsAllowedOrigins = defaults.CorsAllowedOrigins
+		changed = true
 	}
 	if target.EnableDlna == nil {
 		target.EnableDlna = defaults.EnableDlna

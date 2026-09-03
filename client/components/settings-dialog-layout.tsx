@@ -52,6 +52,8 @@ interface SettingsDialogLayoutProps {
   setFileStoragePath: (value: string) => void,
   authSettings: Auth | null,
   setAuthSettings: (value: Auth | null) => void,
+  corsAllowedOrigins?: string[],
+  setCorsAllowedOrigins?: (value: string[]) => void,
   torrentClientSettings: TorrentClient | null,
   setTorrentClientSettings: (value: TorrentClient | null) => void,
   torrentTrackers: string[],
@@ -95,6 +97,8 @@ export function SettingsDialogLayout({
   setFileStoragePath,
   authSettings,
   setAuthSettings,
+  corsAllowedOrigins = [],
+  setCorsAllowedOrigins = () => {},
   torrentClientSettings,
   setTorrentClientSettings,
   torrentTrackers,
@@ -324,6 +328,18 @@ export function SettingsDialogLayout({
                       </div>
                     </div>
                   )}
+                  <div className='space-y-2'>
+                    <Label htmlFor='cors-allowed-origins'>Additional Web Origins</Label>
+                    <Textarea
+                      id='cors-allowed-origins'
+                      placeholder='https://torrplay.example.com'
+                      value={corsAllowedOrigins.join('\n')}
+                      onChange={e => setCorsAllowedOrigins(e.target.value.split('\n'))}
+                    />
+                    <p className='text-sm text-muted-foreground'>
+                      One origin per line. Loopback, Tauri, and Capacitor origins are always trusted.
+                    </p>
+                  </div>
                 </div>
 
                 <div className='space-y-4'>

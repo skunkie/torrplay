@@ -54,6 +54,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     }
   };
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
+  const [corsAllowedOrigins, setCorsAllowedOrigins] = useState<string[]>([]);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
   const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
@@ -97,6 +98,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setFileStoragePath(settings.fileStoragePath || '');
       setAuthSettings(settings.auth);
+      setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
       setLogLevel(settings.logLevel || 'INFO');
@@ -179,6 +181,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
     try {
       const settingsToUpdate: Partial<Settings> = {};
+      const normalizedCorsAllowedOrigins = corsAllowedOrigins.map(origin => origin.trim()).filter(Boolean);
 
       if (dlnaEnabled !== settings.enableDlna) settingsToUpdate.enableDlna = dlnaEnabled;
       if (stremioEnabled !== settings.enableStremio) settingsToUpdate.enableStremio = stremioEnabled;
@@ -189,6 +192,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       if (JSON.stringify(torrentTrackers) !== JSON.stringify(settings.torrentTrackers)) settingsToUpdate.torrentTrackers = torrentTrackers;
       if (logLevel !== settings.logLevel) settingsToUpdate.logLevel = logLevel;
       if (logFormat !== settings.logFormat) settingsToUpdate.logFormat = logFormat;
+      if (JSON.stringify(normalizedCorsAllowedOrigins) !== JSON.stringify(settings.corsAllowedOrigins || [])) settingsToUpdate.corsAllowedOrigins = normalizedCorsAllowedOrigins;
 
       if (authSettings) {
         const originalAuth = settings.auth;
@@ -266,6 +270,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setFriendlyName(settings.friendlyName || 'TorrPlay');
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setAuthSettings(settings.auth);
+      setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
       setLogLevel(settings.logLevel || 'INFO');
@@ -289,6 +294,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     setFriendlyName('TorrPlay');
     setMaxMemory(64);
     setAuthSettings({ enabled: false, type: 'basic', username: '', password: '' });
+    setCorsAllowedOrigins([]);
     setTorrentClientSettings({
       disableDht: false,
       disableIpv6: true,
@@ -347,6 +353,8 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setFileStoragePath={setFileStoragePath}
       authSettings={authSettings}
       setAuthSettings={setAuthSettings}
+      corsAllowedOrigins={corsAllowedOrigins}
+      setCorsAllowedOrigins={setCorsAllowedOrigins}
       torrentClientSettings={torrentClientSettings}
       setTorrentClientSettings={setTorrentClientSettings}
       torrentTrackers={torrentTrackers}
