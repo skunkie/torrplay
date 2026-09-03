@@ -246,13 +246,17 @@ func registerTools(s *server.MCPServer, client *Client) {
 			if fileIndex >= len(torrent.Files) {
 				return nil, fmt.Errorf("file_index %d is out of range for torrent with %d files", fileIndex, len(torrent.Files))
 			}
+			playback, err := client.CreatePlaybackToken(ctx)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("failed to create playback token: %v", err)), nil
+			}
 
 			info := map[string]any{
 				"hash":         cleanHash,
 				"file_index":   fileIndex,
-				"stream_url":   client.StreamURL(cleanHash, fileIndex),
-				"play_url":     client.PlayURL(cleanHash, fileIndex),
-				"playlist_url": client.PlaylistURL(torrent.Name),
+				"stream_url":   client.StreamURL(cleanHash, fileIndex, playback.Token),
+				"play_url":     client.PlayURL(cleanHash, fileIndex, playback.Token),
+				"playlist_url": client.PlaylistURL(torrent.Name, playback.Token),
 			}
 
 			data, err := json.MarshalIndent(info, "", "  ")

@@ -192,17 +192,27 @@ func (c *Client) GetSystemInfo(ctx context.Context) (*api.SystemInfo, error) {
 	return &res, nil
 }
 
-// StreamURL returns the streaming URL for a given torrent and file index.
-func (c *Client) StreamURL(hash string, fileIndex int) string {
+// CreatePlaybackToken exchanges the configured API credential for a playback-only token.
+func (c *Client) CreatePlaybackToken(ctx context.Context) (*api.ScopedToken, error) {
+	var res api.ScopedToken
+	req := api.CreateTokenRequest{Scope: api.Playback}
+	if err := c.doRequest(ctx, http.MethodPost, "/api/v1/tokens", req, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// StreamURL returns the streaming URL for a given torrent and file index, optionally appending a playback token.
+func (c *Client) StreamURL(hash string, fileIndex int, playbackToken ...string) string {
 	values := url.Values{"index": {strconv.Itoa(fileIndex)}}
-	c.addStreamToken(values)
+	addPlaybackToken(values, playbackToken)
 	return fmt.Sprintf("%s/api/v1/stream/%s?%s", c.baseURL, url.PathEscape(hash), values.Encode())
 }
 
-// PlayURL returns the TorrServer-compatible direct play URL.
-func (c *Client) PlayURL(hash string, fileIndex int) string {
+// PlayURL returns the TorrServer-compatible direct play URL, optionally appending a playback token.
+func (c *Client) PlayURL(hash string, fileIndex int, playbackToken ...string) string {
 	values := url.Values{}
-	c.addStreamToken(values)
+	addPlaybackToken(values, playbackToken)
 	target := fmt.Sprintf("%s/play/%s/%d", c.baseURL, url.PathEscape(hash), fileIndex+1)
 	if query := values.Encode(); query != "" {
 		target += "?" + query
@@ -210,21 +220,21 @@ func (c *Client) PlayURL(hash string, fileIndex int) string {
 	return target
 }
 
-// PlaylistURL returns the M3U playlist URL for a torrent name.
-func (c *Client) PlaylistURL(name string) string {
+// PlaylistURL returns the M3U playlist URL for a torrent name, optionally appending a playback token.
+func (c *Client) PlaylistURL(name string, playbackToken ...string) string {
 	values := url.Values{}
 	if name != "" {
 		values.Set("name", name+".m3u")
 	}
-	c.addStreamToken(values)
+	addPlaybackToken(values, playbackToken)
 	if query := values.Encode(); query != "" {
 		return c.baseURL + "/api/v1/playlist?" + query
 	}
 	return c.baseURL + "/api/v1/playlist"
 }
 
-func (c *Client) addStreamToken(values url.Values) {
-	if c.token != "" {
-		values.Set("token", c.token)
+func addPlaybackToken(values url.Values, tokens []string) {
+	if len(tokens) > 0 && tokens[0] != "" {
+		values.Set("token", tokens[0])
 	}
 }
