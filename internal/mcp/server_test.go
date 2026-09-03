@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -50,6 +51,10 @@ func setupMockTorrPlay(t *testing.T) *Client {
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(api.ScopedToken{Token: "playback-token", Scope: string(api.Playback), ExpiresAt: time.Now().Add(time.Hour)})
+	})
 
 	// GET /api/v1/torrents
 	mux.HandleFunc("/api/v1/torrents", func(w http.ResponseWriter, r *http.Request) {
@@ -556,15 +561,19 @@ func TestStreamingURLs(t *testing.T) {
 	streamURL, err := url.Parse(client.StreamURL(hash, 1))
 	require.NoError(t, err)
 	assert.Equal(t, "1", streamURL.Query().Get("index"))
-	assert.Equal(t, "secret token", streamURL.Query().Get("token"))
+	assert.Empty(t, streamURL.Query().Get("token"))
 
 	playURL, err := url.Parse(client.PlayURL(hash, 1))
 	require.NoError(t, err)
 	assert.Equal(t, "/play/"+hash+"/2", playURL.Path)
-	assert.Equal(t, "secret token", playURL.Query().Get("token"))
+	assert.Empty(t, playURL.Query().Get("token"))
 
 	playlistURL, err := url.Parse(client.PlaylistURL("Sintel"))
 	require.NoError(t, err)
 	assert.Equal(t, "Sintel.m3u", playlistURL.Query().Get("name"))
-	assert.Equal(t, "secret token", playlistURL.Query().Get("token"))
+	assert.Empty(t, playlistURL.Query().Get("token"))
+
+	streamURL, err = url.Parse(client.StreamURL(hash, 1, "playback token"))
+	require.NoError(t, err)
+	assert.Equal(t, "playback token", streamURL.Query().Get("token"))
 }

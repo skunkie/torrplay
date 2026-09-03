@@ -109,7 +109,7 @@ func (*Controller) TSEcho(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("MatriX.TorrPlay"))
 }
 
-func (c *Controller) TSPlay(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, index int) {
+func (c *Controller) TSPlay(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, index int, _ api.TSPlayParams) {
 	if index > 0 {
 		index-- // Adjust for 0-based index
 	} else {
@@ -161,7 +161,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	}
 
 	if utils.Val(params.Play) {
-		c.TSPlay(w, r, ih, *params.Index)
+		c.TSPlay(w, r, ih, *params.Index, api.TSPlayParams{})
 		return
 	}
 

@@ -353,6 +353,10 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 	masterPlaylist := params.Name == nil || !strings.HasSuffix(*params.Name, suffix)
 	var m3u strings.Builder
 	_, _ = m3u.WriteString("#EXTM3U\n")
+	tokenSuffix := ""
+	if params.Token != nil && *params.Token != "" {
+		tokenSuffix = "&token=" + url.QueryEscape(*params.Token)
+	}
 
 	for _, t := range ts {
 		if masterPlaylist {
@@ -366,14 +370,14 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 			}
 			if hasMedia {
 				_, _ = fmt.Fprintf(&m3u, "#EXTINF:-1,%s\n", t.Name)
-				_, _ = fmt.Fprintf(&m3u, "%s/api/v1/playlist?name=%s%s\n", baseURL, url.QueryEscape(t.Name), suffix)
+				_, _ = fmt.Fprintf(&m3u, "%s/api/v1/playlist?name=%s%s%s\n", baseURL, url.QueryEscape(t.Name), suffix, tokenSuffix)
 			}
 		} else {
 			for _, f := range t.Files {
 				ext := strings.ToLower(path.Ext(f.Name))
 				if slices.Contains(mediaExts, ext) {
 					_, _ = fmt.Fprintf(&m3u, "#EXTINF:-1,%s\n", f.Name)
-					_, _ = fmt.Fprintf(&m3u, "%s/api/v1/stream/%s?path=%s\n", baseURL, t.Hash.HexString(), url.QueryEscape(f.Name))
+					_, _ = fmt.Fprintf(&m3u, "%s/api/v1/stream/%s?path=%s%s\n", baseURL, t.Hash.HexString(), url.QueryEscape(f.Name), tokenSuffix)
 				}
 			}
 		}
@@ -400,14 +404,49 @@ func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
 	if authEnabled {
 		secret, err := c.db.GetJWTSecret()
 		if err != nil || secret == "" {
-			api.HTTPError(w, "failed to get Stremio access token", http.StatusInternalServerError)
+			api.HTTPError(w, "failed to get scoped access tokens", http.StatusInternalServerError)
 			return
 		}
 		redactedSettings.StremioToken = utils.Ptr(stremio.AccessToken(secret))
+		playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
+		if err != nil {
+			api.HTTPError(w, "failed to create playback token", http.StatusInternalServerError)
+			return
+		}
+		redactedSettings.PlaybackToken = &playbackToken
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(redactedSettings); err != nil {
+		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (c *Controller) CreateToken(w http.ResponseWriter, r *http.Request) {
+	var req api.CreateTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.HTTPError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Scope != api.Playback {
+		api.HTTPError(w, fmt.Sprintf("unsupported token scope: %q", req.Scope), http.StatusBadRequest)
+		return
+	}
+
+	secret, err := c.db.GetJWTSecret()
+	if err != nil || secret == "" {
+		api.HTTPError(w, "failed to get token secret", http.StatusInternalServerError)
+		return
+	}
+
+	token, expiresAt, err := auth.GeneratePlaybackToken([]byte(secret))
+	if err != nil {
+		api.HTTPError(w, "failed to create token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(api.ScopedToken{Token: token, Scope: string(req.Scope), ExpiresAt: expiresAt}); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -486,16 +525,6 @@ func (c *Controller) GetToken(w http.ResponseWriter, r *http.Request) {
 		api.HTTPError(w, "failed to generate token", http.StatusInternalServerError)
 		return
 	}
-
-	cookie := http.Cookie{
-		Name:     "session",
-		Value:    token,
-		Expires:  time.Now().Add(auth.TokenExpiry),
-		HttpOnly: true,
-		Path:     "/",
-		SameSite: http.SameSiteLaxMode,
-	}
-	http.SetCookie(w, &cookie)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(api.TokenResponse{

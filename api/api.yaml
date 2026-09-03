@@ -68,8 +68,11 @@ paths:
       summary: Generate a playlist for streaming.
       description: Returns an m3u playlist for streaming torrent content.
       operationId: getPlaylist
+      security:
+        - queryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/MediaName"
+        - $ref: "#/components/parameters/StreamToken"
       responses:
         "200":
           description: m3u playlist generated successfully.
@@ -86,6 +89,33 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/tokens:
+    post:
+      tags:
+        - v1
+      summary: Create a scoped access token.
+      description: Creates a scoped token (e.g. for playback routes).
+      operationId: createToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTokenRequest"
+      responses:
+        "200":
+          description: Scoped token created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScopedToken"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -399,12 +429,13 @@ paths:
       description: Stream a torrent file by its info hash and file path or index. Requires HTTP Range requests for partial content.
       operationId: getStream
       security:
-        - cookieAuth: []
+        - queryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/Hash"
         - $ref: "#/components/parameters/Path"
         - $ref: "#/components/parameters/Index"
         - $ref: "#/components/parameters/Range"
+        - $ref: "#/components/parameters/StreamToken"
       responses:
         "206":
           $ref: "#/components/responses/Stream"
@@ -432,11 +463,12 @@ paths:
       description: Serve a HEAD request for a streamable torrent file by its info hash and file path or index.
       operationId: headStream
       security:
-        - cookieAuth: []
+        - queryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/Hash"
         - $ref: "#/components/parameters/Path"
         - $ref: "#/components/parameters/Index"
+        - $ref: "#/components/parameters/StreamToken"
       responses:
         "200":
           description: Video resource exists, metadata sent in headers.
@@ -639,10 +671,11 @@ paths:
       description: Compatibility endpoint for streaming torrent content directly.
       operationId: tSPlay
       security:
-        - cookieAuth: []
+        - queryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/Hash"
         - $ref: "#/components/parameters/TSIndex"
+        - $ref: "#/components/parameters/StreamToken"
       responses:
         "206":
           $ref: "#/components/responses/Stream"
@@ -699,7 +732,7 @@ paths:
       description: Compatibility endpoint for streaming or preloading torrent content with various options.
       operationId: tSStream
       security:
-        - cookieAuth: []
+        - queryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/TSLink"
         - $ref: "#/components/parameters/TSIndexQuery"
@@ -707,6 +740,7 @@ paths:
         - $ref: "#/components/parameters/TSPreload"
         - $ref: "#/components/parameters/TSStat"
         - $ref: "#/components/parameters/TSFileName"
+        - $ref: "#/components/parameters/StreamToken"
       responses:
         "200":
           description: Stream or statistics returned successfully.
@@ -843,10 +877,10 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-    cookieAuth:
+    queryTokenAuth:
       type: apiKey
-      in: cookie
-      name: session
+      in: query
+      name: token
   parameters:
     Hash:
       name: hash
@@ -868,6 +902,13 @@ components:
       schema:
         type: string
         example: "Sintel"
+    StreamToken:
+      name: token
+      in: query
+      description: Playback-scoped token for playlist and media streaming routes.
+      required: false
+      schema:
+        type: string
     TorrentCategories:
       name: categories
       in: query
@@ -1553,6 +1594,35 @@ components:
           minimum: 0
           example: 20
 
+    CreateTokenRequest:
+      type: object
+      description: Request payload for creating a scoped token.
+      required:
+        - scope
+      properties:
+        scope:
+          type: string
+          enum:
+            - playback
+          example: "playback"
+
+    ScopedToken:
+      type: object
+      description: Scoped access token credential.
+      required:
+        - token
+        - scope
+        - expires_at
+      properties:
+        token:
+          type: string
+        scope:
+          type: string
+          example: "playback"
+        expires_at:
+          type: string
+          format: date-time
+
     TorrentStorage:
       type: string
       description: Use memory or file storage.
@@ -1663,6 +1733,10 @@ components:
           minimum: 33554432
           maximum: 2147483648
           example: 67108864
+        playback_token:
+          type: string
+          readOnly: true
+          description: Short-lived token restricted to media playback routes when authentication is enabled.
         stremio_token:
           type: string
           readOnly: true

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/go-chi/chi/v5"
 	"github.com/oapi-codegen/testutil"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
@@ -392,7 +394,7 @@ func TestGetPlaylist(t *testing.T) {
 	})
 
 	t.Run("torrent specific playlist", func(t *testing.T) {
-		rr := doGet(t, ctrl.router, "/api/v1/playlist?name=Sintel.m3u")
+		rr := doGet(t, ctrl.router, "/api/v1/playlist?name=Sintel.m3u&token=test-token")
 
 		require.Equal(t, http.StatusOK, rr.Code)
 		assert.Equal(t, "application/x-mpegURL", rr.Header().Get("Content-Type"))
@@ -412,6 +414,7 @@ func TestGetPlaylist(t *testing.T) {
 		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 		expectedURLPart := fmt.Sprintf("/api/v1/stream/%s?path=", ih.HexString())
 		assert.Contains(t, streamURL, expectedURLPart)
+		assert.Contains(t, streamURL, "&token=test-token")
 	})
 }
 
@@ -1622,4 +1625,119 @@ func TestCalcReadaheadPct(t *testing.T) {
 			assert.Equal(t, tt.want, got, "maxMemory = %d", tt.maxMemory)
 		})
 	}
+}
+
+func TestSlogMiddlewareRedactsTokens(t *testing.T) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(handler)
+
+	c := &Controller{logger: logger}
+
+	tests := []struct {
+		name          string
+		requestURL    string
+		unexpectedStr string
+		expectedPath  string
+	}{
+		{
+			name:          "stremio path token is redacted",
+			requestURL:    "/stremio/secret-access-token-123/manifest.json",
+			unexpectedStr: "secret-access-token-123",
+			expectedPath:  "/stremio/[REDACTED]/manifest.json",
+		},
+		{
+			name:          "query token is redacted",
+			requestURL:    "/api/v1/stream?token=secret-query-token-456",
+			unexpectedStr: "secret-query-token-456",
+			expectedPath:  "/api/v1/stream",
+		},
+		{
+			name:          "stremio unauthenticated path is not altered",
+			requestURL:    "/stremio/manifest.json",
+			unexpectedStr: "[REDACTED]",
+			expectedPath:  "/stremio/manifest.json",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf.Reset()
+			req := httptest.NewRequest(http.MethodGet, tc.requestURL, http.NoBody)
+			rr := httptest.NewRecorder()
+
+			mw := c.SlogMiddleware()
+			testHandler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			testHandler.ServeHTTP(rr, req)
+
+			logOutput := buf.String()
+			assert.Contains(t, logOutput, tc.expectedPath)
+			if tc.unexpectedStr != "" {
+				assert.NotContains(t, logOutput, tc.unexpectedStr)
+			}
+		})
+	}
+}
+
+func TestMetricsMiddlewareRedactsTokens(t *testing.T) {
+	metricsSvc := metrics.New()
+	c := &Controller{metrics: metricsSvc}
+
+	t.Run("unrouted request with stremio token is redacted in metrics label", func(t *testing.T) {
+		mw := c.MetricsMiddleware()
+		testHandler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/stremio/secret-metrics-token-123/manifest.json", http.NoBody)
+		rr := httptest.NewRecorder()
+		testHandler.ServeHTTP(rr, req)
+
+		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/[REDACTED]/manifest.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(redactedCounter))
+
+		rawCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/secret-metrics-token-123/manifest.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
+	})
+
+	t.Run("mounted stremio handler fallback redacts path token", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Use(c.MetricsMiddleware())
+		r.Mount("/stremio", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/stremio/secret-metrics-token-456/catalog/movie/all.json", http.NoBody)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/[REDACTED]/catalog/movie/all.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(redactedCounter))
+
+		rawCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/secret-metrics-token-456/catalog/movie/all.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
+	})
+
+	t.Run("standard chi routed pattern is preserved", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Use(c.MetricsMiddleware())
+		r.Get("/api/v1/torrents", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/torrents", http.NoBody)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		patternCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/api/v1/torrents")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(patternCounter))
+	})
 }

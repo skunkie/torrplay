@@ -754,6 +754,31 @@ func isStremioResource(part string) bool {
 	}
 }
 
+// RedactPathToken redacts sensitive authentication path tokens from Stremio URLs.
+func RedactPathToken(p string) string {
+	if !strings.HasPrefix(p, "/stremio") {
+		return p
+	}
+
+	reqPath := strings.TrimPrefix(p, "/stremio")
+	if reqPath != "" && !strings.HasPrefix(reqPath, "/") {
+		return p
+	}
+
+	cleanPath := strings.Trim(reqPath, "/")
+	if cleanPath == "" {
+		return p
+	}
+
+	parts := strings.Split(cleanPath, "/")
+	if len(parts) > 0 && !isStremioResource(parts[0]) {
+		parts[0] = "[REDACTED]"
+		return "/stremio/" + strings.Join(parts, "/")
+	}
+
+	return p
+}
+
 func getBaseURL(r *http.Request) *url.URL {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {

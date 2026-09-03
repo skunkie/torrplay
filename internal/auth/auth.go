@@ -13,13 +13,18 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const TokenExpiry = 24 * time.Hour
+const (
+	TokenExpiry         = 24 * time.Hour
+	PlaybackTokenExpiry = 24 * time.Hour
+	PlaybackTokenScope  = "playback"
+)
 
 var ErrInvalidToken = errors.New("invalid token")
 
 // Claims defines the structure of the JWT claims.
 type Claims struct {
-	Username string `json:"username"`
+	Username string `json:"username,omitempty"`
+	Scope    string `json:"scope,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -36,6 +41,24 @@ func GenerateToken(username string, secret []byte) (string, error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(secret)
+}
+
+// GeneratePlaybackToken generates a short-lived token restricted to media playback routes.
+func GeneratePlaybackToken(secret []byte) (string, time.Time, error) {
+	now := time.Now()
+	expiresAt := now.Add(PlaybackTokenExpiry)
+	claims := &Claims{
+		Scope: PlaybackTokenScope,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString(secret)
+	return signed, expiresAt, err
 }
 
 // ValidateToken validates a JWT token and returns the claims if the token is valid.

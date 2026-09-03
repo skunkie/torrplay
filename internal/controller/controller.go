@@ -444,20 +444,28 @@ func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 			}
 
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-			if _, err := auth.ValidateToken(tokenString, []byte(jwtSecret)); err != nil {
+			claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+			if err != nil {
 				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "Bearer"}
 			}
+			if claims.Scope != "" {
+				return &api.AuthError{Message: "token scope is not valid for API access", Type: "Bearer"}
+			}
 			return nil
-		case "cookieAuth":
+		case "queryTokenAuth":
 			if authType != api.Bearer {
 				return nil
 			}
-			cookie, err := input.RequestValidationInput.Request.Cookie("session")
-			if err != nil {
-				return &api.AuthError{Message: "missing session cookie", Type: "cookie"}
+			tokenString := input.RequestValidationInput.Request.URL.Query().Get("token")
+			if tokenString == "" {
+				return &api.AuthError{Message: "token query parameter is missing", Type: "query"}
 			}
-			if _, err := auth.ValidateToken(cookie.Value, []byte(jwtSecret)); err != nil {
-				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "cookie"}
+			claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+			if err != nil {
+				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "query"}
+			}
+			if claims.Scope != auth.PlaybackTokenScope {
+				return &api.AuthError{Message: "only playback-scoped tokens are accepted in URLs", Type: "query"}
 			}
 			return nil
 		}
@@ -475,10 +483,14 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 
 			logAttrs := []any{
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", stremio.RedactPathToken(r.URL.Path)),
 			}
 			if r.URL.RawQuery != "" {
-				logAttrs = append(logAttrs, slog.String("query", r.URL.RawQuery))
+				query := r.URL.Query()
+				if query.Has("token") {
+					query.Set("token", "[REDACTED]")
+				}
+				logAttrs = append(logAttrs, slog.String("query", query.Encode()))
 			}
 			logAttrs = append(logAttrs, slog.String("user-agent", r.UserAgent()))
 
@@ -511,9 +523,10 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 				routePath := routeCtx.RoutePattern()
 				// Sometimes path is empty, for example for static files.
 				// In that case, we can use r.URL.Path.
-				if routePath == "" {
+				if routePath == "" || strings.HasSuffix(routePath, "/*") {
 					routePath = r.URL.Path
 				}
+				routePath = stremio.RedactPathToken(routePath)
 
 				duration := time.Since(start)
 				statusCode := strconv.Itoa(ww.Status())
