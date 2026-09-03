@@ -36,6 +36,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     }
   };
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
+  const [corsAllowedOrigins, setCorsAllowedOrigins] = useState<string[]>([]);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
   const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
@@ -65,6 +66,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setMaxMemory(settings.maxMemory / (1024 * 1024));
       setFileStoragePathRaw(settings.fileStoragePath || '');
       setAuthSettings(settings.auth);
+      setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
       setLogLevel(settings.logLevel || 'INFO');
@@ -82,6 +84,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       maxMemory: maxMemory * 1024 * 1024,
       fileStoragePath: fileStoragePath,
       auth: authSettings || { enabled: false, type: 'basic' as const },
+      corsAllowedOrigins: corsAllowedOrigins.map(origin => origin.trim()).filter(Boolean),
       torrentClient: torrentClientSettings || defaultSettings.torrentClient,
       torrentTrackers: torrentTrackers,
       logLevel: logLevel || 'INFO',
@@ -100,6 +103,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     setMaxMemory((settings.maxMemory / (1024 * 1024)) || (defaultSettings.maxMemory / (1024 * 1024)));
     setFileStoragePathRaw(settings.fileStoragePath || defaultSettings.fileStoragePath);
     setAuthSettings(settings.auth || defaultSettings.auth);
+    setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
     setTorrentClientSettings(settings.torrentClient || defaultSettings.torrentClient);
     setTorrentTrackers(settings.torrentTrackers || defaultSettings.torrentTrackers);
     setLogLevel(settings.logLevel || defaultSettings.logLevel || 'INFO');
@@ -115,6 +119,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     setMaxMemory(defaultSettings.maxMemory / (1024 * 1024));
     setFileStoragePathRaw(defaultSettings.fileStoragePath);
     setAuthSettings(defaultSettings.auth);
+    setCorsAllowedOrigins(defaultSettings.corsAllowedOrigins || []);
     setTorrentClientSettings(defaultSettings.torrentClient);
     setTorrentTrackers(defaultSettings.torrentTrackers);
     setLogLevel(defaultSettings.logLevel || 'INFO');
@@ -151,6 +156,8 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setFileStoragePath={setFileStoragePath}
       authSettings={authSettings}
       setAuthSettings={setAuthSettings}
+      corsAllowedOrigins={corsAllowedOrigins}
+      setCorsAllowedOrigins={setCorsAllowedOrigins}
       torrentClientSettings={torrentClientSettings}
       setTorrentClientSettings={setTorrentClientSettings}
       torrentTrackers={torrentTrackers}
