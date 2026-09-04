@@ -163,6 +163,7 @@ interface TorrentStats {
   piecesDirtiedGood: number,
   totalPeers: number,
   completedSize: number,
+  writtenBytes: number,
   inMemory: number,
   inMemorySize: number,
   memoryStats: MemoryStats,
@@ -187,11 +188,29 @@ interface TorrentUpdate {
   title?: string
 }
 
+// File index takes precedence when both fields are supplied. If both are omitted, file index 0 is preloaded.
+interface PreloadRequest {
+  fileIndex?: number,
+  filePath?: string
+}
+
+interface PreloadResponse {
+  // -1 means idle or readiness applies to the fully downloaded torrent.
+  fileIndex: number,
+  filePath?: string,
+  targetBytes: number,
+  completedBytes: number,
+  progress: number,
+  status: 'idle' | 'preloading' | 'ready'
+}
+
 export type {
   Auth,
   CreateTokenRequest,
   MemoryStats,
   PieceInfo,
+  PreloadRequest,
+  PreloadResponse,
   ReaderInfo,
   ScopedToken,
   Settings,

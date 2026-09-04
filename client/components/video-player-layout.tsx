@@ -26,6 +26,11 @@ interface VideoPlayerLayoutProps {
     onPrevious?: () => void,
     onNext?: () => void
   },
+  preloadBadge?: {
+    progress: number,
+    completedBytes?: number,
+    targetBytes?: number
+  } | null,
   isDemo?: boolean
 }
 
@@ -35,24 +40,35 @@ export const VideoPlayerLayout = ({
   options,
   onExit,
   playlistNavigation,
+  preloadBadge,
   isDemo = false,
 }: VideoPlayerLayoutProps) => {
   return (
-    <Dialog open={open}
-      onOpenChange={onOpenChange}>
-      <DialogContent variant='video'
-        showCloseButton={false}>
+    <Dialog
+      open={open}
+      onOpenChange={onOpenChange}
+    >
+      <DialogContent
+        variant='video'
+        showCloseButton={false}
+      >
         <DialogTitle className='sr-only'>{options.title ?? ''}</DialogTitle>
         <DialogDescription className='sr-only'>Video player for {options.title ?? 'video'}</DialogDescription>
         {open && (
           isDemo ? (
-            <DemoVideoPlayer options={options}
+            <DemoVideoPlayer
+              options={options}
               onExit={onExit}
-              playlistNavigation={playlistNavigation} />
+              playlistNavigation={playlistNavigation}
+              preloadBadge={preloadBadge}
+            />
           ) : (
-            <VideoPlayer options={options}
+            <VideoPlayer
+              options={options}
               onExit={onExit}
-              playlistNavigation={playlistNavigation} />
+              playlistNavigation={playlistNavigation}
+              preloadBadge={preloadBadge}
+            />
           )
         )}
       </DialogContent>

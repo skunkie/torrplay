@@ -487,4 +487,73 @@ describe('VideoPlayer', () => {
     const videoTitles = screen.getAllByText('MKV Movie');
     expect(videoTitles.length).toBeGreaterThan(0);
   });
+
+  it('renders preloading badge when preloadBadge is active with progress < 1', () => {
+    render(
+      <VideoPlayer
+        options={mockVideoOptions}
+        preloadBadge={{
+          progress: 0.65,
+          completedBytes: 6500000,
+          targetBytes: 10000000,
+        }}
+      />
+    );
+
+    const badge = screen.getByTestId('player-preload-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent('Buffering 65%');
+  });
+
+  it('renders preloading badge at 100% and removes badge when preloadBadge is null', () => {
+    const { rerender } = render(
+      <VideoPlayer
+        options={mockVideoOptions}
+        preloadBadge={{
+          progress: 1.0,
+          completedBytes: 10000000,
+          targetBytes: 10000000,
+        }}
+      />
+    );
+
+    const badge = screen.getByTestId('player-preload-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent('Buffering 100%');
+
+    rerender(
+      <VideoPlayer
+        options={mockVideoOptions}
+        preloadBadge={null}
+      />
+    );
+
+    expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+  });
+
+  it('holds autoplay while preloading is active and begins playback once ready', () => {
+    const { rerender } = render(
+      <VideoPlayer
+        options={{ ...mockVideoOptions, autoPlay: true }}
+        preloadBadge={{
+          progress: 0.5,
+          completedBytes: 5000000,
+          targetBytes: 10000000,
+        }}
+      />
+    );
+
+    const badge = screen.getByTestId('player-preload-badge');
+    expect(badge).toHaveTextContent('Buffering 50%');
+
+    // Preload completes
+    rerender(
+      <VideoPlayer
+        options={{ ...mockVideoOptions, autoPlay: true }}
+        preloadBadge={null}
+      />
+    );
+
+    expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+  });
 });
