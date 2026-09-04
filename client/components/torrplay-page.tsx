@@ -121,7 +121,10 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
       refreshInterval: liveUpdatesPaused || isOffline ? 0 : 5000,
       revalidateOnFocus: false,
       shouldRetryOnError: !isOffline,
-      onError: () => {
+      onError: err => {
+        if (err instanceof HttpError && err.status === 401) {
+          return;
+        }
         if (!isOffline) {
           errorCount.current++;
           if (errorCount.current >= 5) {
@@ -497,6 +500,9 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
       );
     }
     if (error && !torrentsData) {
+      if (error instanceof HttpError && error.status === 401) {
+        return null;
+      }
       return (
         <div className='text-center py-16'>
           <p className='text-destructive mb-2'>Could not connect to backend</p>
