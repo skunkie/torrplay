@@ -113,12 +113,17 @@ type Controller struct {
 	logger              *slog.Logger
 	metrics             *metrics.Metrics
 	mu                  sync.RWMutex
-	port                int
 	pieceCompletion     piececompletion.DeletablePieceCompletion
+	port                int
 	posterCleanupDone   chan struct{}
 	posterCleanupTicker *time.Ticker
 	posterOpMu          sync.Mutex
 	postersPath         string
+	preloadActiveTasks  int
+	preloadQueue        []*preloadTask
+	preloadReadyTTL     time.Duration
+	preloads            sync.Map
+	preloadsMu          sync.Mutex
 	profilerAddr        string
 	profilerListener    net.Listener
 	profilerMu          sync.Mutex
@@ -187,6 +192,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
+		preloadReadyTTL:   defaultPreloadReadyTTL,
 		profilerAddr:      profilerAddress,
 		settings:          appSettings,
 		speedMonitor:      newSpeedMonitor(),
@@ -617,6 +623,7 @@ func (c *Controller) Shutdown() {
 		}
 
 		_ = c.dlna.Stop()
+		c.cancelAllPreloads()
 		if c.streamPool != nil {
 			c.streamPool.Close()
 		}
@@ -784,6 +791,7 @@ func (c *Controller) cleanupExpiredTorrents() {
 			}
 
 			c.logger.Debug("mark torrent as expired", "hash", ih, "age", sub)
+			c.cancelPreload(ih)
 			delete(c.torrentTracker.torrents, ih)
 			if to, ok := c.client.Torrent(ih); ok {
 				go func(t *torrent.Torrent, hash metainfo.Hash, age time.Duration) {

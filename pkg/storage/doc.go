@@ -32,11 +32,10 @@
 //  5. Self-Hashing: Implements the SelfHashing interface to verify piece integrity without external
 //     hashing mechanisms.
 //
-//  6. Active Range Protection: Satisfies the stream.ActiveRangeRegistry interface so that
-//     actively-read pieces are protected from standard LRU eviction. The stream package calls
-//     SetActiveRange to register a reader's readahead window and ClearActiveRange when the
-//     reader is released. Under severe memory pressure where active ranges alone exceed
-//     available memory, emergency eviction evicts the oldest LRU piece to prevent download stalls.
+//  6. Eviction Protection: Satisfies the stream.ActiveRangeRegistry interface so that
+//     actively-read pieces and file boundary pieces are protected from standard LRU eviction.
+//     Under memory pressure, boundary protection yields first; active ranges are evicted only
+//     as a last resort to prevent download stalls.
 //
 // # Usage Example
 //
@@ -100,15 +99,31 @@
 //
 // TorrentStats also provides derived completion and memory-usage fractions.
 //
-// # Active Range Tracking
+// # Eviction Protection
 //
-// The storage client maintains a map of active ranges keyed by (info hash, reader ID).
-// When SetActiveRange is called, the given piece-index window is marked as protected from
-// standard LRU eviction. ClearActiveRange removes the protection. This interface is consumed
-// by the stream pool to ensure pieces within the current readahead window stay in memory
-// during playback. If memory pressure prevents allocating a new incoming piece because
-// protected ranges consume all available RAM, emergency eviction evicts the oldest LRU piece
-// as a last resort to keep the torrent engine from disabling data downloads.
+// The storage client maintains two kinds of protected piece ranges, both keyed by
+// (info hash, reader ID):
+//
+//   - Active ranges: SetActiveRange marks a reader's readahead window as protected and
+//     ClearActiveRange removes it. The stream pool uses these to keep the pieces around
+//     the current playback position in memory.
+//   - File boundaries: SetFileBoundaries marks the head and tail piece ranges of a streamed
+//     file as protected and ClearFileBoundaries removes them. These keep container metadata,
+//     such as MP4 moov atoms or Matroska cues, resident while a reader seeks.
+//
+// When an incoming piece needs space, eviction walks the LRU list in up to three passes,
+// each stopping as soon as the allocation fits:
+//
+//  1. Evict pieces that are in neither an active range nor a file boundary.
+//  2. Evict file boundary pieces, while still preserving active ranges.
+//  3. Evict active range pieces, oldest first. This pass runs only when no allocation is
+//     pending; otherwise the allocation waits for the pending reservation to publish or
+//     refund its memory. It prevents ErrInsufficientMemory from making the torrent engine
+//     disable data downloads.
+//
+// EvictTo runs only the first pass and reports ErrEvictionTargetNotReached when protected
+// pieces prevent reaching the target. SetMaxMemory enforces a new limit with all three
+// passes, waiting for pending allocations when necessary.
 //
 // # Error Handling
 //

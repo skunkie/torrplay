@@ -2,11 +2,12 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { TorrentPlayerDialog } from '@/components/torrent-player-dialog';
-import { type Torrent } from '@/lib/types/api';
+import * as torrentsApi from '@/lib/api/torrents';
+import { type PreloadResponse, type Torrent } from '@/lib/types/api';
 
 const mockTorrentSingleVideo: Torrent = {
   hash: '1234567890',
@@ -572,5 +573,178 @@ describe('TorrentPlayerDialog', () => {
 
     const subButton = screen.getByRole('button', { name: /select subtitle track/i });
     expect(subButton).toBeInTheDocument();
+  });
+
+  describe('implicit preloading', () => {
+    it('triggers implicit preload and opens video player directly with preloading badge', async () => {
+      const preloadSpy = vi.spyOn(torrentsApi, 'startPreload').mockImplementation(() => new Promise(() => {}));
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />
+      );
+
+      expect(preloadSpy).toHaveBeenCalledWith('1234567890', { filePath: '/video.mp4' });
+      expect(screen.queryByText('Buffering Stream...')).not.toBeInTheDocument();
+      expect(screen.getAllByText('video.mp4').length).toBeGreaterThan(0);
+      expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 0%');
+    });
+
+    it('shows in-player preloading badge with progress and hides when preload is ready', async () => {
+      vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 400,
+        progress: 0.4,
+        status: 'preloading',
+      });
+
+      const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload').mockResolvedValueOnce({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 1000,
+        progress: 1.0,
+        status: 'ready',
+      });
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />
+      );
+
+      // Video player is shown directly with the in-player preloading badge
+      await waitFor(() => {
+        expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 40%');
+      });
+
+      // Once background poller gets status ready, badge disappears
+      await waitFor(() => {
+        expect(getPreloadSpy).toHaveBeenCalled();
+        expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+      });
+    });
+
+    it('does not move preload progress backwards when polling responses regress', async () => {
+      let resolvePoll!: (response: PreloadResponse) => void;
+      const pollResponse = new Promise<PreloadResponse>(resolve => {
+        resolvePoll = resolve;
+      });
+      vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 700,
+        progress: 0.7,
+        status: 'preloading',
+      });
+      const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload')
+        .mockReturnValueOnce(pollResponse);
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
+      });
+      await waitFor(() => {
+        expect(getPreloadSpy).toHaveBeenCalled();
+      });
+
+      await act(async () => {
+        resolvePoll({
+          fileIndex: 0,
+          targetBytes: 1000,
+          completedBytes: 400,
+          progress: 0.4,
+          status: 'preloading',
+        });
+      });
+      expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
+    });
+
+    it('cancels server preload when polling reports that the task stopped', async () => {
+      vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 200,
+        progress: 0.2,
+        status: 'preloading',
+      });
+      vi.spyOn(torrentsApi, 'getPreload').mockResolvedValueOnce({
+        fileIndex: -1,
+        targetBytes: 0,
+        completedBytes: 0,
+        progress: 0,
+        status: 'idle',
+      });
+      const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(cancelSpy).toHaveBeenCalledWith(mockTorrentSingleVideo.hash);
+        expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+      });
+    });
+
+    it('cancels preload when exiting the player', async () => {
+      vi.spyOn(torrentsApi, 'startPreload').mockImplementation(() => new Promise(() => {}));
+      const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
+      const onOpenChange = vi.fn();
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={onOpenChange}
+          enablePreload={true}
+        />
+      );
+
+      // Close player via escape
+      fireEvent.keyDown(document, { key: 'Escape' });
+
+      expect(cancelSpy).toHaveBeenCalledWith('1234567890');
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+
+    it('cancels preload when the player unmounts', async () => {
+      const startSpy = vi.spyOn(torrentsApi, 'startPreload').mockImplementation(() => new Promise(() => {}));
+      const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
+
+      const { unmount } = render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />,
+      );
+
+      await waitFor(() => expect(startSpy).toHaveBeenCalled());
+      unmount();
+
+      expect(cancelSpy).toHaveBeenCalledWith('1234567890');
+    });
   });
 });

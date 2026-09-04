@@ -56,6 +56,7 @@ const mockStats = {
   chunksReadWasted: 10,
   chunksWritten: 50,
   completedSize: 500,
+  writtenBytes: 450,
   connectedSeeders: 3,
   halfOpenPeers: 2,
   inMemory: 5,

@@ -32,4 +32,21 @@ describe('apiFetch', () => {
     const headers = options?.headers as Headers;
     expect(headers.get('X-Requested-With')).toBe('XMLHttpRequest');
   });
+
+  it('performs PUT request with serialized body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ completed_bytes: 100 }), { status: 200 })
+    );
+    global.fetch = fetchMock;
+
+    const { api } = await import('@/lib/api-client');
+    const result = await api.put<{ completedBytes: number }>('/api/v1/test', { testField: 123 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://localhost:8090/api/v1/test');
+    expect(options?.method).toBe('PUT');
+    expect(options?.body).toBe(JSON.stringify({ test_field: 123 }));
+    expect(result).toEqual({ completedBytes: 100 });
+  });
 });
