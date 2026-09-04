@@ -19,7 +19,8 @@ interface HeaderProps {
   onSettingsClick: () => void,
   onSystemInfoClick: () => void,
   onTitleSearch: (query: string) => void,
-  inert?: boolean
+  inert?: boolean,
+  searchQuery?: string
 }
 
 export const Header = forwardRef<HTMLDivElement, HeaderProps>((
@@ -30,6 +31,7 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
     onSystemInfoClick,
     onTitleSearch,
     inert,
+    searchQuery,
   }, ref) => {
   const { liveUpdatesPaused, setLiveUpdatesPaused } = useLiveUpdates();
   const { isAuthenticated, logout, auth } = useAuth();
@@ -52,17 +54,27 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
       } else {
         setIsHidden(false);
       }
+    } else {
+      setIsHidden(false);
     }
     lastScrollY.current = currentScrollY;
   }, []);
 
+  const handleResize = useCallback(() => {
+    if (window.innerWidth >= 768) {
+      setIsHidden(false);
+    }
+  }, []);
+
   useEffect(() => {
     window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('resize', handleResize);
 
     return () => {
       window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('resize', handleResize);
     };
-  }, [handleScroll]);
+  }, [handleScroll, handleResize]);
 
   const handlePauseClick = () => {
     setLiveUpdatesPaused(!liveUpdatesPaused);
@@ -76,6 +88,7 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
       onSettingsClick={onSettingsClick}
       onSystemInfoClick={onSystemInfoClick}
       onTitleSearch={onTitleSearch}
+      searchQuery={searchQuery}
       liveUpdatesPaused={liveUpdatesPaused}
       handlePauseClick={handlePauseClick}
       version={version}
