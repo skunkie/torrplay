@@ -44,6 +44,37 @@ func TestBuildStreamURLDoesNotDoubleEscapeFilename(t *testing.T) {
 	assert.NotContains(t, streamURL, "%2520")
 }
 
+func TestRedactPathToken(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", ""},
+		{"/api/v1/torrents", "/api/v1/torrents"},
+		{"/stremio", "/stremio"},
+		{"/stremio/", "/stremio/"},
+		{"/stremio/manifest.json", "/stremio/manifest.json"},
+		{"/stremio/catalog/movie/torrplay_movies.json", "/stremio/catalog/movie/torrplay_movies.json"},
+		{"/stremio/meta/series/torrplay:1111111111111111111111111111111111111111.json", "/stremio/meta/series/torrplay:1111111111111111111111111111111111111111.json"},
+		{"/stremio/stream/movie/torrplay:1111111111111111111111111111111111111111:0.json", "/stremio/stream/movie/torrplay:1111111111111111111111111111111111111111:0.json"},
+		{"/stremio/play/1111111111111111111111111111111111111111/0/video.mp4", "/stremio/play/1111111111111111111111111111111111111111/0/video.mp4"},
+		{"/stremio/secretToken123/manifest.json", "/stremio/[REDACTED]/manifest.json"},
+		{"/stremio/secretToken123/catalog/movie/torrplay_movies.json", "/stremio/[REDACTED]/catalog/movie/torrplay_movies.json"},
+		{"/stremio/secretToken123/meta/movie/torrplay:1111111111111111111111111111111111111111.json", "/stremio/[REDACTED]/meta/movie/torrplay:1111111111111111111111111111111111111111.json"},
+		{"/stremio/secretToken123/stream/movie/torrplay:1111111111111111111111111111111111111111:0.json", "/stremio/[REDACTED]/stream/movie/torrplay:1111111111111111111111111111111111111111:0.json"},
+		{"/stremio/secretToken123/play/1111111111111111111111111111111111111111/0/video.mp4", "/stremio/[REDACTED]/play/1111111111111111111111111111111111111111/0/video.mp4"},
+		{"/stremio/secretToken123", "/stremio/[REDACTED]"},
+		{"/stremio/secretToken123/", "/stremio/[REDACTED]"},
+		{"/stremioother", "/stremioother"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			assert.Equal(t, tc.expected, RedactPathToken(tc.input))
+		})
+	}
+}
+
 type mockDB struct {
 	database.Unimplemented
 	torrents []*database.Torrent
