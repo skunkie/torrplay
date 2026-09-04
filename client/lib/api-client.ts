@@ -90,6 +90,7 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
   const url = `${baseUrl}${path.startsWith('/') ? path : '/' + path}`;
 
   const requestHeaders = new Headers(options.headers);
+  requestHeaders.set('X-Requested-With', 'XMLHttpRequest');
 
   if (typeof window !== 'undefined') {
     const token = localStorage.getItem('jwt_token');

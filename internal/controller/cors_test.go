@@ -75,3 +75,20 @@ func TestNormalizeOrigin(t *testing.T) {
 		})
 	}
 }
+
+func TestCORSAllowedHeaders(t *testing.T) {
+	ctrl := &Controller{settings: &api.Settings{}}
+	handler := ctrl.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/settings", http.NoBody)
+	req.Header.Set("Origin", "http://localhost:3000")
+	req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+	req.Header.Set("Access-Control-Request-Headers", "X-Requested-With")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Header().Get("Access-Control-Allow-Headers"), "X-Requested-With")
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers"
+	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
@@ -43,6 +44,8 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 		err = dbClient.UpdateSettings(database.FromAPISettings(c.settings))
 		require.NoError(t, err)
 	}
+
+	c.SetupRouter()
 
 	cleanup := func() {
 		c.Shutdown()
@@ -407,5 +410,45 @@ func TestCreateToken(t *testing.T) {
 		rr := httptest.NewRecorder()
 		controller.CreateToken(rr, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader([]byte("invalid json"))))
 		require.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+}
+
+func TestBasicAuthWWWAuthenticateSuppression(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{
+			Enabled:  utils.Ptr(true),
+			Type:     utils.Ptr(api.Basic),
+			Username: utils.Ptr("admin"),
+			Password: utils.Ptr("password"),
+		}
+	})
+	defer cleanup()
+
+	t.Run("omitted X-Requested-With header sends standard Basic challenge", func(t *testing.T) {
+		rr := testutil.NewRequest().Get("/api/v1/torrents").GoWithHTTPHandler(t, controller.router).Recorder
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Equal(t, `Basic realm="TorrPlay"`, rr.Header().Get("WWW-Authenticate"))
+	})
+
+	t.Run("X-Requested-With: XMLHttpRequest sends x-Basic challenge", func(t *testing.T) {
+		rr := testutil.NewRequest().
+			Get("/api/v1/torrents").
+			WithHeader("X-Requested-With", "XMLHttpRequest").
+			GoWithHTTPHandler(t, controller.router).Recorder
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Equal(t, `x-Basic realm="TorrPlay"`, rr.Header().Get("WWW-Authenticate"))
+	})
+
+	t.Run("Bearer auth retains Bearer challenge even with XMLHttpRequest", func(t *testing.T) {
+		controller.mu.Lock()
+		controller.settings.Auth.Type = utils.Ptr(api.Bearer)
+		controller.mu.Unlock()
+
+		rr := testutil.NewRequest().
+			Get("/api/v1/torrents").
+			WithHeader("X-Requested-With", "XMLHttpRequest").
+			GoWithHTTPHandler(t, controller.router).Recorder
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Equal(t, `Bearer realm="TorrPlay"`, rr.Header().Get("WWW-Authenticate"))
 	})
 }

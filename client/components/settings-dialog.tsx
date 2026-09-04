@@ -137,6 +137,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         try {
           const response = await fetch(`${apiUrl}/api/v1/settings`, {
             signal: controller.signal,
+            headers: {
+              'X-Requested-With': 'XMLHttpRequest',
+            },
           });
           if (!response.ok)
             throw new Error(`Server responded with status: ${response.status}`);

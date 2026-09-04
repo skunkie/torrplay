@@ -144,6 +144,30 @@ describe('AuthContext', () => {
     expect(result.current.isAuthenticated).toBe(false);
   });
 
+  it('detects switch from bearer to basic via 401 with x-Basic WWW-Authenticate header and clears tokens', async () => {
+    localStorage.setItem('jwt_token', 'jwt-token');
+
+    vi.mocked(getSettings).mockResolvedValueOnce(
+      buildTestSettings({ enabled: true, type: 'bearer' })
+    );
+
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    await waitFor(() => {
+      expect(result.current.isAuthenticated).toBe(true);
+    });
+
+    act(() => {
+      notifyUnauthorized(
+        new HttpError(401, 'Unauthorized', 'authentication failed', 'x-Basic realm="TorrPlay"')
+      );
+    });
+
+    expect(localStorage.getItem('jwt_token')).toBeNull();
+    expect(result.current.auth?.type).toBe('basic');
+    expect(result.current.isAuthenticated).toBe(false);
+  });
+
   it('clears stale credentials on initial mount when getSettings returns 401 with WWW-Authenticate', async () => {
     localStorage.setItem('basic_auth', 'stale:credentials');
     vi.mocked(getSettings).mockRejectedValueOnce(
