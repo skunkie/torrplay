@@ -421,6 +421,82 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/torrents/{hash}/preload:
+    put:
+      tags:
+        - v1
+      summary: Start or update torrent preloading.
+      description: Declares the active file being preloaded for immediate streaming. Idempotent if called repeatedly for the same file.
+      operationId: putTorrentPreload
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      requestBody:
+        description: File to preload.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreloadRequest"
+      responses:
+        "200":
+          description: Preload started or already active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreloadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    get:
+      tags:
+        - v1
+      summary: Get torrent preload status.
+      description: Returns the current preloading state, target size, and buffer progress for the torrent.
+      operationId: getTorrentPreload
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      responses:
+        "200":
+          description: Preload status retrieved successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreloadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    delete:
+      tags:
+        - v1
+      summary: Cancel active torrent preload.
+      description: Cancels active preload workers and releases boundary protections for the torrent.
+      operationId: deleteTorrentPreload
+      parameters:
+        - $ref: "#/components/parameters/Hash"
+      responses:
+        "204":
+          description: Preload canceled or inactive.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /api/v1/stream/{hash}:
     get:
       tags:
@@ -1445,6 +1521,7 @@ components:
         - pieces
         - total_pieces
         - total_size
+        - written_bytes
       properties:
         active_peers:
           type: integer
@@ -1569,6 +1646,12 @@ components:
           description: Total size of all managed pieces in bytes.
           minimum: 0
           example: 104857600
+        written_bytes:
+          type: integer
+          format: int64
+          description: For memory storage, unique bytes written into currently resident piece buffers. For file storage, torrent bytes completed on disk.
+          minimum: 0
+          example: 26214400
 
     ReaderInfo:
       type: object
@@ -1991,6 +2074,64 @@ components:
         uptime: 86400
         version: "1.0.0"
 
+    PreloadRequest:
+      type: object
+      description: Torrent file preload request parameters. File index takes precedence when both file_index and file_path are supplied. If both are omitted, file index 0 is preloaded.
+      properties:
+        file_index:
+          type: integer
+          description: 0-based file index within the torrent.
+          example: 0
+        file_path:
+          type: string
+          description: Relative path of the file to preload within the torrent.
+          example: "Sintel.mp4"
+
+    PreloadResponse:
+      type: object
+      description: Torrent file preload status and progress.
+      required:
+        - file_index
+        - target_bytes
+        - completed_bytes
+        - progress
+        - status
+      properties:
+        file_index:
+          type: integer
+          minimum: -1
+          description: 0-based index of the file currently preloaded, or -1 when idle or when readiness applies to the fully downloaded torrent rather than one file.
+          example: 0
+        file_path:
+          type: string
+          description: Path of the file currently preloaded.
+          example: "Sintel.mp4"
+        target_bytes:
+          type: integer
+          format: int64
+          description: Target buffer size in bytes for head and tail preloading.
+          minimum: 0
+          example: 31457280
+        completed_bytes:
+          type: integer
+          format: int64
+          description: Number of bytes completed toward the target. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
+          minimum: 0
+          example: 10485760
+        progress:
+          type: number
+          format: float
+          description: Preload completion fraction between 0.0 and 1.0.
+          example: 0.33
+        status:
+          type: string
+          description: Current preload status.
+          enum:
+            - "idle"
+            - "preloading"
+            - "ready"
+          example: "preloading"
+
     SystemMetrics:
       type: object
       required:
@@ -2019,6 +2160,10 @@ components:
       required:
         - hash
       properties:
+        action:
+          type: string
+          description: Action to perform (e.g. get).
+          example: "get"
         hash:
           type: string
           description: Torrent info hash.
@@ -2030,6 +2175,8 @@ components:
       description: TorrServer cache statistics response.
       required:
         - Capacity
+        - Filled
+        - Hash
         - Pieces
         - PiecesCount
         - PiecesLength
@@ -2040,6 +2187,15 @@ components:
           format: int64
           description: Total cache capacity in bytes.
           example: 1073741824
+        Filled:
+          type: integer
+          format: int64
+          description: Sum of Size across the returned Pieces.
+          example: 52428800
+        Hash:
+          type: string
+          description: Torrent info hash.
+          example: "08ada5a7a6183aae1e09d831df6748d566095a10"
         Pieces:
           type: object
           additionalProperties:
@@ -2059,6 +2215,8 @@ components:
           items:
             $ref: "#/components/schemas/TSReaderInfo"
           description: Active read operations on the cache.
+        Torrent:
+          $ref: "#/components/schemas/TSTorrentResponse"
 
     TSPieceInfo:
       type: object
@@ -2066,7 +2224,9 @@ components:
       required:
         - Id
         - Length
+        - Size
         - Completed
+        - Priority
       properties:
         Id:
           type: integer
@@ -2079,40 +2239,46 @@ components:
           description: Piece size in bytes.
           minimum: 0
           example: 1048576
+        Size:
+          type: integer
+          format: int64
+          description: Cached piece size in bytes.
+          minimum: 0
+          example: 1048576
         Completed:
           type: boolean
           description: Whether the piece is complete.
           example: true
         Priority:
           type: integer
-          description: Piece priority (higher is more important).
+          description: Piece priority.
           minimum: 0
           default: 0
-          example: 1
+          example: 0
 
     TSReaderInfo:
       type: object
       description: TorrServer reader information.
       required:
-        - reader
-        - start
-        - end
+        - End
+        - Reader
+        - Start
       properties:
-        reader:
-          type: integer
-          description: Current reader piece index position.
-          minimum: 0
-          example: 12
-        start:
-          type: integer
-          description: Start piece index of the read window.
-          minimum: 0
-          example: 10
-        end:
+        End:
           type: integer
           description: End piece index of the read window.
           minimum: 0
           example: 20
+        Reader:
+          type: integer
+          description: Current reader piece index position.
+          minimum: 0
+          example: 12
+        Start:
+          type: integer
+          description: Start piece index of the read window.
+          minimum: 0
+          example: 10
 
     TSTorrentAddFile:
       type: object
@@ -2264,6 +2430,10 @@ components:
               format: int64
             upload_speed:
               type: number
+              format: double
+              description: Upload speed in bytes per second.
+              minimum: 0
+              example: 512000.0
 
     TSTorrentFileStat:
       allOf:

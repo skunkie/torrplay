@@ -439,6 +439,7 @@ func TestGetTorrentStatistics(t *testing.T) {
 	assert.GreaterOrEqual(t, result.ActivePeers, 0)
 	assert.GreaterOrEqual(t, result.BytesRead, int64(0))
 	assert.GreaterOrEqual(t, result.BytesWritten, int64(0))
+	assert.GreaterOrEqual(t, result.WrittenBytes, int64(0))
 	assert.GreaterOrEqual(t, result.PiecesComplete, 0)
 }
 
@@ -1472,6 +1473,42 @@ func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
 
 	assert.True(t, exists, "active torrent should not be dropped during cleanup")
 	assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
+}
+
+func TestController_CleanupExpiredTorrents_ReleasesCompletedPreload(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.Hash{1}
+	otherHash := metainfo.Hash{2}
+	ctrl.torrentTracker.mu.Lock()
+	ctrl.torrentTracker.torrents[ih] = torrentInfo{
+		lastUsedAt:  time.Now().Add(-4 * time.Hour),
+		storageType: api.Memory,
+	}
+	ctrl.torrentTracker.mu.Unlock()
+
+	ctrl.streamPool.SetReadaheadBudget(1000)
+	require.Equal(t, int64(1000), ctrl.streamPool.ReservePreloadBudget(ih, 1000))
+	task := &preloadTask{
+		cancel: func() {},
+		clearProtection: func() {
+			ctrl.streamPool.ReleasePreloadBudget(ih)
+		},
+	}
+	task.ready.Store(true)
+	ctrl.preloads.Store(ih, task)
+
+	ctrl.cleanupExpiredTorrents()
+
+	_, preloading := ctrl.preloads.Load(ih)
+	assert.False(t, preloading)
+	ctrl.torrentTracker.mu.RLock()
+	_, tracked := ctrl.torrentTracker.torrents[ih]
+	ctrl.torrentTracker.mu.RUnlock()
+	assert.False(t, tracked)
+	assert.Equal(t, int64(1000), ctrl.streamPool.ReservePreloadBudget(otherHash, 1000))
+	ctrl.streamPool.ReleasePreloadBudget(otherHash)
 }
 
 func TestUpdateTorrent_NoConfiguredFileStorage_Unlocks(t *testing.T) {
