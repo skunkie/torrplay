@@ -34,6 +34,10 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		api.HTTPError(w, fmt.Sprintf("failed to read request, %v", err), http.StatusBadRequest)
 		return
 	}
+	if utils.Val(req.Action) != "get" {
+		api.HTTPError(w, "invalid action", http.StatusBadRequest)
+		return
+	}
 
 	ih, err := utils.HashFromHexString(req.Hash)
 	if err != nil {
@@ -41,27 +45,91 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if t, err := c.db.GetTorrent(ih); err != nil {
-		if !errors.Is(err, database.ErrTorrentNotFound) {
-			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	var dbTorrent *database.Torrent
+	if t, err := c.db.GetTorrent(ih); err == nil {
+		dbTorrent = t
+	} else if !errors.Is(err, database.ErrTorrentNotFound) {
+		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	c.mu.RLock()
+	to, hasClientTorrent := c.client.Torrent(ih)
+	c.mu.RUnlock()
+
+	if dbTorrent == nil && !hasClientTorrent {
+		api.HTTPError(w, "torrent not found", http.StatusNotFound)
+		return
+	}
+
+	if dbTorrent != nil && *dbTorrent.Storage == api.File {
+		// File storage: pieces are written directly to disk, not tracked by
+		// the in-memory storage client. Build piece state from the torrent
+		// engine when the torrent is active and its info is available;
+		// otherwise return an empty cache response compatible with TorrServer.
+		w.Header().Set("Content-Type", "application/json")
+		if !hasClientTorrent || to == nil || to.Info() == nil {
+			if err := json.NewEncoder(w).Encode(struct{}{}); err != nil {
+				api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+			}
 			return
 		}
-	} else if *t.Storage == api.File {
-		api.HTTPError(w, "torrent uses file storage", http.StatusBadRequest)
+
+		c.mu.RLock()
+		pool := c.streamPool
+		c.mu.RUnlock()
+
+		var fileReaders []api.TSReaderInfo
+		if pool != nil {
+			rps := pool.ReaderPositions(ih)
+			fileReaders = make([]api.TSReaderInfo, len(rps))
+			for i, ri := range rps {
+				fileReaders[i] = api.TSReaderInfo{Start: ri.Start, Reader: ri.Position, End: ri.End}
+			}
+		}
+
+		numPieces := to.NumPieces()
+		pieceMap := make(map[string]api.TSPieceInfo, numPieces)
+		var fileFilled int64
+		for i := range numPieces {
+			ps := to.PieceState(i)
+			pieceLen := to.Info().Piece(i).Length()
+			pieceInfo := tsPieceInfoFromState(i, pieceLen, ps)
+			fileFilled += pieceInfo.Size
+			pieceMap[strconv.Itoa(i)] = pieceInfo
+		}
+
+		fileResp := api.TSCacheResponse{
+			Capacity:     to.Length(),
+			Filled:       fileFilled,
+			Hash:         ih.HexString(),
+			Pieces:       pieceMap,
+			PiecesCount:  numPieces,
+			PiecesLength: to.Info().PieceLength,
+			Readers:      fileReaders,
+		}
+
+		tsResp := c.buildTSTorrentResponse(database.ToAPITorrent(dbTorrent), to)
+		fileResp.Torrent = &tsResp
+
+		if err := json.NewEncoder(w).Encode(fileResp); err != nil {
+			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
 
 	info, err := c.storageClient.TorrentStats(ih)
-	if err != nil {
-		api.HTTPError(w, "torrent memory stats unavailable", http.StatusBadRequest)
+	if err != nil || info.TotalPieces == 0 || len(info.Pieces) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(struct{}{}); err != nil {
+			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
-	if info.TotalPieces == 0 || len(info.Pieces) == 0 {
-		api.HTTPError(w, "torrent has no pieces cached yet", http.StatusBadRequest)
-		return
-	}
+
 	c.mu.RLock()
 	pool := c.streamPool
+	capacity := utils.Val(c.settings.MaxMemory)
 	c.mu.RUnlock()
 
 	var apiReaders []api.TSReaderInfo
@@ -74,34 +142,86 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(apiReaders) == 0 {
 		// Fallback: if no active readers, use the full piece range.
+		minPiece := info.Pieces[0].Index
+		maxPiece := info.Pieces[0].Index
+		for _, p := range info.Pieces[1:] {
+			if p.Index < minPiece {
+				minPiece = p.Index
+			}
+			if p.Index > maxPiece {
+				maxPiece = p.Index
+			}
+		}
 		apiReaders = []api.TSReaderInfo{
 			{
-				Reader: info.Pieces[0].Index,
-				Start:  info.Pieces[0].Index,
-				End:    info.Pieces[len(info.Pieces)-1].Index,
+				Reader: minPiece,
+				Start:  minPiece,
+				End:    maxPiece,
 			},
 		}
 	}
 
+	piecesLength := info.Pieces[0].SizeBytes
+	if hasClientTorrent && to != nil && to.Info() != nil {
+		piecesLength = to.Info().PieceLength
+	}
+
 	resp := api.TSCacheResponse{
-		Capacity:     info.TrackedBytes,
+		Capacity:     capacity,
+		Filled:       info.WrittenBytes,
+		Hash:         ih.HexString(),
 		Pieces:       make(map[string]api.TSPieceInfo, len(info.Pieces)),
 		PiecesCount:  info.TotalPieces,
-		PiecesLength: info.Pieces[0].SizeBytes,
+		PiecesLength: piecesLength,
 		Readers:      apiReaders,
 	}
 
 	for _, piece := range info.Pieces {
+		var pieceSize int64
+		if piece.Resident {
+			pieceSize = piece.WrittenBytes
+		}
+		var priority int
+		if hasClientTorrent && to != nil {
+			priority = int(to.PieceState(piece.Index).Priority)
+		}
 		resp.Pieces[strconv.Itoa(piece.Index)] = api.TSPieceInfo{
 			Completed: piece.Complete,
 			ID:        piece.Index,
 			Length:    piece.SizeBytes,
+			Priority:  priority,
+			Size:      pieceSize,
 		}
+	}
+
+	if hasClientTorrent && to != nil {
+		var t *api.Torrent
+		if dbTorrent != nil {
+			t = database.ToAPITorrent(dbTorrent)
+		} else {
+			t = torrentToMetadata(to)
+		}
+		tsResp := c.buildTSTorrentResponse(t, to)
+		resp.Torrent = &tsResp
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func tsPieceInfoFromState(id int, length int64, state torrent.PieceState) api.TSPieceInfo {
+	var size int64
+	if state.Complete {
+		size = length
+	}
+	return api.TSPieceInfo{
+		Completed: state.Complete,
+		ID:        id,
+		Length:    length,
+		Priority:  int(state.Priority),
+		Size:      size,
 	}
 }
 
@@ -161,7 +281,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	}
 
 	if utils.Val(params.Play) {
-		c.TSPlay(w, r, ih, *params.Index, api.TSPlayParams{})
+		c.TSPlay(w, r, ih, utils.Val(params.Index), api.TSPlayParams{})
 		return
 	}
 
@@ -181,11 +301,18 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 		}
 
 		// If torrent is already fully downloaded, no need to download pieces.
-		if to.BytesCompleted() == to.Length() {
-			return
+		if to.BytesCompleted() < to.Length() {
+			c.startPreloadByFileIndex(to, params.Index)
 		}
 
-		to.DownloadPieces(0, 2)
+		if utils.Val(params.Stat) {
+			t := torrentToMetadata(to)
+			resp := c.buildTSTorrentResponse(t, to)
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+			}
+		}
 		return
 	}
 
@@ -505,6 +632,14 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+const (
+	tsStatGettingInfo = 1
+	tsStatPreload     = 2
+	tsStatWorking     = 3
+	tsStatClosed      = 4
+	tsStatInDB        = 5
+)
+
 func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent) api.TSTorrentResponse {
 	fileStats := make([]api.TSTorrentFileStat, 0, len(t.Files))
 	for idx, f := range t.Files {
@@ -517,14 +652,22 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 		})
 	}
 
+	title := utils.Val(t.Title)
+	if title == "" {
+		title = t.Name
+	}
+
 	resp := api.TSTorrentResponse{
-		Category:  t.Category,
-		FileStats: &fileStats,
-		Hash:      t.Hash.HexString(),
-		Name:      t.Name,
-		Poster:    t.Poster,
-		Title:     *t.Title,
-		Timestamp: utils.Val(t.CreatedAt).Unix(),
+		Category:    t.Category,
+		FileStats:   &fileStats,
+		Hash:        t.Hash.HexString(),
+		Name:        t.Name,
+		Poster:      t.Poster,
+		Title:       title,
+		Timestamp:   utils.Val(t.CreatedAt).Unix(),
+		TorrentSize: t.TotalSize,
+		Stat:        tsStatInDB,
+		StatString:  "Torrent in db",
 	}
 
 	if to != nil {
@@ -553,20 +696,62 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 		resp.PiecesDirtiedBad = stats.PiecesDirtiedBad
 		resp.PiecesDirtiedGood = stats.PiecesDirtiedGood
 		resp.TotalPeers = stats.TotalPeers
+		resp.WrittenBytes = stats.WrittenBytes
 
 		peers := to.PeerConns()
 		var totalDownloadRate float64
+		var totalUploadRate float64
 		for _, peer := range peers {
-			totalDownloadRate += peer.Stats().DownloadRate
+			pStats := peer.Stats()
+			totalDownloadRate += pStats.DownloadRate
+			totalUploadRate += pStats.LastWriteUploadRate
 		}
 		resp.DownloadSpeed = totalDownloadRate
-		resp.LoadedSize = stats.InMemorySize
+		resp.UploadSpeed = totalUploadRate
+		resp.LoadedSize = stats.CompletedSize
 		resp.PreloadSize = stats.CompletedSize
 		resp.PreloadedBytes = stats.CompletedSize
-		resp.TorrentSize = to.Length()
+
+		if to.Info() == nil {
+			resp.Stat = tsStatGettingInfo
+			resp.StatString = "Torrent getting info"
+		} else if val, preloading := c.preloads.Load(to.InfoHash()); preloading {
+			resp.TorrentSize = to.Length()
+			resp.Stat = tsStatPreload
+			resp.StatString = "Torrent preload"
+			if p, ok := val.(*preloadTask); ok && p != nil {
+				resp.PreloadSize = p.targetBytes
+				resp.PreloadedBytes = p.progressBytes()
+			}
+		} else {
+			resp.TorrentSize = to.Length()
+			resp.Stat = tsStatWorking
+			resp.StatString = "Torrent working"
+		}
 	}
 
 	return resp
+}
+
+func (c *Controller) startPreloadByFileIndex(to *torrent.Torrent, fileIndex *int) {
+	if to == nil || to.Info() == nil {
+		return
+	}
+
+	files := to.Files()
+	if len(files) == 0 {
+		return
+	}
+
+	idx := 0
+	if fileIndex != nil && *fileIndex > 0 {
+		idx = *fileIndex - 1
+	}
+	if idx < 0 || idx >= len(files) {
+		idx = 0
+	}
+
+	c.startPreload(to, files[idx], idx)
 }
 
 func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int, error) {
