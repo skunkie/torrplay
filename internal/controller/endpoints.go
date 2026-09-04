@@ -1197,6 +1197,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 
 	if isFileStorage {
 		resp.CompletedSize = to.BytesCompleted()
+		resp.WrittenBytes = to.BytesCompleted()
 		resp.InMemory = 0
 		resp.InMemorySize = 0
 		memoryStats := c.storageClient.MemoryStats()
@@ -1237,6 +1238,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 
 		resp.Pieces = pieces
 		resp.CompletedSize = storageStats.CompletedBytes
+		resp.WrittenBytes = storageStats.WrittenBytes
 		resp.InMemory = storageStats.ResidentPieces
 		resp.InMemorySize = storageStats.ResidentBytes
 		resp.MemoryStats = storageMemoryStats(storageStats.Global)
@@ -1322,6 +1324,7 @@ func (c *Controller) deleteTorrentLocked(ih metainfo.Hash) error {
 		return api.NewError(dbErr.Error(), st)
 	}
 
+	c.cancelPreload(ih)
 	if isClientTorrent {
 		to.Drop()
 		<-to.Closed()
@@ -1643,6 +1646,12 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	mode := stream.MemoryStorage
 	if isFileStorage {
 		mode = stream.FileStorage
+	}
+	// Actual playback supersedes any speculative preload for this torrent.
+	// Cancel it before acquiring the playback reader so its workers and cache
+	// leases cannot compete with the stream under memory pressure.
+	if _, ok := c.preloads.Load(ih); ok {
+		c.cancelPreload(ih)
 	}
 	reader, release, err := pool.Acquire(file, mode)
 	if err != nil {
