@@ -647,6 +647,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         torrent={selectedTorrent}
         open={modal === 'play' && !!selectedTorrent}
         onOpenChange={() => updateModal(null)}
+        enablePreload={true}
       />
 
       {handlingType && (

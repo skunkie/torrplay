@@ -183,6 +183,11 @@ export const api = {
     const response = await apiFetch(path, options);
     return handleResponse<T>(response);
   },
+  put: async <T>(path: string, data: unknown, contentType?: string): Promise<T> => {
+    const options = buildRequestOptions('PUT', data, contentType);
+    const response = await apiFetch(path, options);
+    return handleResponse<T>(response);
+  },
   patch: async <T>(path: string, data: unknown): Promise<T> => {
     const options = buildRequestOptions('PATCH', data);
     const response = await apiFetch(path, options);

@@ -149,7 +149,12 @@ interface VideoPlayerControlsProps {
   playlistNavigation?: {
     onPrevious?: () => void,
     onNext?: () => void
-  }
+  },
+  preloadBadge?: {
+    progress: number,
+    completedBytes?: number,
+    targetBytes?: number
+  } | null
 }
 
 export function VideoPlayerControls({
@@ -165,18 +170,39 @@ export function VideoPlayerControls({
   selectedSubtitleTrack,
   onSelectSubtitleTrack,
   playlistNavigation,
+  preloadBadge,
 }: VideoPlayerControlsProps) {
   return (
     <>
+      {preloadBadge && (
+        <div
+          data-testid='player-preload-badge'
+          className='pointer-events-none absolute top-2 sm:top-3 left-2 sm:left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/70 border border-white/10 text-xs font-medium text-white/90 shadow-md backdrop-blur-md'
+        >
+          <span className='relative flex h-2 w-2'>
+            <span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75' />
+            <span className='relative inline-flex rounded-full h-2 w-2 bg-sky-500' />
+          </span>
+          <span>Buffering {Math.min(100, Math.max(0, Math.round(preloadBadge.progress * 100)))}%</span>
+        </div>
+      )}
       <div className='pointer-events-none absolute inset-0 z-50 flex h-full w-full items-center justify-center'>
         <Spinner.Root
-          className='text-white opacity-0 transition-opacity duration-200 ease-linear media-buffering:animate-spin media-buffering:opacity-100'
+          className={`text-white transition-opacity duration-200 ease-linear ${
+            preloadBadge
+              ? 'animate-spin opacity-100'
+              : 'opacity-0 media-buffering:animate-spin media-buffering:opacity-100'
+          }`}
           size={84}
         >
-          <Spinner.Track className='opacity-25'
-            width={8} />
-          <Spinner.TrackFill className='opacity-75'
-            width={8} />
+          <Spinner.Track
+            className='opacity-25'
+            width={8}
+          />
+          <Spinner.TrackFill
+            className='opacity-75'
+            width={8}
+          />
         </Spinner.Root>
       </div>
       <div className='absolute inset-0 z-10 w-full opacity-0 group-data-[controls]:opacity-100 transition-opacity'>

@@ -174,4 +174,31 @@ describe('TorrentPlayerDialogLayout', () => {
 
     expect(handleExit).toHaveBeenCalled();
   });
+
+  it('renders preloading badge inside video player when preloadBadge is provided', () => {
+    render(
+      <TorrentPlayerDialogLayout
+        open={true}
+        onOpenChange={vi.fn()}
+        videoFiles={mockVideoFiles}
+        selectedFile={mockVideoFiles[0]}
+        setSelectedFile={vi.fn()}
+        isPlayerVisible={true}
+        videoPlayerOptions={{
+          src: { src: 'http://test/video.mp4', type: 'video/mp4' },
+          title: 'episode1.mp4',
+          autoPlay: true,
+        }}
+        preloadBadge={{
+          progress: 0.7,
+          completedBytes: 7000000,
+          targetBytes: 10000000,
+        }}
+      />
+    );
+
+    const badge = screen.getByTestId('player-preload-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent('Buffering 70%');
+  });
 });

@@ -38,6 +38,7 @@ const makeStats = (overrides?: Partial<TorrentStats>): TorrentStats => ({
   chunksReadWasted: 10,
   chunksWritten: 50,
   completedSize: 500,
+  writtenBytes: 450,
   connectedSeeders: 3,
   halfOpenPeers: 2,
   inMemory: 5,
@@ -122,6 +123,7 @@ describe('TorrentStatsDialogLayout', () => {
     expect(screen.getByText('Test Movie')).toBeInTheDocument();
     expect(screen.getByText('1000 Bytes')).toBeInTheDocument();
     expect(screen.getByText('500 Bytes')).toBeInTheDocument();
+    expect(screen.getByText('450 Bytes')).toBeInTheDocument();
     expect(screen.getByText('250 Bytes')).toBeInTheDocument();
   });
 

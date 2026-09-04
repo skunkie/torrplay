@@ -3,7 +3,15 @@
 // SPDX-License-Identifier: MIT
 
 import { api, getApiBaseUrl } from '../api-client';
-import type { Torrent, TorrentAdd, TorrentAddWithFile, TorrentsResponse, TorrentUpdate } from '../types/api';
+import type {
+  PreloadRequest,
+  PreloadResponse,
+  Torrent,
+  TorrentAdd,
+  TorrentAddWithFile,
+  TorrentsResponse,
+  TorrentUpdate,
+} from '../types/api';
 
 export async function getTorrents(params?: {
   categories?: string[],
@@ -95,4 +103,16 @@ export function getTorrentStreamUrl(hash: string, filepath: string): string {
     if (playbackToken) url += `&token=${encodeURIComponent(playbackToken)}`;
   }
   return url;
+}
+
+export async function startPreload(hash: string, data: PreloadRequest): Promise<PreloadResponse> {
+  return api.put<PreloadResponse>(`/api/v1/torrents/${hash}/preload`, data);
+}
+
+export async function getPreload(hash: string): Promise<PreloadResponse> {
+  return api.get<PreloadResponse>(`/api/v1/torrents/${hash}/preload`);
+}
+
+export async function cancelPreload(hash: string): Promise<void> {
+  return api.delete<void>(`/api/v1/torrents/${hash}/preload`);
 }
