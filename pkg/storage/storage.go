@@ -52,6 +52,9 @@ type Client struct {
 	activeRanges map[activeRangeKey]activeRange
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
+	// fileBoundaries tracks head and tail piece ranges for media files being streamed
+	// or preloaded, protecting container metadata from standard LRU eviction.
+	fileBoundaries map[activeRangeKey]fileBoundary
 	// lru is the global least-recently-used list for all pieces.
 	lru       *list.List
 	logger    *slog.Logger
@@ -88,6 +91,8 @@ type PieceStats struct {
 	Resident bool
 	// SizeBytes is the expected piece size in bytes.
 	SizeBytes int64
+	// WrittenBytes is the number of bytes written into the resident piece buffer.
+	WrittenBytes int64
 }
 
 // TorrentStats contains storage statistics for a managed torrent.
@@ -106,6 +111,8 @@ type TorrentStats struct {
 	TrackedBytes int64
 	// TotalPieces is the torrent's total piece count from metadata.
 	TotalPieces int
+	// WrittenBytes is the total number of bytes written into resident piece buffers.
+	WrittenBytes int64
 }
 
 // pieceKey is a unique identifier for a piece within a specific torrent.
@@ -126,7 +133,22 @@ type pieceData struct {
 	mu            sync.RWMutex
 	pieceSize     int64 // The expected size of the piece.
 	torrent       *torrentState
+	writtenBytes  int64 // Unique bytes covered by writtenRanges.
+	writtenRanges []byteRange
 }
+
+type byteRange struct {
+	start int64
+	end   int64
+}
+
+type evictionProtection uint8
+
+const (
+	protectActiveAndBoundaries evictionProtection = iota
+	protectActiveOnly
+	protectNone
+)
 
 // activeRangeKey uniquely identifies a reader's active range within a torrent.
 type activeRangeKey struct {
@@ -140,6 +162,16 @@ type activeRangeKey struct {
 type activeRange struct {
 	endPiece   int
 	startPiece int
+}
+
+// fileBoundary stores the head and tail piece-index ranges [headStart, headEnd]
+// and [tailStart, tailEnd] (inclusive) for a media file, protecting container
+// metadata and seek indexes from standard LRU eviction throughout playback.
+type fileBoundary struct {
+	headEnd   int
+	headStart int
+	tailEnd   int
+	tailStart int
 }
 
 // torrentState holds the state specific to a single torrent.
@@ -160,13 +192,14 @@ func New(maxMemory int64, logger *slog.Logger) *Client {
 	}
 
 	c := &Client{
-		maxMemory:    maxMemory,
-		pieces:       make(map[pieceKey]*pieceData),
-		torrents:     make(map[metainfo.Hash]*torrentState),
-		activeRanges: make(map[activeRangeKey]activeRange),
-		lru:          list.New(),
-		closeCh:      make(chan struct{}),
-		logger:       logger,
+		maxMemory:      maxMemory,
+		pieces:         make(map[pieceKey]*pieceData),
+		torrents:       make(map[metainfo.Hash]*torrentState),
+		activeRanges:   make(map[activeRangeKey]activeRange),
+		fileBoundaries: make(map[activeRangeKey]fileBoundary),
+		lru:            list.New(),
+		closeCh:        make(chan struct{}),
+		logger:         logger,
 	}
 	return c
 }
@@ -192,6 +225,7 @@ func (c *Client) Close() error {
 	c.pieces = make(map[pieceKey]*pieceData)
 	c.torrents = make(map[metainfo.Hash]*torrentState)
 	c.activeRanges = make(map[activeRangeKey]activeRange)
+	c.fileBoundaries = make(map[activeRangeKey]fileBoundary)
 	c.lru.Init()
 	c.used = 0
 
@@ -351,10 +385,11 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 		pd.mu.RLock()
 
 		pieceStats := PieceStats{
-			Index:     key.index,
-			SizeBytes: pd.pieceSize,
-			Complete:  pd.complete,
-			Resident:  pd.data != nil,
+			Index:        key.index,
+			SizeBytes:    pd.pieceSize,
+			Complete:     pd.complete,
+			Resident:     pd.data != nil,
+			WrittenBytes: pd.writtenBytes,
 		}
 
 		stats.Pieces = append(stats.Pieces, pieceStats)
@@ -367,6 +402,7 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 		if pd.data != nil {
 			stats.ResidentPieces++
 			stats.ResidentBytes += int64(len(pd.data))
+			stats.WrittenBytes += pd.writtenBytes
 		}
 
 		pd.mu.RUnlock()
@@ -424,6 +460,13 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 // SetMaxMemory updates the maximum memory limit for the storage client.
 // If the new limit is lower than current usage, an eviction will be triggered
 // to bring memory usage within the new limit. Negative values are clamped to 0.
+//
+// Unlike EvictTo (which respects active-range protections and returns
+// ErrEvictionTargetNotReached if protected pieces prevent reaching the target),
+// SetMaxMemory enforces an absolute process memory ceiling and will perform
+// emergency eviction of protected pieces if necessary to bring memory usage
+// within the configured limit.
+//
 // It returns ErrClientClosed after Close and ErrInsufficientMemory if the new
 // limit cannot be enforced. This operation is thread-safe.
 func (c *Client) SetMaxMemory(limitBytes int64) error {
@@ -526,18 +569,28 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 
 		beforeEvict := c.used
 
-		// Standard eviction: evict pieces skipping active reader ranges.
-		reusable = c.evictDownToInternalLocked(target, true, size)
+		// Standard eviction preserves active playback ranges and file boundaries.
+		reusable = c.evictDownToInternalLocked(target, protectActiveAndBoundaries, size)
 
-		// Emergency fallback: if memory is still above target because active ranges
-		// protected too many pieces, evict oldest LRU pieces regardless of active range
-		// so an incoming piece write does not fail and permanently kill data download.
+		// Boundary metadata yields before active playback ranges. This keeps current
+		// playback data protected when the combined leases exceed the cache budget.
 		if c.used+size > c.maxMemory {
 			reuseSize := size
 			if reusable != nil {
 				reuseSize = 0
 			}
-			if emergencyReusable := c.evictDownToInternalLocked(target, false, reuseSize); reusable == nil {
+			if boundaryReusable := c.evictDownToInternalLocked(target, protectActiveOnly, reuseSize); reusable == nil {
+				reusable = boundaryReusable
+			}
+		}
+
+		// Only an absolute lack of non-active capacity may evict an active range.
+		if c.used+size > c.maxMemory {
+			reuseSize := size
+			if reusable != nil {
+				reuseSize = 0
+			}
+			if emergencyReusable := c.evictDownToInternalLocked(target, protectNone, reuseSize); reusable == nil {
 				reusable = emergencyReusable
 			}
 		}
@@ -590,10 +643,15 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 		totalEvicted += size
 	}
 
-	// Remove active ranges for this torrent.
+	// Remove active ranges and file boundaries for this torrent.
 	for key := range c.activeRanges {
 		if key.infoHash == infoHash {
 			delete(c.activeRanges, key)
+		}
+	}
+	for key := range c.fileBoundaries {
+		if key.infoHash == infoHash {
+			delete(c.fileBoundaries, key)
 		}
 	}
 
@@ -611,7 +669,7 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 // is at or below the target. It must be called with the client's mutex held.
 // Pieces inside registered active ranges are skipped and protected from eviction.
 func (c *Client) evictDownToLocked(target int64) {
-	c.evictDownToInternalLocked(target, true, 0)
+	c.evictDownToInternalLocked(target, protectActiveAndBoundaries, 0)
 }
 
 // emergencyEvictDownToLocked is called during allocateMemory when standard eviction
@@ -619,13 +677,16 @@ func (c *Client) evictDownToLocked(target int64) {
 // It evicts the oldest LRU pieces regardless of active range to prevent ErrInsufficientMemory
 // from causing anacrolix/torrent to permanently disable downloading.
 func (c *Client) emergencyEvictDownToLocked(target int64) {
-	c.evictDownToInternalLocked(target, false, 0)
+	c.evictDownToInternalLocked(target, protectActiveOnly, 0)
+	if c.used > target {
+		c.evictDownToInternalLocked(target, protectNone, 0)
+	}
 }
 
 // evictDownToInternalLocked evicts pieces until target is reached. If reuseSize
 // is positive, at most one detached buffer of exactly that length is returned
 // for immediate handoff to an incoming allocation. c.mu must be held.
-func (c *Client) evictDownToInternalLocked(target int64, respectActiveRanges bool, reuseSize int64) []byte {
+func (c *Client) evictDownToInternalLocked(target int64, protection evictionProtection, reuseSize int64) []byte {
 	if c.used <= target {
 		return nil
 	}
@@ -640,22 +701,28 @@ func (c *Client) evictDownToInternalLocked(target int64, respectActiveRanges boo
 		next := e.Prev() // Save the next element before potential removal.
 
 		if pd, ok := c.pieces[key]; ok {
-			pd.mu.RLock()
 			dataLen := len(pd.data)
-			pd.mu.RUnlock()
-
 			if dataLen == 0 {
 				e = next
 				continue
 			}
 
-			if respectActiveRanges {
-				// Skip pieces that are inside any active reader range for this torrent.
-				if c.isPieceInActiveRangeLocked(key) {
+			inActiveRange := c.isPieceInActiveRangeLocked(key)
+			inFileBoundary := c.isPieceInFileBoundaryLocked(key)
+			switch protection {
+			case protectActiveAndBoundaries:
+				if inActiveRange || inFileBoundary {
 					e = next
 					continue
 				}
-			} else if c.logger.Enabled(context.Background(), slog.LevelWarn) && c.isPieceInActiveRangeLocked(key) {
+			case protectActiveOnly:
+				if inActiveRange {
+					e = next
+					continue
+				}
+			case protectNone:
+			}
+			if protection == protectNone && c.logger.Enabled(context.Background(), slog.LevelWarn) && inActiveRange {
 				c.logger.Warn("emergency eviction of active range piece under memory pressure",
 					slog.String("hash", key.infoHash.HexString()),
 					slog.Int("piece", key.index),
@@ -681,7 +748,7 @@ func (c *Client) evictDownToInternalLocked(target int64, respectActiveRanges boo
 	}
 
 	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
-		if respectActiveRanges {
+		if protection == protectActiveAndBoundaries {
 			c.logger.Debug("eviction completed",
 				slog.Int64("target", target),
 				slog.Int64("evicted", evicted),
@@ -697,12 +764,60 @@ func (c *Client) evictDownToInternalLocked(target int64, respectActiveRanges boo
 	return reusable
 }
 
+func (pd *pieceData) recordWrittenRange(start, end int64) {
+	if start >= end {
+		return
+	}
+
+	merged := byteRange{start: start, end: end}
+	ranges := make([]byteRange, 0, len(pd.writtenRanges)+1)
+	inserted := false
+	for _, current := range pd.writtenRanges {
+		switch {
+		case current.end < merged.start:
+			ranges = append(ranges, current)
+		case merged.end < current.start:
+			if !inserted {
+				ranges = append(ranges, merged)
+				inserted = true
+			}
+			ranges = append(ranges, current)
+		default:
+			merged.start = min(merged.start, current.start)
+			merged.end = max(merged.end, current.end)
+		}
+	}
+	if !inserted {
+		ranges = append(ranges, merged)
+	}
+
+	pd.writtenRanges = ranges
+	pd.writtenBytes = 0
+	for _, current := range ranges {
+		pd.writtenBytes += current.end - current.start
+	}
+}
+
 // isPieceInActiveRangeLocked checks whether a piece falls inside any registered
 // active reader range for the given torrent hash. Must be called with c.mu held.
 func (c *Client) isPieceInActiveRangeLocked(key pieceKey) bool {
 	for k, r := range c.activeRanges {
 		if k.infoHash == key.infoHash && key.index >= r.startPiece && key.index <= r.endPiece {
 			return true
+		}
+	}
+	return false
+}
+
+// isPieceInFileBoundaryLocked checks whether a piece falls inside any registered
+// file boundary (head or tail range) for the given torrent hash. Must be called with c.mu held.
+func (c *Client) isPieceInFileBoundaryLocked(key pieceKey) bool {
+	for k, b := range c.fileBoundaries {
+		if k.infoHash == key.infoHash {
+			if (key.index >= b.headStart && key.index <= b.headEnd) ||
+				(key.index >= b.tailStart && key.index <= b.tailEnd) {
+				return true
+			}
 		}
 	}
 	return false
@@ -741,6 +856,37 @@ func (c *Client) ClearActiveRange(infoHash metainfo.Hash, readerID uint64) {
 	delete(c.activeRanges, activeRangeKey{infoHash: infoHash, readerID: readerID})
 
 	c.logger.Debug("cleared active range",
+		slog.String("hash", infoHash.HexString()),
+		slog.Uint64("readerID", readerID))
+}
+
+// SetFileBoundaries registers or updates the head and tail piece-index ranges
+// for a file being streamed or preloaded, protecting those boundary pieces from standard
+// LRU eviction throughout playback.
+func (c *Client) SetFileBoundaries(infoHash metainfo.Hash, readerID uint64, headStart, headEnd, tailStart, tailEnd int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, exists := c.torrents[infoHash]; !exists {
+		return
+	}
+
+	c.fileBoundaries[activeRangeKey{infoHash: infoHash, readerID: readerID}] = fileBoundary{
+		headEnd:   headEnd,
+		headStart: headStart,
+		tailEnd:   tailEnd,
+		tailStart: tailStart,
+	}
+}
+
+// ClearFileBoundaries removes the protected file boundaries for a specific reader.
+func (c *Client) ClearFileBoundaries(infoHash metainfo.Hash, readerID uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.fileBoundaries, activeRangeKey{infoHash: infoHash, readerID: readerID})
+
+	c.logger.Debug("cleared file boundaries",
 		slog.String("hash", infoHash.HexString()),
 		slog.Uint64("readerID", readerID))
 }
@@ -968,6 +1114,7 @@ func (p *pieceImpl) WriteAt(b []byte, off int64) (n int, err error) {
 
 		copy(pd.data[off:], b)
 		n = len(b)
+		pd.recordWrittenRange(off, off+int64(n))
 		pd.mu.Unlock()
 
 		p.touchPiece(pd)
