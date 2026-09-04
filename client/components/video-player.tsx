@@ -14,7 +14,7 @@ import {
   MediaProvider,
   type VideoSrc,
 } from '@vidstack/react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useSubtitleTracks } from '@/hooks/use-subtitle-tracks';
 import {
@@ -42,13 +42,25 @@ export interface VideoPlayerProps {
     onPrevious?: () => void,
     onNext?: () => void
   },
-  internalOnly?: boolean
+  internalOnly?: boolean,
+  preloadBadge?: {
+    progress: number,
+    completedBytes?: number,
+    targetBytes?: number
+  } | null
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();
 const IS_TAURI = isTauri();
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavigation, internalOnly = false }) => {
+const VideoPlayer: React.FC<VideoPlayerProps> = ({
+  options,
+  onExit,
+  playlistNavigation,
+  internalOnly = false,
+  preloadBadge,
+}) => {
+  const isPreloading = !!preloadBadge;
   const player = useRef<MediaPlayerInstance>(null);
   const intentLaunched = useRef(false);
   const [useExternalPlayer, setUseExternalPlayer] = useState(false);
@@ -79,7 +91,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavi
     player,
     sourceKey: streamUrl,
     tracks: options.tracks,
-    enabled: preferenceLoaded && !useExternalPlayer,
+    enabled: preferenceLoaded && !useExternalPlayer && !isPreloading,
     embeddedStreamUrl: isMkv ? streamUrl : undefined,
   });
   const {
@@ -112,7 +124,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavi
   }, [internalOnly]);
 
   useEffect(() => {
-    if (!streamUrl || useExternalPlayer || !isAudioDecodingSupported()) return;
+    if (!streamUrl || useExternalPlayer || !isAudioDecodingSupported() || isPreloading) return;
 
     let cancelled = false;
     probeAudioTracks(streamUrl)
@@ -177,7 +189,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavi
       setAudioTracks([]);
       setIsWasmAudioActive(false);
     };
-  }, [streamUrl, useExternalPlayer]);
+  }, [streamUrl, useExternalPlayer, isPreloading]);
 
   const handleSelectAudioTrack = (index: number) => {
     setSelectedAudioTrack(index);
@@ -337,6 +349,37 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavi
     }
   }, [onExit]);
 
+  const prevPreloadingRef = useRef(isPreloading);
+  const canPlayRef = useRef(false);
+
+  const tryPlay = useCallback(() => {
+    if (!player.current) return;
+    try {
+      if (player.current.state?.canPlay || canPlayRef.current) {
+        const playPromise = player.current.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch(() => {});
+        }
+      }
+    } catch {
+      // Ignored if media not ready or autoplay blocked
+    }
+  }, []);
+
+  const handleCanPlay = useCallback(() => {
+    canPlayRef.current = true;
+    if (!isPreloading && options.autoPlay) {
+      tryPlay();
+    }
+  }, [isPreloading, options.autoPlay, tryPlay]);
+
+  useEffect(() => {
+    if (prevPreloadingRef.current && !isPreloading && options.autoPlay) {
+      tryPlay();
+    }
+    prevPreloadingRef.current = isPreloading;
+  }, [isPreloading, options.autoPlay, tryPlay]);
+
   if (!preferenceLoaded) {
     return null;
   }
@@ -350,8 +393,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavi
       ref={player}
       className='group bg-black text-white font-sans rounded-lg aspect-video w-full'
       title={options.title}
-      src={options.src}
-      autoPlay={options.autoPlay}
+      src={isPreloading ? undefined : options.src}
+      autoPlay={options.autoPlay && !isPreloading}
+      onCanPlay={handleCanPlay}
       onFullscreenChange={setIsFullscreen}
       onEnded={handleEnded}
       onPlay={handlePlay}
@@ -380,6 +424,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavi
         selectedSubtitleTrack={selectedSubtitleTrack}
         onSelectSubtitleTrack={handleSelectSubtitleTrack}
         playlistNavigation={playlistNavigation}
+        preloadBadge={preloadBadge}
       />
     </MediaPlayer>
   );

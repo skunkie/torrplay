@@ -129,4 +129,24 @@ describe('DemoTorrentPlayerDialog', () => {
 
     expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
   });
+
+  it('opens video player directly with in-player preloading badge in demo mode', async () => {
+    render(
+      <DemoTorrentPlayerDialog
+        torrent={mockDemoSingleTorrent}
+        open={true}
+        onOpenChange={vi.fn()}
+        enablePreload={true}
+      />
+    );
+
+    expect(screen.queryByText('Buffering Stream...')).not.toBeInTheDocument();
+    expect(screen.getAllByText('single_video.mp4').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('player-preload-badge')).toBeInTheDocument();
+
+    // Wait for demo simulation timer to finish
+    await waitFor(() => {
+      expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+    }, { timeout: 3000 });
+  });
 });

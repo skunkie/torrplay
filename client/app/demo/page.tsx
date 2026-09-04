@@ -139,6 +139,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     piecesDirtiedGood: 1000,
     totalPeers: 20,
     completedSize: 129302391,
+    writtenBytes: 117440512,
     inMemory: 0,
     inMemorySize: 0,
     memoryStats: memoryStats,
@@ -177,6 +178,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     piecesDirtiedGood: 1060,
     totalPeers: 35,
     completedSize: 276445467,
+    writtenBytes: 268435456,
     inMemory: 0,
     inMemorySize: 0,
     memoryStats: memoryStats,
@@ -215,6 +217,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     piecesDirtiedGood: 400,
     totalPeers: 42,
     completedSize: 101600000,
+    writtenBytes: 94371840,
     inMemory: 387,
     inMemorySize: 101400000,
     memoryStats: memoryStats,
@@ -245,6 +248,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
     chunksReadWasted: 7,
     chunksWritten: 0,
     completedSize: 1525451,
+    writtenBytes: 1048576,
     connectedSeeders: 15,
     halfOpenPeers: 0,
     inMemory: 3,
@@ -578,6 +582,7 @@ function DemoContent() {
         torrent={selectedTorrent}
         open={modal === 'play' && !!selectedTorrent}
         onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
+        enablePreload={true}
       />
       <DemoDeleteTorrentDialog
         torrent={selectedTorrent}
