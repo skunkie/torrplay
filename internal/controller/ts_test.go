@@ -6,6 +6,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,16 +14,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	torrentstorage "github.com/anacrolix/torrent/storage"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/utils"
 )
 
 func TestTSCorrectionMiddleware(t *testing.T) {
@@ -396,6 +403,16 @@ func TestTSTorrentsAddWhileStreaming(t *testing.T) {
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 	magnet := samples[ih]
 
+	sintelFile, err := os.Open(sintelTorrentFile)
+	require.NoError(t, err)
+	metaInfo, err := metainfo.Load(sintelFile)
+	_ = sintelFile.Close()
+	require.NoError(t, err)
+
+	specTorrent, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
+	require.NoError(t, err)
+	<-specTorrent.GotInfo()
+
 	server := httptest.NewServer(ctrl.router)
 	defer server.Close()
 
@@ -458,4 +475,502 @@ func TestTSTorrentsAddWhileStreaming(t *testing.T) {
 	n, err = io.ReadFull(resp.Body, buf)
 	require.NoError(t, err)
 	assert.Equal(t, 1024, n)
+}
+
+func TestBuildTSTorrentResponse(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+	t.Run("torrent in database only", func(t *testing.T) {
+		meta := &api.Torrent{
+			Hash:      ih,
+			Name:      "Sintel",
+			Title:     new("Sintel"),
+			TotalSize: 12345678,
+		}
+
+		resp := ctrl.buildTSTorrentResponse(meta, nil)
+		assert.Equal(t, tsStatInDB, resp.Stat)
+		assert.Equal(t, "Torrent in db", resp.StatString)
+		assert.Equal(t, int64(12345678), resp.TorrentSize)
+		assert.Equal(t, float64(0), resp.DownloadSpeed)
+		assert.Equal(t, float64(0), resp.UploadSpeed)
+	})
+
+	t.Run("active torrent getting info", func(t *testing.T) {
+		fakeMagnet := "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=Unknown"
+		to, err := ctrl.client.AddMagnet(fakeMagnet)
+		require.NoError(t, err)
+
+		meta := &api.Torrent{
+			Hash:  to.InfoHash(),
+			Name:  "Unknown",
+			Title: new("Unknown"),
+		}
+		resp := ctrl.buildTSTorrentResponse(meta, to)
+
+		assert.Equal(t, tsStatGettingInfo, resp.Stat)
+		assert.Equal(t, "Torrent getting info", resp.StatString)
+	})
+
+	t.Run("active torrent with metadata", func(t *testing.T) {
+		sintelFile, err := os.Open(sintelTorrentFile)
+		require.NoError(t, err)
+		metaInfo, err := metainfo.Load(sintelFile)
+		_ = sintelFile.Close()
+		require.NoError(t, err)
+
+		to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
+		require.NoError(t, err)
+		<-to.GotInfo()
+
+		meta := torrentToMetadata(to)
+		resp := ctrl.buildTSTorrentResponse(meta, to)
+
+		assert.Equal(t, tsStatWorking, resp.Stat)
+		assert.Equal(t, "Torrent working", resp.StatString)
+		assert.Equal(t, to.Length(), resp.TorrentSize)
+		assert.Equal(t, to.BytesCompleted(), resp.LoadedSize)
+		assert.GreaterOrEqual(t, resp.DownloadSpeed, float64(0))
+		assert.GreaterOrEqual(t, resp.UploadSpeed, float64(0))
+	})
+
+	t.Run("active torrent preloading", func(t *testing.T) {
+		sintelFile, err := os.Open(sintelTorrentFile)
+		require.NoError(t, err)
+		metaInfo, err := metainfo.Load(sintelFile)
+		_ = sintelFile.Close()
+		require.NoError(t, err)
+
+		to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
+		require.NoError(t, err)
+		<-to.GotInfo()
+
+		storageTorrent, err := ctrl.storageClient.OpenTorrent(context.Background(), to.Info(), to.InfoHash())
+		require.NoError(t, err)
+		piece := storageTorrent.Piece(to.Piece(0).Info())
+		_, err = piece.WriteAt(make([]byte, 1024), 0)
+		require.NoError(t, err)
+		storageStats, err := ctrl.storageClient.TorrentStats(to.InfoHash())
+		require.NoError(t, err)
+
+		preload := &preloadTask{targetBytes: 1048576}
+		preload.bytesRead.Store(storageStats.WrittenBytes + 512)
+		ctrl.preloads.Store(to.InfoHash(), preload)
+		defer ctrl.preloads.Delete(to.InfoHash())
+
+		resp := ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
+		assert.Equal(t, tsStatPreload, resp.Stat)
+		assert.Equal(t, "Torrent preload", resp.StatString)
+		assert.Equal(t, int64(1048576), resp.PreloadSize)
+		assert.Positive(t, storageStats.WrittenBytes)
+		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
+	})
+}
+
+func TestTorrServerPreload(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	sintelFile, err := os.Open(sintelTorrentFile)
+	require.NoError(t, err)
+	metaInfo, err := metainfo.Load(sintelFile)
+	_ = sintelFile.Close()
+	require.NoError(t, err)
+
+	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
+	require.NoError(t, err)
+	<-to.GotInfo()
+
+	t.Run("starts preload on specific file and updates status", func(t *testing.T) {
+		fileIdx := 1
+		ctrl.startPreloadByFileIndex(to, &fileIdx)
+
+		val, preloading := ctrl.preloads.Load(to.InfoHash())
+		require.True(t, preloading)
+		preload, ok := val.(*preloadTask)
+		require.True(t, ok)
+		assert.Positive(t, preload.targetBytes)
+
+		resp := ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
+		assert.Equal(t, tsStatPreload, resp.Stat)
+		assert.Equal(t, "Torrent preload", resp.StatString)
+		assert.Equal(t, preload.targetBytes, resp.PreloadSize)
+
+		ctrl.cancelPreload(to.InfoHash())
+		_, preloading = ctrl.preloads.Load(to.InfoHash())
+		assert.False(t, preloading)
+	})
+
+	t.Run("playback cancels active preload", func(t *testing.T) {
+		fileIdx := 1
+		ctrl.startPreloadByFileIndex(to, &fileIdx)
+		_, preloading := ctrl.preloads.Load(to.InfoHash())
+		require.True(t, preloading)
+
+		ctrl.cancelPreload(to.InfoHash())
+		_, preloading = ctrl.preloads.Load(to.InfoHash())
+		assert.False(t, preloading)
+	})
+
+	t.Run("invalid playback keeps active preload", func(t *testing.T) {
+		fileIdx := 1
+		ctrl.startPreloadByFileIndex(to, &fileIdx)
+		_, preloading := ctrl.preloads.Load(to.InfoHash())
+		require.True(t, preloading)
+
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/stream/invalid", http.NoBody)
+		ctrl.streamFile(recorder, request, to.InfoHash(), len(to.Files()))
+
+		assert.Equal(t, http.StatusBadRequest, recorder.Code)
+		_, preloading = ctrl.preloads.Load(to.InfoHash())
+		assert.True(t, preloading)
+		ctrl.cancelPreload(to.InfoHash())
+	})
+
+	t.Run("stream endpoint with preload and stat returns preloading response", func(t *testing.T) {
+		server := httptest.NewServer(ctrl.router)
+		defer server.Close()
+
+		streamURL := fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&preload&stat&index=1", server.URL, to.InfoHash().HexString())
+		resp, err := http.Get(streamURL)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var tsResp api.TSTorrentResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&tsResp))
+		assert.Equal(t, tsStatPreload, tsResp.Stat)
+		assert.Equal(t, "Torrent preload", tsResp.StatString)
+		assert.Positive(t, tsResp.PreloadSize)
+
+		ctrl.cancelPreload(to.InfoHash())
+	})
+
+	t.Run("stream endpoint with play and nil index does not panic", func(t *testing.T) {
+		server := httptest.NewServer(ctrl.router)
+		defer server.Close()
+
+		streamURL := fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&play", server.URL, to.InfoHash().HexString())
+		req, err := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
+		require.NoError(t, err)
+		req.Header.Set("Range", "bytes=0-10")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Contains(t, []int{http.StatusOK, http.StatusPartialContent}, resp.StatusCode)
+	})
+
+	t.Run("preload on file where budget exceeds length preloads entire file", func(t *testing.T) {
+		// Temporarily increase MaxMemory so preload budget covers the whole file.
+		origMem := ctrl.settings.MaxMemory
+		ctrl.settings.MaxMemory = utils.Ptr(int64(500 << 20))
+		defer func() { ctrl.settings.MaxMemory = origMem }()
+
+		fileIdx := 1
+		file := to.Files()[0]
+		ctrl.startPreloadByFileIndex(to, &fileIdx)
+
+		val, preloading := ctrl.preloads.Load(to.InfoHash())
+		require.True(t, preloading)
+		preload, ok := val.(*preloadTask)
+		require.True(t, ok)
+		assert.Equal(t, file.Length(), preload.targetBytes)
+
+		ctrl.cancelPreload(to.InfoHash())
+	})
+}
+
+func TestTSPieceInfoFromStateUsesCompletionValue(t *testing.T) {
+	state := torrent.PieceState{
+		Completion: torrentstorage.Completion{Ok: true, Complete: false},
+	}
+
+	piece := tsPieceInfoFromState(3, 1024, state)
+	assert.False(t, piece.Completed)
+	assert.Zero(t, piece.Size)
+}
+
+func TestTSCache(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+
+	t.Run("missing or invalid action returns 400", func(t *testing.T) {
+		for _, reqBody := range []string{
+			`{"hash":"1111111111111111111111111111111111111111"}`,
+			`{"action":"set","hash":"1111111111111111111111111111111111111111"}`,
+		} {
+			resp, err := http.Post(server.URL+"/cache", "application/json", strings.NewReader(reqBody))
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			require.NoError(t, resp.Body.Close())
+		}
+	})
+
+	t.Run("torrent not found returns 404", func(t *testing.T) {
+		reqBody := `{"action":"get","hash":"1111111111111111111111111111111111111111"}`
+		resp, err := http.Post(server.URL+"/cache", "application/json", strings.NewReader(reqBody))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	})
+
+	t.Run("torrent in database without pieces returns empty 200", func(t *testing.T) {
+		ih := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
+		name := "Test Torrent"
+		err := ctrl.db.CreateTorrent(&database.Torrent{
+			Torrent: api.Torrent{
+				Hash:       ih,
+				Name:       name,
+				Title:      &name,
+				Storage:    utils.Ptr(api.Memory),
+				TotalSize:  1048576,
+				PieceCount: 1,
+			},
+		})
+		require.NoError(t, err)
+
+		reqBody := `{"action":"get","hash":"2222222222222222222222222222222222222222"}`
+		resp, err := http.Post(server.URL+"/cache", "application/json", strings.NewReader(reqBody))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var bodyMap map[string]any
+		err = json.NewDecoder(resp.Body).Decode(&bodyMap)
+		require.NoError(t, err)
+		assert.Empty(t, bodyMap)
+	})
+
+	t.Run("active torrent cache response structure", func(t *testing.T) {
+		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+		sintelFile, err := os.Open(sintelTorrentFile)
+		require.NoError(t, err)
+		metaInfo, err := metainfo.Load(sintelFile)
+		_ = sintelFile.Close()
+		require.NoError(t, err)
+
+		specTorrent, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
+		require.NoError(t, err)
+		<-specTorrent.GotInfo()
+
+		// Start streaming to activate cache and readers.
+		streamURL := fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&play&index=6", server.URL, ih.HexString())
+		streamReq, err := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
+		require.NoError(t, err)
+		streamReq.Header.Set("Range", "bytes=0-")
+
+		streamResp, err := http.DefaultClient.Do(streamReq)
+		require.NoError(t, err)
+		defer streamResp.Body.Close()
+		require.Equal(t, http.StatusPartialContent, streamResp.StatusCode)
+
+		buf := make([]byte, 1024)
+		n, err := io.ReadFull(streamResp.Body, buf)
+		require.NoError(t, err)
+		assert.Equal(t, 1024, n)
+
+		to, ok := ctrl.client.Torrent(ih)
+		require.True(t, ok)
+
+		storageStats, err := ctrl.storageClient.TorrentStats(ih)
+		require.NoError(t, err)
+		require.NotEmpty(t, storageStats.Pieces)
+
+		reqBody := fmt.Sprintf(`{"action":"get","hash":%q}`, ih.HexString())
+		resp, err := http.Post(server.URL+"/cache", "application/json", strings.NewReader(reqBody))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var rawMap map[string]json.RawMessage
+		bodyBytes, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		err = json.Unmarshal(bodyBytes, &rawMap)
+		require.NoError(t, err)
+
+		// Verify TorrServer uppercase keys exist in JSON.
+		assert.Contains(t, rawMap, "Capacity")
+		assert.Contains(t, rawMap, "Filled")
+		assert.Contains(t, rawMap, "Hash")
+		assert.Contains(t, rawMap, "Pieces")
+		assert.Contains(t, rawMap, "PiecesCount")
+		assert.Contains(t, rawMap, "PiecesLength")
+		assert.Contains(t, rawMap, "Readers")
+		assert.Contains(t, rawMap, "Torrent")
+
+		var cacheResp api.TSCacheResponse
+		err = json.Unmarshal(bodyBytes, &cacheResp)
+		require.NoError(t, err)
+
+		assert.Equal(t, ih.HexString(), cacheResp.Hash)
+		assert.Positive(t, cacheResp.Capacity)
+		assert.Equal(t, to.NumPieces(), cacheResp.PiecesCount)
+		assert.NotEmpty(t, cacheResp.Pieces)
+		assert.NotEmpty(t, cacheResp.Readers)
+
+		// Check first piece has Size, Id, Length.
+		firstPiece := cacheResp.Pieces[strconv.Itoa(storageStats.Pieces[0].Index)]
+		assert.Equal(t, storageStats.Pieces[0].Index, firstPiece.ID)
+		assert.Equal(t, storageStats.Pieces[0].SizeBytes, firstPiece.Length)
+		assert.LessOrEqual(t, firstPiece.Size, firstPiece.Length)
+
+		var filled int64
+		for _, piece := range cacheResp.Pieces {
+			filled += piece.Size
+		}
+		assert.Equal(t, filled, cacheResp.Filled)
+
+		// Check reader has capitalized Reader, Start, End properties.
+		var rawReaders []map[string]any
+		err = json.Unmarshal(rawMap["Readers"], &rawReaders)
+		require.NoError(t, err)
+		require.NotEmpty(t, rawReaders)
+		assert.Contains(t, rawReaders[0], "Reader")
+		assert.Contains(t, rawReaders[0], "Start")
+		assert.Contains(t, rawReaders[0], "End")
+
+		// Check embedded Torrent status.
+		require.NotNil(t, cacheResp.Torrent)
+		assert.Equal(t, tsStatWorking, cacheResp.Torrent.Stat)
+		assert.Equal(t, "Torrent working", cacheResp.Torrent.StatString)
+	})
+}
+
+func TestTSCacheFileStorage(t *testing.T) {
+	t.Run("file storage torrent not yet active returns empty 200", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		ctrl, cleanup := newTestController(t, func(c *Controller) {
+			c.settings.FileStoragePath = &tmpDir
+		})
+		defer cleanup()
+
+		server := httptest.NewServer(ctrl.router)
+		defer server.Close()
+
+		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+		name := "Sintel"
+		err := ctrl.db.CreateTorrent(&database.Torrent{
+			Torrent: api.Torrent{
+				Hash:    ih,
+				Name:    name,
+				Storage: utils.Ptr(api.File),
+			},
+		})
+		require.NoError(t, err)
+
+		reqBody := fmt.Sprintf(`{"action":"get","hash":%q}`, ih.HexString())
+		resp, err := http.Post(server.URL+"/cache", "application/json", strings.NewReader(reqBody))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		var bodyMap map[string]any
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&bodyMap))
+		assert.Empty(t, bodyMap)
+	})
+
+	t.Run("active file storage torrent reports full piece state", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		ctrl, cleanup := newTestController(t, func(c *Controller) {
+			c.settings.FileStoragePath = &tmpDir
+		})
+		defer cleanup()
+
+		server := httptest.NewServer(ctrl.router)
+		defer server.Close()
+
+		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+		// Upload sintel.torrent with storage=file so InfoBytes are persisted and
+		// GotInfo resolves instantly when the stream handler calls loadTorrent.
+		uploadBody, uploadWriter := createMultipartForm(t, map[string]string{
+			"storage": string(api.File),
+		})
+		uploadReq := httptest.NewRequest(http.MethodPost, "/api/v1/torrents", uploadBody)
+		uploadReq.Header.Set("Content-Type", uploadWriter.FormDataContentType())
+		uploadRec := httptest.NewRecorder()
+		ctrl.router.ServeHTTP(uploadRec, uploadReq)
+		require.Equal(t, http.StatusCreated, uploadRec.Code)
+
+		// Activate the file-backed torrent without starting downloads. Completion
+		// state is immediately known from the persisted metainfo.
+		dbTorrent, err := ctrl.db.GetTorrent(ih)
+		require.NoError(t, err)
+		to, err := ctrl.loadTorrentSpec(&torrent.TorrentSpec{
+			AddTorrentOpts: torrent.AddTorrentOpts{
+				InfoHash:  ih,
+				InfoBytes: dbTorrent.InfoBytes,
+			},
+		}, api.File)
+		require.NoError(t, err)
+		<-to.GotInfo()
+
+		to, ok := ctrl.client.Torrent(ih)
+		require.True(t, ok)
+		require.NotNil(t, to.Info(), "torrent info must be available after streaming")
+
+		reqBody := fmt.Sprintf(`{"action":"get","hash":%q}`, ih.HexString())
+		resp, err := http.Post(server.URL+"/cache", "application/json", strings.NewReader(reqBody))
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+
+		var rawMap map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(bodyBytes, &rawMap))
+
+		// TorrServer-compatible uppercase keys must be present.
+		assert.Contains(t, rawMap, "Capacity")
+		assert.Contains(t, rawMap, "Filled")
+		assert.Contains(t, rawMap, "Hash")
+		assert.Contains(t, rawMap, "Pieces")
+		assert.Contains(t, rawMap, "PiecesCount")
+		assert.Contains(t, rawMap, "PiecesLength")
+		assert.Contains(t, rawMap, "Readers")
+		assert.Contains(t, rawMap, "Torrent")
+
+		var cacheResp api.TSCacheResponse
+		require.NoError(t, json.Unmarshal(bodyBytes, &cacheResp))
+
+		assert.Equal(t, ih.HexString(), cacheResp.Hash)
+		// Capacity == total torrent length for file storage.
+		assert.Equal(t, to.Length(), cacheResp.Capacity)
+		assert.Equal(t, to.NumPieces(), cacheResp.PiecesCount)
+		assert.Equal(t, to.Info().PieceLength, cacheResp.PiecesLength)
+		assert.Len(t, cacheResp.Pieces, to.NumPieces())
+
+		var filled int64
+		// Completion must use PieceState.Complete, not Completion.Ok.
+		for i := range to.NumPieces() {
+			p, ok := cacheResp.Pieces[strconv.Itoa(i)]
+			require.True(t, ok, "piece %d missing from response", i)
+			assert.Equal(t, i, p.ID)
+			assert.Positive(t, p.Length)
+			assert.Equal(t, to.PieceState(i).Complete, p.Completed)
+			if p.Completed {
+				assert.Equal(t, p.Length, p.Size)
+			} else {
+				assert.Zero(t, p.Size)
+			}
+			filled += p.Size
+		}
+		assert.Equal(t, filled, cacheResp.Filled)
+
+		require.NotNil(t, cacheResp.Torrent)
+		assert.Empty(t, cacheResp.Readers)
+	})
 }
