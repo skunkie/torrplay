@@ -7,44 +7,23 @@ package controller
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 
 	"github.com/torrplay/torrplay/internal/api"
 )
 
-func (c *Controller) GetSystemMetrics(w http.ResponseWriter, r *http.Request) {
-	c.metricsMu.Lock()
-	defer c.metricsMu.Unlock()
-
-	torrents := c.client.Torrents()
-
-	var totalDownloadBytes int64
-	var totalUploadBytes int64
-
-	for _, t := range torrents {
-		stats := t.Stats()
-		totalDownloadBytes += stats.BytesReadData.Int64()
-		totalUploadBytes += stats.BytesWrittenData.Int64()
+func (c *Controller) GetSystemMetrics(w http.ResponseWriter, _ *http.Request) {
+	var downloadSpeed, uploadSpeed int64
+	if c.speedMonitor != nil {
+		downloadSpeed, uploadSpeed = c.speedMonitor.Speeds()
 	}
 
-	now := time.Now()
-	downloadSpeed := int64(0)
-	uploadSpeed := int64(0)
-
-	if !c.lastMetricsTime.IsZero() {
-		elapsed := now.Sub(c.lastMetricsTime).Seconds()
-		if elapsed > 0.05 {
-			downloadSpeed = int64(float64(totalDownloadBytes-c.lastTotalDownload) / elapsed)
-			uploadSpeed = int64(float64(totalUploadBytes-c.lastTotalUpload) / elapsed)
-		}
+	var activeTorrents int
+	if c.client != nil {
+		activeTorrents = len(c.client.Torrents())
 	}
-
-	c.lastMetricsTime = now
-	c.lastTotalDownload = totalDownloadBytes
-	c.lastTotalUpload = totalUploadBytes
 
 	metrics := api.SystemMetrics{
-		ActiveTorrents: len(torrents),
+		ActiveTorrents: activeTorrents,
 		DownloadSpeed:  downloadSpeed,
 		UploadSpeed:    uploadSpeed,
 	}
