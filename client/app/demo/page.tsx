@@ -496,6 +496,7 @@ function DemoContent() {
         onSettingsClick={handleSettingsClick}
         onSystemInfoClick={handleSystemInfoClick}
         onTitleSearch={handleTitleFilterChange}
+        searchQuery={titleFilter}
         liveUpdatesPaused={liveUpdatesPaused}
         handlePauseClick={handlePauseClick}
         version={version}
