@@ -109,13 +109,9 @@ type Controller struct {
 	httpClient          *httpclient.Client
 	httpServer          *httpserver.Server
 	images              images.ServiceInterface
-	lastMetricsTime     time.Time
-	lastTotalDownload   int64
-	lastTotalUpload     int64
 	logFile             io.Closer
 	logger              *slog.Logger
 	metrics             *metrics.Metrics
-	metricsMu           sync.RWMutex
 	mu                  sync.RWMutex
 	port                int
 	pieceCompletion     piececompletion.DeletablePieceCompletion
@@ -131,6 +127,7 @@ type Controller struct {
 	runtimeConfig       controllerRuntimeConfig
 	settings            *api.Settings
 	shutdownOnce        sync.Once
+	speedMonitor        *speedMonitor
 	startedAt           time.Time
 	storageClient       *memstorage.Client
 	streamPool          *stream.Pool
@@ -192,6 +189,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		postersPath:       "/posters/",
 		profilerAddr:      profilerAddress,
 		settings:          appSettings,
+		speedMonitor:      newSpeedMonitor(),
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
 			cleanupDone: make(chan struct{}),
@@ -277,6 +275,16 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	go c.startTorrentCleanup()
 	go c.startPosterCleanup()
+	go c.speedMonitor.Start(func() (int64, int64) {
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
+		if client == nil {
+			return 0, 0
+		}
+		stats := client.ConnStats()
+		return stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64()
+	})
 
 	return c, nil
 }
@@ -604,6 +612,9 @@ func (c *Controller) Shutdown() {
 
 		close(c.torrentTracker.cleanupDone)
 		close(c.posterCleanupDone)
+		if c.speedMonitor != nil {
+			c.speedMonitor.Stop()
+		}
 
 		_ = c.dlna.Stop()
 		if c.streamPool != nil {
