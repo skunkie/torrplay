@@ -20,6 +20,7 @@ func corsOptions() cors.Options {
 		AllowedHeaders: []string{
 			"Accept", "Accept-Ranges", "Accept-Language", "Access-Control-Request-Private-Network",
 			"Authorization", "Content-Language", "Content-Type", "Content-Length", "Origin", "Range",
+			"X-Requested-With",
 		},
 		ExposedHeaders: []string{"Content-Range"},
 		MaxAge:         600,

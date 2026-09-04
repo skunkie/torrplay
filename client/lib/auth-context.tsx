@@ -31,7 +31,7 @@ function parseAuthType(wwwAuth?: string | null): 'bearer' | 'basic' | undefined 
   if (/^bearer/i.test(trimmed)) {
     return 'bearer';
   }
-  if (/^basic/i.test(trimmed)) {
+  if (/^(x-)?basic/i.test(trimmed)) {
     return 'basic';
   }
   return undefined;
