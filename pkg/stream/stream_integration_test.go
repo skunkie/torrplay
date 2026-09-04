@@ -5,6 +5,7 @@
 package stream
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -17,6 +18,8 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/pkg/storage"
 )
 
@@ -292,11 +295,37 @@ func TestPool_ActiveRangeSetOnAcquire(t *testing.T) {
 	pool.Close()
 }
 
+func TestPool_PreloadReaderHasNoSpeculativeProtection(t *testing.T) {
+	c := newTestTorrentClient(t)
+	_, f := addTestTorrent(t, c)
+	reg := &testRegistry{}
+	pool := New(Config{
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Registry: reg,
+	})
+	pool.SetReadaheadBudget(1024 * 1024)
+
+	_, release, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage)
+	require.NoError(t, err)
+	defer release()
+	defer pool.Close()
+
+	pool.mu.Lock()
+	for _, sr := range pool.readers {
+		assert.True(t, sr.isPreload)
+		assert.Zero(t, sr.readahead)
+	}
+	pool.mu.Unlock()
+	assert.Zero(t, reg.setCalls.Load(), "controller owns preload range protection")
+	assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
+}
+
 type testRegistry struct {
-	setCalls   atomic.Int32
-	clearCalls atomic.Int32
-	mu         sync.Mutex
-	lastRange  struct {
+	setCalls         atomic.Int32
+	clearCalls       atomic.Int32
+	boundarySetCalls atomic.Int32
+	mu               sync.Mutex
+	lastRange        struct {
 		infoHash metainfo.Hash
 		readerID uint64
 		start    int
@@ -319,6 +348,12 @@ func (r *testRegistry) SetActiveRange(infoHash metainfo.Hash, readerID uint64, s
 func (r *testRegistry) ClearActiveRange(_ metainfo.Hash, _ uint64) {
 	r.clearCalls.Add(1)
 }
+
+func (r *testRegistry) SetFileBoundaries(_ metainfo.Hash, _ uint64, _, _, _, _ int) {
+	r.boundarySetCalls.Add(1)
+}
+
+func (r *testRegistry) ClearFileBoundaries(_ metainfo.Hash, _ uint64) {}
 
 func (r *testRegistry) lastRangeSnapshot() struct {
 	infoHash metainfo.Hash
