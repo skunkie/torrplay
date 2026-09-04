@@ -11,12 +11,36 @@ import snakecaseKeys from 'snakecase-keys';
 export class HttpError extends Error {
   status: number;
   statusText: string;
+  wwwAuthenticate?: string | null;
 
-  constructor(status: number, statusText: string, message?: string) {
+  constructor(status: number, statusText: string, message?: string, wwwAuthenticate?: string | null) {
     super(message || `Request failed with status ${status}: ${statusText}`);
     this.name = 'HttpError';
     this.status = status;
     this.statusText = statusText;
+    this.wwwAuthenticate = wwwAuthenticate;
+  }
+}
+
+// -- Unauthorized Listener --
+
+type UnauthorizedListener = (error: HttpError) => void;
+const unauthorizedListeners = new Set<UnauthorizedListener>();
+
+export function onUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener);
+  return () => {
+    unauthorizedListeners.delete(listener);
+  };
+}
+
+export function notifyUnauthorized(error: HttpError): void {
+  for (const listener of unauthorizedListeners) {
+    try {
+      listener(error);
+    } catch (e) {
+      console.error('Error in unauthorized listener:', e);
+    }
   }
 }
 
@@ -87,10 +111,14 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
     const response = await fetch(url, newOptions);
 
     if (!response.ok) {
+      const wwwAuthenticate = response.headers.get('WWW-Authenticate') || response.headers.get('www-authenticate');
+      if (response.status === 401 && !path.includes('/oauth/token')) {
+        notifyUnauthorized(new HttpError(response.status, response.statusText, undefined, wwwAuthenticate));
+      }
       try {
         const errorData = await response.json();
         const camelError = camelcaseKeys(errorData, { deep: true });
-        throw new HttpError(response.status, response.statusText, camelError.message || camelError.detail);
+        throw new HttpError(response.status, response.statusText, camelError.message || camelError.detail, wwwAuthenticate);
       } catch (e) {
         if (e instanceof HttpError) {
           throw e;
@@ -98,7 +126,7 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
         if (e instanceof Error && e.message.startsWith('API URL')) {
           throw e;
         }
-        throw new HttpError(response.status, response.statusText);
+        throw new HttpError(response.status, response.statusText, undefined, wwwAuthenticate);
       }
     }
     return response;

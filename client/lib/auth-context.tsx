@@ -8,7 +8,7 @@ import React, { createContext, ReactNode, useCallback, useContext, useEffect, us
 
 import { login as apiLogin } from '@/lib/api/auth';
 import { getSettings, updateSettings as apiUpdateSettings } from '@/lib/api/settings';
-import { HttpError } from '@/lib/api-client';
+import { HttpError, onUnauthorized } from '@/lib/api-client';
 import { Auth, Settings } from '@/lib/types/api';
 
 import { demoDefaultSettings } from './demo-settings';
@@ -24,6 +24,18 @@ export type AuthContextType = {
 };
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+function parseAuthType(wwwAuth?: string | null): 'bearer' | 'basic' | undefined {
+  if (!wwwAuth) return undefined;
+  const trimmed = wwwAuth.trim();
+  if (/^bearer/i.test(trimmed)) {
+    return 'bearer';
+  }
+  if (/^basic/i.test(trimmed)) {
+    return 'basic';
+  }
+  return undefined;
+}
 
 function useAuthStore(isDemo = false) {
   const [auth, setAuth] = useState<Auth | null>(null);
@@ -49,8 +61,15 @@ function useAuthStore(isDemo = false) {
       setIsOffline(false);
     } catch (error) {
       if (error instanceof HttpError && error.status === 401) {
+        const detectedType = parseAuthType(error.wwwAuthenticate);
+        localStorage.removeItem('jwt_token');
+        localStorage.removeItem('basic_auth');
         localStorage.removeItem('playback_token');
-        setAuth({ enabled: true } as Auth);
+        setAuth({
+          enabled: true,
+          type: detectedType ?? 'basic',
+        } as Auth);
+        setSettings(null);
       } else {
         console.error('Failed to fetch settings:', error);
         setAuth(null);
@@ -67,9 +86,40 @@ function useAuthStore(isDemo = false) {
       setSettings(demoSettings);
       setAuth(demoSettings.auth);
       setIsLoading(false);
-    } else {
-      fetchSettings();
+      return;
     }
+
+    fetchSettings();
+
+    const handleUnauthorized = (error: HttpError) => {
+      const detectedType = parseAuthType(error.wwwAuthenticate);
+
+      localStorage.removeItem('jwt_token');
+      localStorage.removeItem('basic_auth');
+      localStorage.removeItem('playback_token');
+
+      setAuth(prev => ({
+        ...(prev || {}),
+        enabled: true,
+        type: detectedType ?? (prev?.type === 'basic' ? 'bearer' : prev?.type ?? 'bearer'),
+      }));
+      setSettings(null);
+      setIsOffline(false);
+    };
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'jwt_token' || e.key === 'basic_auth' || e.key === null) {
+        fetchSettings();
+      }
+    };
+
+    const unsubscribe = onUnauthorized(handleUnauthorized);
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      unsubscribe();
+      window.removeEventListener('storage', handleStorageChange);
+    };
   }, [isDemo, fetchSettings]);
 
   const login = async (username: string, password: string) => {
@@ -118,6 +168,8 @@ function useAuthStore(isDemo = false) {
     localStorage.removeItem('jwt_token');
     localStorage.removeItem('basic_auth');
     localStorage.removeItem('playback_token');
+    setSettings(null);
+    setAuth(prev => (prev?.enabled ? { enabled: true, type: prev.type } : null));
     window.location.reload();
   };
 
@@ -153,7 +205,13 @@ function useAuthStore(isDemo = false) {
   const isAuthenticated = !isLoading && (
     isOffline ||
     auth?.enabled === false ||
-    (auth?.enabled === true && (!!localStorage.getItem('jwt_token') || !!localStorage.getItem('basic_auth')))
+    (auth?.enabled === true && (
+      auth.type === 'bearer'
+        ? !!localStorage.getItem('jwt_token')
+        : auth.type === 'basic'
+          ? !!localStorage.getItem('basic_auth')
+          : (!!localStorage.getItem('jwt_token') || !!localStorage.getItem('basic_auth'))
+    ))
   );
 
   return { auth, settings, isAuthenticated, isLoading, login, logout, updateSettings };
