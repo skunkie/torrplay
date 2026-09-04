@@ -183,8 +183,8 @@ func TestClient_TorrentStats(t *testing.T) {
 	require.NoError(t, err)
 
 	// Add some pieces
-	client.pieces[pieceKey{infoHash: infoHash, index: 0}] = &pieceData{data: make([]byte, 256), complete: true, pieceSize: 256}
-	client.pieces[pieceKey{infoHash: infoHash, index: 1}] = &pieceData{data: make([]byte, 256), complete: false, pieceSize: 256}
+	client.pieces[pieceKey{infoHash: infoHash, index: 0}] = &pieceData{data: make([]byte, 256), complete: true, writtenBytes: 256, pieceSize: 256}
+	client.pieces[pieceKey{infoHash: infoHash, index: 1}] = &pieceData{data: make([]byte, 256), complete: false, writtenBytes: 64, pieceSize: 256}
 
 	stats, err := client.TorrentStats(infoHash)
 	require.NoError(t, err)
@@ -192,7 +192,41 @@ func TestClient_TorrentStats(t *testing.T) {
 	assert.Equal(t, 4, stats.TotalPieces)
 	assert.Equal(t, int64(512), stats.TrackedBytes)
 	assert.Equal(t, int64(256), stats.CompletedBytes)
+	assert.Equal(t, int64(320), stats.WrittenBytes)
 	assert.Equal(t, 2, stats.ResidentPieces)
+}
+
+func TestClient_TorrentStats_TracksWrittenBytes(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 1)
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+	piece := torrentImpl.Piece(info.Piece(0))
+
+	_, err = piece.WriteAt(make([]byte, 32), 0)
+	require.NoError(t, err)
+	stats := requireTorrentStats(t, client, infoHash)
+	require.Len(t, stats.Pieces, 1)
+	assert.Equal(t, int64(32), stats.WrittenBytes)
+	assert.Equal(t, int64(32), stats.Pieces[0].WrittenBytes)
+	assert.Equal(t, int64(256), stats.ResidentBytes)
+
+	// Repeated writes to the same span do not inflate the resident byte count.
+	for range 10 {
+		_, err = piece.WriteAt(make([]byte, 32), 0)
+		require.NoError(t, err)
+	}
+	stats = requireTorrentStats(t, client, infoHash)
+	assert.Equal(t, int64(32), stats.WrittenBytes)
+	assert.Equal(t, int64(32), stats.Pieces[0].WrittenBytes)
+
+	_, err = piece.WriteAt(make([]byte, 32), 16)
+	require.NoError(t, err)
+	_, err = piece.WriteAt(make([]byte, 32), 96)
+	require.NoError(t, err)
+	stats = requireTorrentStats(t, client, infoHash)
+	assert.Equal(t, int64(80), stats.WrittenBytes)
+	assert.Equal(t, int64(80), stats.Pieces[0].WrittenBytes)
 }
 
 func TestClient_TorrentStats_IncludesGlobalStats(t *testing.T) {
@@ -802,6 +836,28 @@ func TestClient_SetActiveRange_PieceProtected(t *testing.T) {
 	assert.NotContains(t, inMemory, 0, "unprotected LRU piece should have been evicted")
 }
 
+func TestClient_AllocationEvictsBoundaryBeforeActiveRange(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 3)
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		_, err = torrentImpl.Piece(info.Piece(i)).WriteAt(make([]byte, 256), 0)
+		require.NoError(t, err)
+	}
+	client.SetActiveRange(infoHash, 1, 0, 0)
+	client.SetFileBoundaries(infoHash, 2, 1, 1, 1, 1)
+
+	_, err = torrentImpl.Piece(info.Piece(2)).WriteAt([]byte{1}, 0)
+	require.NoError(t, err)
+
+	inMemory := residentPieceIndexes(t, client, infoHash)
+	assert.Contains(t, inMemory, 0, "active piece should survive boundary pressure")
+	assert.NotContains(t, inMemory, 1, "boundary-only piece should yield before active playback")
+	assert.Contains(t, inMemory, 2)
+}
+
 // TestClient_ClearActiveRange_AllowsEviction verifies that clearing an active range
 // allows previously protected pieces to be evicted.
 func TestClient_ClearActiveRange_AllowsEviction(t *testing.T) {
@@ -906,6 +962,89 @@ func TestClient_IsPieceInActiveRange(t *testing.T) {
 	assert.False(t, client.isPieceInActiveRangeLocked(pieceKey{infoHash: infoHash, index: 1}))
 	assert.False(t, client.isPieceInActiveRangeLocked(pieceKey{infoHash: infoHash, index: 6}))
 	assert.False(t, client.isPieceInActiveRangeLocked(pieceKey{infoHash: infoHash, index: 0}))
+}
+
+// TestClient_SetFileBoundaries_PieceProtected verifies that head and tail pieces
+// protected via SetFileBoundaries survive LRU eviction.
+func TestClient_SetFileBoundaries_PieceProtected(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 4)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	// Write piece 0 (head) and piece 1 (middle).
+	for i := range 2 {
+		p := torrentImpl.Piece(info.Piece(i))
+		_, err := p.WriteAt(fmt.Appendf(nil, "piece_%d", i), 0)
+		require.NoError(t, err)
+	}
+
+	// Protect piece 0 (head) and piece 3 (tail).
+	client.SetFileBoundaries(infoHash, 1, 0, 0, 3, 3)
+
+	// Write piece 2. Piece 1 is middle/unprotected and should be evicted to free memory.
+	p2 := torrentImpl.Piece(info.Piece(2))
+	_, err = p2.WriteAt([]byte("piece_2"), 0)
+	require.NoError(t, err)
+
+	inMemory := residentPieceIndexes(t, client, infoHash)
+	assert.Contains(t, inMemory, 0, "head piece should be protected from eviction")
+	assert.Contains(t, inMemory, 2, "newly written piece should be in memory")
+	assert.NotContains(t, inMemory, 1, "unprotected middle piece should have been evicted")
+}
+
+// TestClient_ClearFileBoundaries_AllowsEviction verifies that clearing file boundaries
+// allows previously protected boundary pieces to be evicted.
+func TestClient_ClearFileBoundaries_AllowsEviction(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 4)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	for i := range 2 {
+		p := torrentImpl.Piece(info.Piece(i))
+		_, err := p.WriteAt(fmt.Appendf(nil, "piece_%d", i), 0)
+		require.NoError(t, err)
+	}
+
+	client.SetFileBoundaries(infoHash, 1, 0, 0, 3, 3)
+	client.ClearFileBoundaries(infoHash, 1)
+
+	// Write piece 2 to trigger eviction; piece 0 is no longer protected.
+	p2 := torrentImpl.Piece(info.Piece(2))
+	_, err = p2.WriteAt([]byte("piece_2"), 0)
+	require.NoError(t, err)
+
+	inMemory := residentPieceIndexes(t, client, infoHash)
+	assert.Contains(t, inMemory, 2, "newly written piece should be in memory")
+	assert.LessOrEqual(t, len(inMemory), 2, "at most 2 pieces should be in memory")
+}
+
+// TestClient_FileBoundaries_CloseTorrent_CleansUp verifies that closing a torrent
+// removes its registered file boundaries.
+func TestClient_FileBoundaries_CloseTorrent_CleansUp(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 8)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	client.SetFileBoundaries(infoHash, 1, 0, 1, 6, 7)
+
+	client.mu.RLock()
+	assert.True(t, client.isPieceInFileBoundaryLocked(pieceKey{infoHash: infoHash, index: 0}))
+	assert.True(t, client.isPieceInFileBoundaryLocked(pieceKey{infoHash: infoHash, index: 7}))
+	assert.False(t, client.isPieceInFileBoundaryLocked(pieceKey{infoHash: infoHash, index: 3}))
+	client.mu.RUnlock()
+
+	require.NoError(t, torrentImpl.Close())
+
+	client.mu.RLock()
+	assert.False(t, client.isPieceInFileBoundaryLocked(pieceKey{infoHash: infoHash, index: 0}))
+	assert.False(t, client.isPieceInFileBoundaryLocked(pieceKey{infoHash: infoHash, index: 7}))
+	client.mu.RUnlock()
 }
 
 // TestPieceImpl_ConcurrentWriteSamePiece_NoMemoryDrift ensures that multiple goroutines
