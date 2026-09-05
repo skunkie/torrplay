@@ -13,7 +13,7 @@ import { useLiveUpdates } from '@/lib/live-updates-context';
 
 import { HeaderLayout } from './header-layout';
 
-interface HeaderProps {
+export interface HeaderProps {
   homeHref: string,
   onMetricsClick: () => void,
   onSettingsClick: () => void,

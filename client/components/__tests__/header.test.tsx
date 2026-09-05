@@ -57,6 +57,7 @@ describe('Header', () => {
     );
 
     expect(screen.getByText('v1.0.0')).toBeInTheDocument();
+    expect(screen.queryByText('Update')).not.toBeInTheDocument();
   });
 
   it('does not render version when system info is unavailable', async () => {
