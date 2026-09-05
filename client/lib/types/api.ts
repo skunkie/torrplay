@@ -44,8 +44,11 @@ interface Settings {
 
 interface SystemInfo {
   addresses: string[],
+  architecture: 'x64' | 'arm64' | 'armv7' | 'x86' | 'unknown',
   buildDate: string,
   commit: string,
+  deployment: 'native' | 'container',
+  os: 'macos' | 'windows' | 'linux' | 'android' | 'ios' | 'unknown',
   uptime: number,
   version: string
 }

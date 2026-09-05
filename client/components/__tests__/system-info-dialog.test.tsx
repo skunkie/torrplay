@@ -12,8 +12,11 @@ import { SystemInfo } from '@/lib/types/api';
 
 const mockSystemInfo: SystemInfo = {
   addresses: ['127.0.0.1:8090'],
+  architecture: 'x64',
   buildDate: '2026-08-24',
   commit: 'c793859',
+  deployment: 'native',
+  os: 'linux',
   uptime: 3600,
   version: '1.0.1',
 };
@@ -60,8 +63,11 @@ describe('SystemInfoDialog', () => {
       expect(screen.getByText('System Information')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Version, build date, commit, and uptime details')).toBeInTheDocument();
+    expect(screen.getByText('Version, deployment, platform, build, and uptime details')).toBeInTheDocument();
     expect(screen.getByText('1.0.1')).toBeInTheDocument();
+    expect(screen.getByText('Linux')).toBeInTheDocument();
+    expect(screen.getByText('x64')).toBeInTheDocument();
+    expect(screen.getByText('Native')).toBeInTheDocument();
     expect(screen.getByText('2026-08-24')).toBeInTheDocument();
   });
 });

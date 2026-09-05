@@ -2035,8 +2035,11 @@ components:
       type: object
       required:
         - addresses
+        - architecture
         - build_date
         - commit
+        - deployment
+        - os
         - uptime
         - version
       properties:
@@ -2048,6 +2051,16 @@ components:
           example:
             - "http://127.0.0.1:8090"
             - "http://192.168.1.100:8090"
+        architecture:
+          type: string
+          description: Application CPU architecture normalized for release asset selection.
+          enum:
+            - "x64"
+            - "arm64"
+            - "armv7"
+            - "x86"
+            - "unknown"
+          example: "x64"
         build_date:
           type: string
           description: Date when the build was created.
@@ -2056,6 +2069,27 @@ components:
           type: string
           description: Git commit hash.
           example: "a1b2c3d"
+        deployment:
+          type: string
+          description: Application deployment environment.
+          enum:
+            - "native"
+            - "container"
+          x-enum-varnames:
+            - SystemInfoDeploymentNative
+            - SystemInfoDeploymentContainer
+          example: "native"
+        os:
+          type: string
+          description: Application operating system normalized for release asset selection.
+          enum:
+            - "macos"
+            - "windows"
+            - "linux"
+            - "android"
+            - "ios"
+            - "unknown"
+          example: "linux"
         uptime:
           type: integer
           format: int64
@@ -2069,8 +2103,11 @@ components:
         addresses:
           - "http://127.0.0.1:8090"
           - "http://192.168.1.100:8090"
+        architecture: "x64"
         build_date: "2006-01-02"
         commit: "a1b2c3d"
+        deployment: "native"
+        os: "linux"
         uptime: 86400
         version: "1.0.0"
 

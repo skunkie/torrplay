@@ -137,7 +137,8 @@ func setupMockTorrPlay(t *testing.T) *Client {
 	// GET /api/system/info
 	mux.HandleFunc("/api/system/info", func(w http.ResponseWriter, _ *http.Request) {
 		res := api.SystemInfo{
-			Version: "1.0.0",
+			Deployment: api.SystemInfoDeploymentNative,
+			Version:    "1.0.0",
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(res)

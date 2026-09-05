@@ -470,13 +470,68 @@ func (c *Controller) GetStream(w http.ResponseWriter, r *http.Request, ih metain
 func (c *Controller) GetSystemInfo(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(api.SystemInfo{
-		Addresses: c.httpServer.Addrs(),
-		BuildDate: buildinfo.BuildDate,
-		Commit:    buildinfo.Commit,
-		Uptime:    int64(time.Since(c.startedAt).Seconds()),
-		Version:   buildinfo.Version,
+		Addresses:    c.httpServer.Addrs(),
+		Architecture: systemArchitecture(runtime.GOARCH),
+		BuildDate:    buildinfo.BuildDate,
+		Commit:       buildinfo.Commit,
+		Deployment:   detectSystemDeployment(),
+		Os:           systemOperatingSystem(runtime.GOOS),
+		Uptime:       int64(time.Since(c.startedAt).Seconds()),
+		Version:      buildinfo.Version,
 	}); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func detectSystemDeployment() api.SystemInfoDeployment {
+	_, err := os.Stat("/.dockerenv")
+	return systemDeployment(os.Getenv("TORRPLAY_DEPLOYMENT"), err == nil)
+}
+
+func systemDeployment(configured string, dockerMarkerExists bool) api.SystemInfoDeployment {
+	switch strings.ToLower(strings.TrimSpace(configured)) {
+	case string(api.SystemInfoDeploymentContainer):
+		return api.SystemInfoDeploymentContainer
+	case string(api.SystemInfoDeploymentNative):
+		return api.SystemInfoDeploymentNative
+	}
+
+	if dockerMarkerExists {
+		return api.SystemInfoDeploymentContainer
+	}
+
+	return api.SystemInfoDeploymentNative
+}
+
+func systemOperatingSystem(goos string) api.SystemInfoOs {
+	switch goos {
+	case "darwin":
+		return api.SystemInfoOsMacos
+	case "windows":
+		return api.SystemInfoOsWindows
+	case "linux":
+		return api.SystemInfoOsLinux
+	case "android":
+		return api.SystemInfoOsAndroid
+	case "ios":
+		return api.SystemInfoOsIos
+	default:
+		return api.SystemInfoOsUnknown
+	}
+}
+
+func systemArchitecture(goarch string) api.SystemInfoArchitecture {
+	switch goarch {
+	case "amd64":
+		return api.SystemInfoArchitectureX64
+	case "arm64":
+		return api.SystemInfoArchitectureArm64
+	case "arm":
+		return api.SystemInfoArchitectureArmv7
+	case "386":
+		return api.SystemInfoArchitectureX86
+	default:
+		return api.SystemInfoArchitectureUnknown
 	}
 }
 

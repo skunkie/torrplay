@@ -6,6 +6,8 @@ FROM alpine:3.23
 
 ARG TARGETARCH
 
+ENV TORRPLAY_DEPLOYMENT=container
+
 WORKDIR /app
 
 RUN addgroup -g 1000 -S torrplay && \
