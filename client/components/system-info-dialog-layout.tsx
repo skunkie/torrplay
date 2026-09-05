@@ -4,7 +4,7 @@
 
 'use client';
 
-import { Calendar, Clock, GitCommit, Info, Server } from 'lucide-react';
+import { Calendar, Clock, Cpu, GitCommit, Info, Monitor, Server } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -17,6 +17,15 @@ interface SystemInfoDialogLayoutProps {
   systemInfo: SystemInfo | null
 }
 
+const operatingSystemLabels: Record<SystemInfo['os'], string> = {
+  macos: 'macOS',
+  windows: 'Windows',
+  linux: 'Linux',
+  android: 'Android',
+  ios: 'iOS',
+  unknown: 'Unknown',
+};
+
 export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: SystemInfoDialogLayoutProps) {
   return (
     <Dialog open={open}
@@ -24,7 +33,7 @@ export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: Syste
       <DialogContent className='max-h-[90vh] overflow-hidden flex flex-col'>
         <DialogHeader className='flex-shrink-0'>
           <DialogTitle>System Information</DialogTitle>
-          <DialogDescription>Version, build date, commit, and uptime details</DialogDescription>
+          <DialogDescription>Version, deployment, platform, build, and uptime details</DialogDescription>
         </DialogHeader>
 
         <div tabIndex={0}
@@ -86,21 +95,66 @@ export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: Syste
               </div>
             </Card>
 
-            {systemInfo?.addresses && systemInfo.addresses.length > 0 && (
-              <Card className='p-4 sm:col-span-2'>
-                <div className='flex items-center gap-3'>
-                  <div className='p-2 rounded-lg bg-chart-5/10 flex-shrink-0'>
-                    <Server className='h-5 w-5 text-chart-5' />
+            <Card className='p-4'>
+              <div className='flex items-center gap-3'>
+                <div className='p-2 rounded-lg bg-chart-1/10 flex-shrink-0'>
+                  <Monitor className='h-5 w-5 text-chart-1' />
+                </div>
+                <div className='flex-1 min-w-0'>
+                  <p className='text-xs text-muted-foreground'>Operating System</p>
+                  <p className='text-lg font-semibold text-foreground'>
+                    {systemInfo ? operatingSystemLabels[systemInfo.os] : 'Unknown'}
+                  </p>
+                </div>
+              </div>
+            </Card>
+
+            <Card className='p-4'>
+              <div className='flex items-center gap-3'>
+                <div className='p-2 rounded-lg bg-chart-2/10 flex-shrink-0'>
+                  <Cpu className='h-5 w-5 text-chart-2' />
+                </div>
+                <div className='flex-1 min-w-0'>
+                  <p className='text-xs text-muted-foreground'>Architecture</p>
+                  <p className='text-lg font-semibold text-foreground'>
+                    {systemInfo?.architecture || 'Unknown'}
+                  </p>
+                </div>
+              </div>
+            </Card>
+
+            <Card className='p-4 sm:col-span-2'>
+              <div className='flex items-start gap-3'>
+                <div className='p-2 rounded-lg bg-chart-5/10 flex-shrink-0'>
+                  <Server className='h-5 w-5 text-chart-5' />
+                </div>
+                <div className='grid flex-1 min-w-0 grid-cols-1 gap-3 sm:grid-cols-[minmax(7rem,1fr)_minmax(0,2fr)]'>
+                  <div className='min-w-0'>
+                    <p className='text-xs text-muted-foreground'>Deployment</p>
+                    <p className='text-lg font-semibold text-foreground'>
+                      {systemInfo?.deployment === 'container' ? 'Container' : 'Native'}
+                    </p>
                   </div>
-                  <div className='flex-1 min-w-0'>
+                  <div className='min-w-0'>
                     <p className='text-xs text-muted-foreground'>Addresses</p>
-                    <ul className='list-none list-inside'>
-                      {systemInfo.addresses.map((addr, index) => <li key={index}>{addr}</li>)}
-                    </ul>
+                    {systemInfo?.addresses && systemInfo.addresses.length > 0 ? (
+                      <ul
+                        aria-label='Server addresses'
+                        tabIndex={0}
+                        className='list-none max-h-[4.5rem] overflow-auto overscroll-contain pr-1 font-mono text-xs leading-6'
+                      >
+                        {systemInfo.addresses.map((addr, index) => (
+                          <li key={index}
+                            className='w-max min-w-full whitespace-nowrap'>{addr}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className='text-sm text-muted-foreground'>None reported</p>
+                    )}
                   </div>
                 </div>
-              </Card>
-            )}
+              </div>
+            </Card>
           </div>
         </div>
       </DialogContent>
