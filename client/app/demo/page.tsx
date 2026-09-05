@@ -12,7 +12,14 @@ import { HeaderLayout } from '@/components/header-layout';
 import { PageContainer } from '@/components/page-container';
 import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
+import { UpdateDialog } from '@/components/update-dialog';
 import { useTorrentFilterSettings } from '@/hooks/use-torrent-filter-settings';
+import {
+  DemoAppUpdateProvider,
+  DemoUpdateScenario,
+  Deployment,
+  useOptionalAppUpdate,
+} from '@/lib/app-update-context';
 import { Torrent, TorrentStats } from '@/lib/types/api';
 
 import { DemoAddTorrentDialog } from './demo-add-torrent-dialog';
@@ -23,6 +30,7 @@ import { DemoSettingsDialog } from './demo-settings-dialog';
 import { DemoSystemInfoDialog } from './demo-system-info-dialog';
 import { DemoTorrentPlayerDialog } from './demo-torrent-player-dialog';
 import { DemoTorrentStatsDialog } from './demo-torrent-stats-dialog';
+import { canonicalDemoSearchParams } from './demo-url';
 
 const memoryStats = {
   activeTorrents: 4,
@@ -284,8 +292,15 @@ const deleteTorrent = (hash: string) => new Promise(resolve => setTimeout(() => 
   resolve({});
 }, 500));
 
-function DemoContent() {
+function DemoContent({
+  updateScenario,
+  deployment,
+}: {
+  updateScenario: DemoUpdateScenario,
+  deployment: Deployment
+}) {
   const router = useRouter();
+  const appUpdate = useOptionalAppUpdate();
   const searchParams = useSearchParams();
   const modal = searchParams.get('modal');
   const hash = searchParams.get('hash');
@@ -310,7 +325,7 @@ function DemoContent() {
     } else {
       params.delete('hash');
     }
-    router.push(`?${params.toString()}`, { scroll: false });
+    router.push(`?${canonicalDemoSearchParams(params).toString()}`, { scroll: false });
   };
 
   const prevModalRef = useRef<string | null>(modal);
@@ -452,6 +467,8 @@ function DemoContent() {
     });
   };
 
+  const hasOpenDialog = Boolean(modal) || Boolean(appUpdate?.isDialogOpen);
+
   return (
     <>
       <HeaderLayout
@@ -468,9 +485,9 @@ function DemoContent() {
         logout={logout}
         auth={auth}
         isHidden={false}
-        inert={Boolean(modal)}
+        inert={hasOpenDialog}
       />
-      <PageContainer inert={Boolean(modal)}>
+      <PageContainer inert={hasOpenDialog}>
         <TorrentControls
           torrentsData={{ torrents }}
           torrents={categories}
@@ -506,7 +523,11 @@ function DemoContent() {
       <DemoSystemInfoDialog
         open={modal === 'system-info'}
         onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
+        updateScenario={updateScenario}
+        deployment={deployment}
+        searchParams={searchParams.toString()}
       />
+      <UpdateDialog deferWhile={Boolean(modal)} />
       <DemoEditTorrentDialog
         torrent={selectedTorrent}
         open={modal === 'edit' && !!selectedTorrent}
@@ -541,10 +562,37 @@ function DemoContent() {
   );
 }
 
+const demoUpdateScenarios = new Set<DemoUpdateScenario>([
+  'available',
+  'up-to-date',
+]);
+
+function DemoWithUpdateScenario() {
+  const searchParams = useSearchParams();
+  const requestedScenario = searchParams.get('update') as DemoUpdateScenario | null;
+  const updateScenario = requestedScenario && demoUpdateScenarios.has(requestedScenario)
+    ? requestedScenario
+    : 'available';
+  const deployment: Deployment = searchParams.get('deployment') === 'container'
+    ? 'container'
+    : 'native';
+
+  return (
+    <DemoAppUpdateProvider
+      key={`${updateScenario}-${deployment}`}
+      scenario={updateScenario}
+      deployment={deployment}
+    >
+      <DemoContent updateScenario={updateScenario}
+        deployment={deployment} />
+    </DemoAppUpdateProvider>
+  );
+}
+
 export default function Demo() {
   return (
     <Suspense>
-      <DemoContent />
+      <DemoWithUpdateScenario />
     </Suspense>
   );
 }
