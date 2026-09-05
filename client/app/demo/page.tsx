@@ -12,7 +12,7 @@ import { HeaderLayout } from '@/components/header-layout';
 import { PageContainer } from '@/components/page-container';
 import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
-import { Button } from '@/components/ui/button';
+import { useTorrentFilterSettings } from '@/hooks/use-torrent-filter-settings';
 import { Torrent, TorrentStats } from '@/lib/types/api';
 
 import { DemoAddTorrentDialog } from './demo-add-torrent-dialog';
@@ -328,14 +328,17 @@ function DemoContent() {
     prevModalRef.current = modal;
   }, [modal]);
 
-  const [titleFilter, setTitleFilter] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [sortBy, setSortBy] = useState('date');
-  const [page, setPage] = useState(1);
-  const [torrentsPerPage, setTorrentsPerPage] = useState(0);
+  const {
+    titleFilter,
+    handleTitleFilterChange,
+    categoryFilter,
+    handleCategoryFilterChange,
+    sortBy,
+    handleSortByChange,
+  } = useTorrentFilterSettings({ searchParams });
+
   const [isDeleting, setIsDeleting] = useState(false);
   const [liveUpdatesPaused, setLiveUpdatesPaused] = useState(false);
-  const [usePagination, setUsePagination] = useState(true);
   const [version] = useState<string | null>('Demo');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const auth = { enabled: false, type: 'basic' as const };
@@ -344,23 +347,6 @@ function DemoContent() {
     toast.success('Logged out', { description: 'Demo mode - auth not actually changed' });
   };
   const handlePauseClick = () => setLiveUpdatesPaused(prev => !prev);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(min-width: 768px)');
-    const handleMediaChange = (e: { matches: boolean }) => {
-      setUsePagination(e.matches);
-      if (!e.matches) {
-        setTorrentsPerPage(0);
-      }
-    };
-
-    handleMediaChange(mediaQuery);
-    mediaQuery.addEventListener('change', handleMediaChange);
-
-    return () => {
-      mediaQuery.removeEventListener('change', handleMediaChange);
-    };
-  }, []);
 
   useEffect(() => {
     getTorrents().then((data: { torrents: Torrent[], total: number, limit: number, offset: number }) => {
@@ -373,15 +359,6 @@ function DemoContent() {
     const allCategories = torrents.map(t => t.category).filter(Boolean) as string[];
     return Array.from(new Set(allCategories)).sort();
   }, [torrents]);
-
-  const handleTitleFilterChange = (query: string) => {
-    setTitleFilter(query);
-  };
-
-  const handleCategoryFilterChange = (value: string) => {
-    setCategoryFilter(value === 'all' ? '' : value);
-    setPage(1);
-  };
 
   const filteredAndSortedTorrents = useMemo(() => {
     const filtered = torrents
@@ -409,23 +386,6 @@ function DemoContent() {
       }
     });
   }, [torrents, titleFilter, categoryFilter, sortBy]);
-
-  const totalPages = usePagination && torrentsPerPage > 0 ? Math.ceil(filteredAndSortedTorrents.length / torrentsPerPage) : 1;
-
-  const paginatedTorrents = useMemo(() => {
-    if (torrentsPerPage === 0) {
-      return filteredAndSortedTorrents;
-    }
-    const start = (page - 1) * torrentsPerPage;
-    const end = start + torrentsPerPage;
-    return filteredAndSortedTorrents.slice(start, end);
-  }, [filteredAndSortedTorrents, page, torrentsPerPage]);
-
-  useEffect(() => {
-    if (page > totalPages) {
-      setPage(1);
-    }
-  }, [page, totalPages]);
 
   const selectedTorrent = useMemo(() => {
     const validModals = ['edit', 'stats', 'play', 'delete'];
@@ -515,19 +475,16 @@ function DemoContent() {
           torrentsData={{ torrents: demoTorrentsData }}
           torrents={categories}
           filteredAndSortedTorrents={filteredAndSortedTorrents}
-          usePagination={usePagination}
-          torrentsPerPage={torrentsPerPage}
-          onTorrentsPerPageChange={value => { setTorrentsPerPage(Number(value)); setPage(1); }}
           categoryFilter={categoryFilter}
           onCategoryFilterChange={handleCategoryFilterChange}
           sortBy={sortBy}
-          onSortByChange={setSortBy}
+          onSortByChange={handleSortByChange}
           onAddTorrent={() => updateModal('add')}
         />
 
         <div ref={gridRef}>
           <TorrentGrid
-            torrents={paginatedTorrents}
+            torrents={filteredAndSortedTorrents}
             onEdit={handleEdit}
             onViewStats={handleViewStats}
             onDelete={handleDelete}
@@ -535,24 +492,6 @@ function DemoContent() {
             onAddToDatabase={handleAddToDatabase}
           />
         </div>
-
-        {usePagination && torrentsPerPage > 0 && totalPages > 1 && (
-          <div className='flex justify-center items-center gap-4 mt-8'>
-            <Button onClick={() => setPage(page - 1)}
-              disabled={page === 1}
-              variant='outline'>
-              Previous
-            </Button>
-            <span className='text-sm text-muted-foreground'>
-              Page {page} of {totalPages}
-            </span>
-            <Button onClick={() => setPage(page + 1)}
-              disabled={page === totalPages}
-              variant='outline'>
-              Next
-            </Button>
-          </div>
-        )}
       </PageContainer>
 
       <DemoMetricsDialog

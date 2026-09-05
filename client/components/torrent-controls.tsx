@@ -21,9 +21,6 @@ interface TorrentControlsProps {
   torrentsData?: { torrents: Torrent[] },
   torrents: string[],
   filteredAndSortedTorrents: Torrent[],
-  usePagination?: boolean,
-  torrentsPerPage: number,
-  onTorrentsPerPageChange?: (value: string) => void,
   categoryFilter: string,
   onCategoryFilterChange: (value: string) => void,
   sortBy: string,
@@ -37,9 +34,6 @@ export function TorrentControls({
   torrentsData,
   torrents,
   filteredAndSortedTorrents,
-  usePagination = false,
-  torrentsPerPage,
-  onTorrentsPerPageChange,
   categoryFilter,
   onCategoryFilterChange,
   sortBy,
@@ -101,21 +95,6 @@ export function TorrentControls({
               {filteredAndSortedTorrents.length}{' '}
               {filteredAndSortedTorrents.length === 1 ? 'torrent' : 'torrents'}
             </span>
-          )}
-          {usePagination && (
-            <Select value={String(torrentsPerPage)}
-              onValueChange={onTorrentsPerPageChange}>
-              <SelectTrigger className='w-[120px]'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='0'>All</SelectItem>
-                <SelectItem value='12'>12 / page</SelectItem>
-                <SelectItem value='24'>24 / page</SelectItem>
-                <SelectItem value='48'>48 / page</SelectItem>
-                <SelectItem value='96'>96 / page</SelectItem>
-              </SelectContent>
-            </Select>
           )}
         </div>
       </div>

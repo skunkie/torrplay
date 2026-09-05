@@ -26,8 +26,8 @@ import { SystemInfoDialog } from '@/components/system-info-dialog';
 import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
 import { TorrentStatsDialog } from '@/components/torrent-stats-dialog';
-import { Button } from '@/components/ui/button';
 import { useKeyboardNavigation } from '@/hooks/use-keyboard-navigation';
+import { useTorrentFilterSettings } from '@/hooks/use-torrent-filter-settings';
 import {
   addTorrentFromMagnet,
   getTorrent,
@@ -72,14 +72,17 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [titleFilter, setTitleFilter] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('');
-  const [sortBy, setSortBy] = useState('date');
-  const [page, setPage] = useState(1);
-  const [torrentsPerPage, setTorrentsPerPage] = useState(0);
+  const {
+    titleFilter,
+    handleTitleFilterChange,
+    categoryFilter,
+    handleCategoryFilterChange,
+    sortBy,
+    handleSortByChange,
+    isDesktop,
+  } = useTorrentFilterSettings({ searchParams });
 
   const [isOffline, setIsOffline] = useState(false);
-  const [usePagination, setUsePagination] = useState(true);
   const { liveUpdatesPaused, setLiveUpdatesPaused } = useLiveUpdates();
   const errorCount = useRef(0);
 
@@ -98,18 +101,16 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
   const topControlsRef = useRef<HTMLDivElement>(null);
   const mobileControlsRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
-  const paginationRef = useRef<HTMLDivElement>(null);
   const dispatchTorrentRef = useRef<typeof dispatchTorrent>(null);
   const handleTorrentFileURIRef = useRef<typeof handleTorrentFileURI>(null);
 
   const sections = useMemo(() => [
     { id: 'header', ref: headerRef, selector: 'a, button, input, [role="combobox"]' },
-    { id: 'filters', ref: usePagination ? topControlsRef : mobileControlsRef, selector: 'button, [role="combobox"]' },
+    { id: 'filters', ref: isDesktop ? topControlsRef : mobileControlsRef, selector: 'button, [role="combobox"]' },
     { id: 'grid', ref: gridRef, selector: '[data-radix-collection-item]' },
-    { id: 'pagination', ref: paginationRef, selector: 'button' },
-  ], [usePagination]);
+  ], [isDesktop]);
 
-  useKeyboardNavigation(sections, () => gridColumnCount.current, usePagination);
+  useKeyboardNavigation(sections, () => gridColumnCount.current, isDesktop);
 
   const modal = searchParams.get('modal');
   const hash = searchParams.get('hash');
@@ -195,23 +196,6 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     }
     prevModalRef.current = modal;
   }, [modal]);
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(min-width: 768px)');
-    const handleMediaChange = (e: { matches: boolean }) => {
-      setUsePagination(e.matches);
-      if (!e.matches) {
-        setTorrentsPerPage(0);
-      }
-    };
-
-    handleMediaChange(mediaQuery);
-    mediaQuery.addEventListener('change', handleMediaChange);
-
-    return () => {
-      mediaQuery.removeEventListener('change', handleMediaChange);
-    };
-  }, []);
 
   const handlePlay = useCallback((torrent: Torrent) => {
     updateModal('play', torrent.hash);
@@ -388,21 +372,6 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     return Array.from(new Set(allCategories)).sort();
   }, [torrentsData]);
 
-  const handleTitleFilterChange = (query: string) => {
-    setTitleFilter(query);
-    setPage(1);
-  };
-
-  const handleCategoryFilterChange = (value: string) => {
-    setCategoryFilter(value === 'all' ? '' : value);
-    setPage(1);
-  };
-
-  const handleTorrentsPerPageChange = (value: string) => {
-    setTorrentsPerPage(Number(value));
-    setPage(1);
-  };
-
   const openDeleteDialog = (torrent: Torrent) => {
     updateModal('delete', torrent.hash);
   };
@@ -450,23 +419,6 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     });
   }, [torrentsData, titleFilter, categoryFilter, sortBy]);
 
-  const totalPages = usePagination && torrentsPerPage > 0 ? Math.ceil(filteredAndSortedTorrents.length / torrentsPerPage) : 1;
-
-  const paginatedTorrents = useMemo(() => {
-    if (torrentsPerPage === 0) {
-      return filteredAndSortedTorrents;
-    }
-    const start = (page - 1) * torrentsPerPage;
-    const end = start + torrentsPerPage;
-    return filteredAndSortedTorrents.slice(start, end);
-  }, [filteredAndSortedTorrents, page, torrentsPerPage]);
-
-  useEffect(() => {
-    if (page > totalPages) {
-      setPage(1);
-    }
-  }, [page, totalPages]);
-
   if (isAuthLoading) {
     return (
       <div className='flex justify-center items-center h-screen'>
@@ -513,7 +465,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         </div>
       );
     }
-    if (paginatedTorrents.length === 0) {
+    if (filteredAndSortedTorrents.length === 0) {
       return (
         <div className='text-center py-16 space-y-4'>
           <div>
@@ -531,7 +483,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     }
     return (
       <TorrentGrid
-        torrents={paginatedTorrents}
+        torrents={filteredAndSortedTorrents}
         onEdit={t => updateModal('edit', t.hash)}
         onViewStats={t => updateModal('stats', t.hash)}
         onDelete={openDeleteDialog}
@@ -580,12 +532,10 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
           torrentsData={torrentsData}
           torrents={categories}
           filteredAndSortedTorrents={filteredAndSortedTorrents}
-          torrentsPerPage={torrentsPerPage}
-          onTorrentsPerPageChange={handleTorrentsPerPageChange}
           categoryFilter={categoryFilter}
           onCategoryFilterChange={handleCategoryFilterChange}
           sortBy={sortBy}
-          onSortByChange={setSortBy}
+          onSortByChange={handleSortByChange}
           onAddTorrent={() => updateModal('add')}
           topControlsRef={topControlsRef}
           mobileControlsRef={mobileControlsRef}
@@ -594,25 +544,6 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         <div ref={gridRef}>
           {renderContent()}
         </div>
-
-        {usePagination && torrentsPerPage > 0 && totalPages > 1 && (
-          <div ref={paginationRef}
-            className='flex justify-center items-center gap-4 mt-8'>
-            <Button onClick={() => setPage(page - 1)}
-              disabled={page === 1}
-              variant='outline'>
-              Previous
-            </Button>
-            <span className='text-sm text-muted-foreground'>
-              Page {page} of {totalPages}
-            </span>
-            <Button onClick={() => setPage(page + 1)}
-              disabled={page === totalPages}
-              variant='outline'>
-              Next
-            </Button>
-          </div>
-        )}
       </PageContainer>
 
       <MetricsDialog open={modal === 'metrics'}
