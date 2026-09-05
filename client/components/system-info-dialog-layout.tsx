@@ -4,17 +4,25 @@
 
 'use client';
 
-import { Calendar, Clock, Cpu, GitCommit, Info, Monitor, Server } from 'lucide-react';
+import { Calendar, Check, Clock, Cpu, GitCommit, Info, Loader2, Monitor, Server } from 'lucide-react';
+import type { ReactNode } from 'react';
 
+import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { UpdateStatus } from '@/lib/app-update-context';
 import { formatUptime } from '@/lib/format-utils';
 import { SystemInfo } from '@/lib/types/api';
 
-interface SystemInfoDialogLayoutProps {
+export interface SystemInfoDialogLayoutProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
-  systemInfo: SystemInfo | null
+  systemInfo: SystemInfo | null,
+  updateStatus?: UpdateStatus,
+  latestVersion?: string | null,
+  onCheckForUpdates?: () => void,
+  onViewUpdate?: () => void,
+  additionalContent?: ReactNode
 }
 
 const operatingSystemLabels: Record<SystemInfo['os'], string> = {
@@ -26,7 +34,16 @@ const operatingSystemLabels: Record<SystemInfo['os'], string> = {
   unknown: 'Unknown',
 };
 
-export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: SystemInfoDialogLayoutProps) {
+export function SystemInfoDialogLayout({
+  open,
+  onOpenChange,
+  systemInfo,
+  updateStatus,
+  latestVersion,
+  onCheckForUpdates,
+  onViewUpdate,
+  additionalContent,
+}: SystemInfoDialogLayoutProps) {
   return (
     <Dialog open={open}
       onOpenChange={onOpenChange}>
@@ -45,10 +62,68 @@ export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: Syste
                   <Info className='h-5 w-5 text-primary' />
                 </div>
                 <div className='flex-1 min-w-0'>
-                  <p className='text-xs text-muted-foreground'>Version</p>
-                  <p className='text-lg font-semibold text-foreground truncate'>
-                    {systemInfo?.version}
-                  </p>
+                  <div className='flex min-h-5 items-center justify-between gap-1'>
+                    <p className='shrink-0 text-xs text-muted-foreground'>Version</p>
+                    {updateStatus === 'up-to-date' ? (
+                      <span className='inline-flex items-center gap-1 text-xs text-muted-foreground'>
+                        <Check className='h-3 w-3 text-green-500' />
+                        Up to date
+                      </span>
+                    ) : updateStatus === 'checking' ? (
+                      <span className='inline-flex items-center gap-1 text-xs text-muted-foreground'>
+                        <Loader2 className='h-3 w-3 animate-spin text-primary' />
+                        Checking...
+                      </span>
+                    ) : updateStatus === 'error' ? (
+                      <span className='text-xs text-destructive'>Failed to check</span>
+                    ) : null}
+                  </div>
+                  <div className='flex items-center justify-between gap-2 min-w-0'>
+                    <p className='text-lg font-semibold text-foreground truncate min-w-0'>
+                      {systemInfo?.version}
+                    </p>
+                    {onCheckForUpdates && updateStatus !== 'checking' && (
+                      updateStatus === 'available' ? (
+                        <Button
+                          size='sm'
+                          variant='default'
+                          onClick={onViewUpdate}
+                          className='h-6 text-[11px] px-1.5 flex-shrink-0 ml-auto'
+                        >
+                          {latestVersion
+                            ? `v${latestVersion.replace(/^v/i, '')} available`
+                            : 'Update available'}
+                        </Button>
+                      ) : updateStatus === 'up-to-date' ? (
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={onCheckForUpdates}
+                          className='h-6 text-[11px] px-1.5 text-muted-foreground hover:text-foreground flex-shrink-0 ml-auto'
+                        >
+                          Check again
+                        </Button>
+                      ) : updateStatus === 'error' ? (
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={onCheckForUpdates}
+                          className='h-6 text-[11px] px-1.5 text-muted-foreground hover:text-foreground flex-shrink-0 ml-auto'
+                        >
+                          Retry
+                        </Button>
+                      ) : (
+                        <Button
+                          size='sm'
+                          variant='ghost'
+                          onClick={onCheckForUpdates}
+                          className='h-6 text-[11px] px-1.5 text-muted-foreground hover:text-foreground flex-shrink-0 ml-auto'
+                        >
+                          Check for updates
+                        </Button>
+                      )
+                    )}
+                  </div>
                 </div>
               </div>
             </Card>
@@ -156,6 +231,7 @@ export function SystemInfoDialogLayout({ open, onOpenChange, systemInfo }: Syste
               </div>
             </Card>
           </div>
+          {additionalContent}
         </div>
       </DialogContent>
     </Dialog>
