@@ -26,6 +26,7 @@ interface TorrentControlsProps {
   sortBy: string,
   onSortByChange: (value: string) => void,
   onAddTorrent: () => void,
+  titleFilter?: string,
   topControlsRef?: React.RefObject<HTMLDivElement | null>,
   mobileControlsRef?: React.RefObject<HTMLDivElement | null>
 }
@@ -39,6 +40,7 @@ export function TorrentControls({
   sortBy,
   onSortByChange,
   onAddTorrent,
+  titleFilter,
   topControlsRef: externalTopControlsRef,
   mobileControlsRef: externalMobileControlsRef,
 }: TorrentControlsProps) {
@@ -47,6 +49,15 @@ export function TorrentControls({
 
   const topControlsRef = externalTopControlsRef || internalTopControlsRef;
   const mobileControlsRef = externalMobileControlsRef || internalMobileControlsRef;
+
+  const totalCount = torrentsData?.torrents.length ?? 0;
+  const filteredCount = filteredAndSortedTorrents.length;
+  const hasActiveFilter = Boolean(titleFilter?.trim()) || (Boolean(categoryFilter) && categoryFilter !== 'all');
+  const isFiltered = hasActiveFilter || filteredCount !== totalCount;
+
+  const countLabel = isFiltered
+    ? `${filteredCount} of ${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`
+    : `${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`;
 
   return (
     <div className='mb-3'>
@@ -92,8 +103,7 @@ export function TorrentControls({
         <div className='flex items-center gap-2'>
           {torrentsData && (
             <span className='text-sm text-muted-foreground'>
-              {filteredAndSortedTorrents.length}{' '}
-              {filteredAndSortedTorrents.length === 1 ? 'torrent' : 'torrents'}
+              {countLabel}
             </span>
           )}
         </div>
@@ -110,8 +120,7 @@ export function TorrentControls({
           </Button>
           {torrentsData && (
             <span className='text-sm text-muted-foreground'>
-              {filteredAndSortedTorrents.length}{' '}
-              {filteredAndSortedTorrents.length === 1 ? 'torrent' : 'torrents'}
+              {countLabel}
             </span>
           )}
         </div>

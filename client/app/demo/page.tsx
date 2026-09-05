@@ -472,7 +472,7 @@ function DemoContent() {
       />
       <PageContainer inert={Boolean(modal)}>
         <TorrentControls
-          torrentsData={{ torrents: demoTorrentsData }}
+          torrentsData={{ torrents }}
           torrents={categories}
           filteredAndSortedTorrents={filteredAndSortedTorrents}
           categoryFilter={categoryFilter}
@@ -480,6 +480,7 @@ function DemoContent() {
           sortBy={sortBy}
           onSortByChange={handleSortByChange}
           onAddTorrent={() => updateModal('add')}
+          titleFilter={titleFilter}
         />
 
         <div ref={gridRef}>
