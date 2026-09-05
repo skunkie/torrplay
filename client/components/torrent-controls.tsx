@@ -21,14 +21,12 @@ interface TorrentControlsProps {
   torrentsData?: { torrents: Torrent[] },
   torrents: string[],
   filteredAndSortedTorrents: Torrent[],
-  usePagination?: boolean,
-  torrentsPerPage: number,
-  onTorrentsPerPageChange?: (value: string) => void,
   categoryFilter: string,
   onCategoryFilterChange: (value: string) => void,
   sortBy: string,
   onSortByChange: (value: string) => void,
   onAddTorrent: () => void,
+  titleFilter?: string,
   topControlsRef?: React.RefObject<HTMLDivElement | null>,
   mobileControlsRef?: React.RefObject<HTMLDivElement | null>
 }
@@ -37,14 +35,12 @@ export function TorrentControls({
   torrentsData,
   torrents,
   filteredAndSortedTorrents,
-  usePagination = false,
-  torrentsPerPage,
-  onTorrentsPerPageChange,
   categoryFilter,
   onCategoryFilterChange,
   sortBy,
   onSortByChange,
   onAddTorrent,
+  titleFilter,
   topControlsRef: externalTopControlsRef,
   mobileControlsRef: externalMobileControlsRef,
 }: TorrentControlsProps) {
@@ -53,6 +49,15 @@ export function TorrentControls({
 
   const topControlsRef = externalTopControlsRef || internalTopControlsRef;
   const mobileControlsRef = externalMobileControlsRef || internalMobileControlsRef;
+
+  const totalCount = torrentsData?.torrents.length ?? 0;
+  const filteredCount = filteredAndSortedTorrents.length;
+  const hasActiveFilter = Boolean(titleFilter?.trim()) || (Boolean(categoryFilter) && categoryFilter !== 'all');
+  const isFiltered = hasActiveFilter || filteredCount !== totalCount;
+
+  const countLabel = isFiltered
+    ? `${filteredCount} of ${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`
+    : `${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`;
 
   return (
     <div className='mb-3'>
@@ -98,24 +103,8 @@ export function TorrentControls({
         <div className='flex items-center gap-2'>
           {torrentsData && (
             <span className='text-sm text-muted-foreground'>
-              {filteredAndSortedTorrents.length}{' '}
-              {filteredAndSortedTorrents.length === 1 ? 'torrent' : 'torrents'}
+              {countLabel}
             </span>
-          )}
-          {usePagination && (
-            <Select value={String(torrentsPerPage)}
-              onValueChange={onTorrentsPerPageChange}>
-              <SelectTrigger className='w-[120px]'>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value='0'>All</SelectItem>
-                <SelectItem value='12'>12 / page</SelectItem>
-                <SelectItem value='24'>24 / page</SelectItem>
-                <SelectItem value='48'>48 / page</SelectItem>
-                <SelectItem value='96'>96 / page</SelectItem>
-              </SelectContent>
-            </Select>
           )}
         </div>
       </div>
@@ -131,8 +120,7 @@ export function TorrentControls({
           </Button>
           {torrentsData && (
             <span className='text-sm text-muted-foreground'>
-              {filteredAndSortedTorrents.length}{' '}
-              {filteredAndSortedTorrents.length === 1 ? 'torrent' : 'torrents'}
+              {countLabel}
             </span>
           )}
         </div>
