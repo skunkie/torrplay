@@ -5,6 +5,7 @@
 'use client';
 
 import { SystemInfoDialogLayout } from '@/components/system-info-dialog-layout';
+import { useOptionalAppUpdate } from '@/lib/app-update-context';
 import { SystemInfo } from '@/lib/types/api';
 
 const systemInfo: SystemInfo = {
@@ -21,11 +22,20 @@ interface DemoSystemInfoDialogProps {
 }
 
 export function DemoSystemInfoDialog({ open, onOpenChange }: DemoSystemInfoDialogProps) {
+  const update = useOptionalAppUpdate();
+
   return (
     <SystemInfoDialogLayout
       open={open}
       onOpenChange={onOpenChange}
       systemInfo={systemInfo}
+      updateStatus={update?.status}
+      latestVersion={update?.latestVersion}
+      onCheckForUpdates={update?.isSupported ? () => void update.checkForUpdates(true) : undefined}
+      onViewUpdate={update?.isSupported ? () => {
+        onOpenChange(false);
+        update.setIsDialogOpen(true);
+      } : undefined}
     />
   );
 }

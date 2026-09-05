@@ -12,7 +12,9 @@ import { HeaderLayout } from '@/components/header-layout';
 import { PageContainer } from '@/components/page-container';
 import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
+import { UpdateDialog } from '@/components/update-dialog';
 import { useTorrentFilterSettings } from '@/hooks/use-torrent-filter-settings';
+import { useOptionalAppUpdate } from '@/lib/app-update-context';
 import { Torrent, TorrentStats } from '@/lib/types/api';
 
 import { DemoAddTorrentDialog } from './demo-add-torrent-dialog';
@@ -286,6 +288,7 @@ const deleteTorrent = (hash: string) => new Promise(resolve => setTimeout(() => 
 
 function DemoContent() {
   const router = useRouter();
+  const appUpdate = useOptionalAppUpdate();
   const searchParams = useSearchParams();
   const modal = searchParams.get('modal');
   const hash = searchParams.get('hash');
@@ -452,6 +455,8 @@ function DemoContent() {
     });
   };
 
+  const hasOpenDialog = Boolean(modal) || Boolean(appUpdate?.isDialogOpen);
+
   return (
     <>
       <HeaderLayout
@@ -468,9 +473,9 @@ function DemoContent() {
         logout={logout}
         auth={auth}
         isHidden={false}
-        inert={Boolean(modal)}
+        inert={hasOpenDialog}
       />
-      <PageContainer inert={Boolean(modal)}>
+      <PageContainer inert={hasOpenDialog}>
         <TorrentControls
           torrentsData={{ torrents }}
           torrents={categories}
@@ -507,6 +512,7 @@ function DemoContent() {
         open={modal === 'system-info'}
         onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
       />
+      <UpdateDialog deferWhile={Boolean(modal)} />
       <DemoEditTorrentDialog
         torrent={selectedTorrent}
         open={modal === 'edit' && !!selectedTorrent}

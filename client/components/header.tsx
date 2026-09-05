@@ -8,12 +8,13 @@ import { forwardRef, useCallback, useEffect, useRef, useState } from 'react';
 import useSWR from 'swr';
 
 import { getSystemInfo } from '@/lib/api/system';
+import { useOptionalAppUpdate } from '@/lib/app-update-context';
 import { useAuth } from '@/lib/auth-context';
 import { useLiveUpdates } from '@/lib/live-updates-context';
 
 import { HeaderLayout } from './header-layout';
 
-interface HeaderProps {
+export interface HeaderProps {
   homeHref: string,
   onMetricsClick: () => void,
   onSettingsClick: () => void,
@@ -35,6 +36,7 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
   }, ref) => {
   const { liveUpdatesPaused, setLiveUpdatesPaused } = useLiveUpdates();
   const { isAuthenticated, logout, auth } = useAuth();
+  const update = useOptionalAppUpdate();
   const [isHidden, setIsHidden] = useState(false);
   const lastScrollY = useRef(0);
 
@@ -45,6 +47,7 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
   });
 
   const version = systemInfo ? `v${systemInfo.version}` : null;
+  const hasUpdate = update?.isSupported && update.status === 'available';
 
   const handleScroll = useCallback(() => {
     const currentScrollY = window.scrollY;
@@ -92,6 +95,8 @@ export const Header = forwardRef<HTMLDivElement, HeaderProps>((
       liveUpdatesPaused={liveUpdatesPaused}
       handlePauseClick={handlePauseClick}
       version={version}
+      hasUpdate={hasUpdate}
+      onUpdateClick={update?.isSupported ? () => update.setIsDialogOpen(true) : undefined}
       isAuthenticated={isAuthenticated}
       logout={logout}
       auth={auth}

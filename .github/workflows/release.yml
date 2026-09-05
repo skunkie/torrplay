@@ -31,6 +31,8 @@ jobs:
         shell: bash
         working-directory: ./client
       - name: Build Client
+        env:
+          RELEASES_URL: ${{ vars.RELEASES_URL }}
         run: |
           pnpm install --frozen-lockfile
           pnpm build
@@ -297,6 +299,9 @@ jobs:
         shell: bash
         working-directory: ./client
       - name: Build Tauri app
+        env:
+          APP_ARCH: ${{ runner.arch }}
+          RELEASES_URL: ${{ vars.RELEASES_URL }}
         uses: tauri-apps/tauri-action@v0
         with:
           projectPath: ./client

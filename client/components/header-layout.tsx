@@ -25,6 +25,8 @@ interface HeaderLayoutProps {
   liveUpdatesPaused: boolean,
   handlePauseClick: () => void,
   version: string | null,
+  hasUpdate?: boolean,
+  onUpdateClick?: () => void,
   isAuthenticated: boolean,
   logout: () => void,
   auth: AuthContextType['auth'],
@@ -43,6 +45,8 @@ export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
     liveUpdatesPaused,
     handlePauseClick,
     version,
+    hasUpdate,
+    onUpdateClick,
     isAuthenticated,
     logout,
     auth,
@@ -80,17 +84,31 @@ export const HeaderLayout = forwardRef<HTMLDivElement, HeaderLayoutProps>((
       <div className='container mx-auto px-3 sm:px-4 py-2 space-y-3 sm:space-y-4 max-w-screen-tv'>
         <div className='flex items-center justify-between gap-2 sm:gap-4'>
           <div className='flex items-center gap-3 sm:gap-6 md:gap-8 lg:gap-10 min-w-0'>
-            <Link href={homeHref}
-              className='flex items-center gap-1.5 sm:gap-2 shrink-0'>
-              <h1 className='text-xl xs:text-2xl sm:text-3xl font-semibold text-foreground tracking-tight'>
-                TorrPlay
-                {version && (
-                  <sup className='text-[10px] xs:text-xs font-normal text-muted-foreground ml-1'>
-                    <span className='font-semibold'>{version}</span>
-                  </sup>
-                )}
-              </h1>
-            </Link>
+            <div className='flex items-center gap-2 shrink-0'>
+              <Link href={homeHref}
+                className='flex items-center gap-1.5 sm:gap-2 shrink-0'>
+                <h1 className='text-xl xs:text-2xl sm:text-3xl font-semibold text-foreground tracking-tight'>
+                  TorrPlay
+                  {version && (
+                    <sup className='text-[10px] xs:text-xs font-normal text-muted-foreground ml-1'>
+                      <span className='font-semibold'>{version}</span>
+                    </sup>
+                  )}
+                </h1>
+              </Link>
+              {hasUpdate && onUpdateClick && (
+                <button
+                  type='button'
+                  onClick={onUpdateClick}
+                  className='hidden xs:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-primary/15 text-primary hover:bg-primary/25 transition-colors cursor-pointer'
+                  title='Update available'
+                  aria-label='TorrPlay update available'
+                >
+                  <span className='h-1.5 w-1.5 rounded-full bg-primary animate-pulse' />
+                  <span>Update</span>
+                </button>
+              )}
+            </div>
 
             <div className='hidden md:block'>
               <div className='relative w-44 md:w-52 lg:w-64'>

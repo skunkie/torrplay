@@ -10,6 +10,7 @@ import useSWR from 'swr';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { getSystemInfo } from '@/lib/api/system';
+import { useOptionalAppUpdate } from '@/lib/app-update-context';
 
 import { SystemInfoDialogLayout } from './system-info-dialog-layout';
 
@@ -20,6 +21,7 @@ interface SystemInfoDialogProps {
 
 export function SystemInfoDialog({ open, onOpenChange }: SystemInfoDialogProps) {
   const { data: systemInfo } = useSWR(open ? '/api/system/info' : null, () => getSystemInfo());
+  const update = useOptionalAppUpdate();
 
   if (!open) return null;
 
@@ -40,7 +42,18 @@ export function SystemInfoDialog({ open, onOpenChange }: SystemInfoDialogProps) 
     );
   }
 
-  return <SystemInfoDialogLayout open={open}
-    onOpenChange={onOpenChange}
-    systemInfo={systemInfo} />;
+  return (
+    <SystemInfoDialogLayout
+      open={open}
+      onOpenChange={onOpenChange}
+      systemInfo={systemInfo}
+      updateStatus={update?.status}
+      latestVersion={update?.latestVersion}
+      onCheckForUpdates={update?.isSupported ? () => void update.checkForUpdates(true) : undefined}
+      onViewUpdate={update?.isSupported ? () => {
+        onOpenChange(false);
+        update.setIsDialogOpen(true);
+      } : undefined}
+    />
+  );
 }
