@@ -537,6 +537,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
           sortBy={sortBy}
           onSortByChange={handleSortByChange}
           onAddTorrent={() => updateModal('add')}
+          titleFilter={titleFilter}
           topControlsRef={topControlsRef}
           mobileControlsRef={mobileControlsRef}
         />
