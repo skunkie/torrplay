@@ -14,8 +14,13 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
 )
+
+func TestMain(m *testing.M) {
+	testutil.VerifyTestMain(m, "github.com/ethulhu/helix", "github.com/skunkie/helix")
+}
 
 const testTorrentFileName = "test file.mp4"
 

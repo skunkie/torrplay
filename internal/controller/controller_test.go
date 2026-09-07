@@ -32,8 +32,13 @@ import (
 	"github.com/torrplay/torrplay/internal/httpclient"
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/metrics"
+	tputil "github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
 )
+
+func TestMain(m *testing.M) {
+	tputil.VerifyTestMain(m)
+}
 
 var (
 	sintelHash = metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
@@ -148,7 +153,6 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 	}
 
 	ctrl.SetupRouter()
-	ctrl.Start()
 
 	var cleanupOnce sync.Once
 	cleanup := func() {

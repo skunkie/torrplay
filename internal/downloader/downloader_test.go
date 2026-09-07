@@ -68,6 +68,25 @@ func mustEncodeInfo(t *testing.T, info *metainfo.Info) []byte {
 	return buf.Bytes()
 }
 
+func newTestTorrentClient(t *testing.T, dataDir string) *torrent.Client {
+	t.Helper()
+	cfg := torrent.NewDefaultClientConfig()
+	cfg.DataDir = dataDir
+	cfg.NoDHT = true
+	cfg.DisablePEX = true
+	cfg.DisableTrackers = true
+	cfg.DisableWebtorrent = true
+	cfg.DisableWebseeds = true
+	cfg.NoDefaultPortForwarding = true
+	cfg.DisableUTP = true
+	cfg.DisableTCP = true
+	cfg.ListenPort = 0
+	c, err := torrent.NewClient(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { c.Close() })
+	return c
+}
+
 func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	testMetaInfo := newTestTorrent(t, 1024)
 	testHash := testMetaInfo.HashInfoBytes()
@@ -92,17 +111,7 @@ func TestDownloader_ProcessTorrents_Metrics(t *testing.T) {
 	m := metrics.New()
 	logger := slog.New(slog.DiscardHandler)
 
-	clientCfg := torrent.NewDefaultClientConfig()
-	clientCfg.DataDir = td
-	clientCfg.NoDHT = true
-	clientCfg.DisablePEX = true
-	clientCfg.DisableTrackers = true
-	clientCfg.DisableWebtorrent = true
-	clientCfg.DisableWebseeds = true
-	clientCfg.ListenPort = 0
-	client, err := torrent.NewClient(clientCfg)
-	require.NoError(t, err)
-	defer client.Close()
+	client := newTestTorrentClient(t, td)
 
 	// Create the downloader instance.
 	downloader := New(client, db, logger, m, pc, td, nil)
@@ -179,17 +188,7 @@ func TestDownloader_Stop(t *testing.T) {
 	m := metrics.New()
 	logger := slog.New(slog.DiscardHandler)
 
-	clientCfg := torrent.NewDefaultClientConfig()
-	clientCfg.DataDir = td
-	clientCfg.NoDHT = true
-	clientCfg.DisablePEX = true
-	clientCfg.DisableTrackers = true
-	clientCfg.DisableWebtorrent = true
-	clientCfg.DisableWebseeds = true
-	clientCfg.ListenPort = 0
-	client, err := torrent.NewClient(clientCfg)
-	require.NoError(t, err)
-	defer client.Close()
+	client := newTestTorrentClient(t, td)
 
 	db := &MockDB{
 		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(true)}},
@@ -235,17 +234,7 @@ func TestDownloader_ProcessTorrents_DownloaderDisabled(t *testing.T) {
 	m := metrics.New()
 	logger := slog.New(slog.DiscardHandler)
 
-	clientCfg := torrent.NewDefaultClientConfig()
-	clientCfg.DataDir = td
-	clientCfg.NoDHT = true
-	clientCfg.DisablePEX = true
-	clientCfg.DisableTrackers = true
-	clientCfg.DisableWebtorrent = true
-	clientCfg.DisableWebseeds = true
-	clientCfg.ListenPort = 0
-	client, err := torrent.NewClient(clientCfg)
-	require.NoError(t, err)
-	defer client.Close()
+	client := newTestTorrentClient(t, td)
 
 	downloader := New(client, db, logger, m, pc, td, nil)
 	downloader.downloading[testHash] = struct{}{}
@@ -287,17 +276,7 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	m := metrics.New()
 	logger := slog.New(slog.DiscardHandler)
 
-	clientCfg := torrent.NewDefaultClientConfig()
-	clientCfg.DataDir = td
-	clientCfg.NoDHT = true
-	clientCfg.DisablePEX = true
-	clientCfg.DisableTrackers = true
-	clientCfg.DisableWebtorrent = true
-	clientCfg.DisableWebseeds = true
-	clientCfg.ListenPort = 0
-	client, err := torrent.NewClient(clientCfg)
-	require.NoError(t, err)
-	defer client.Close()
+	client := newTestTorrentClient(t, td)
 
 	downloader := New(client, db, logger, m, pc, td, nil)
 	downloader.downloading[testHash] = struct{}{}

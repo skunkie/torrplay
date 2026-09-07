@@ -128,6 +128,8 @@ linters:
           alias: nethttpmiddleware
         - pkg: github.com/oapi-codegen/runtime/types
           alias: openapi_types
+        - pkg: github.com/torrplay/torrplay/internal/testutil
+          alias: tputil
         - pkg: github.com/torrplay/torrplay/pkg/storage
           alias: memstorage
     modernize:
