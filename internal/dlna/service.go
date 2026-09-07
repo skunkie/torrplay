@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ethulhu/helix/upnp"
+	"github.com/ethulhu/helix/upnpav/contentdirectory"
 	"github.com/sirupsen/logrus"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/images"
@@ -31,6 +32,7 @@ const notifyInterval = 30 * time.Second
 
 type Service struct {
 	basePath         string
+	broadcastDone    sync.WaitGroup
 	cancel           context.CancelFunc
 	contentDirectory *ContentDirectory
 	db               database.DatabaseInterface
@@ -77,14 +79,21 @@ func (s *Service) Reconfigure(friendlyName string, httpAddr string, port int) er
 
 func (s *Service) SendUpdateNotification() {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	contentDirectoryService := s.contentDirectory
+	device := s.device
+	logger := s.logger
+	s.mu.RUnlock()
 
-	if s.contentDirectory == nil || s.device == nil {
+	if contentDirectoryService == nil || device == nil {
 		return
 	}
 
-	if err := upnp.SendUpdateNotification(context.TODO(), s.device, s.contentDirectory.baseURL.String(), nil); err != nil {
-		s.logger.Warn("could not send update notification", "err", err)
+	ctx := context.Background()
+	if err := device.NotifySubscribers(ctx, contentdirectory.Version1); err != nil {
+		logger.Warn("could not notify event subscribers", "err", err)
+	}
+	if err := upnp.SendUpdateNotification(ctx, device, contentDirectoryService.baseURL.String(), nil); err != nil {
+		logger.Warn("could not send update notification", "err", err)
 	}
 }
 
@@ -101,7 +110,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// serve icons.
 	if strings.HasPrefix(r.URL.Path, path.Join(s.basePath, "/icons")) {
-		http.StripPrefix(s.basePath, http.FileServerFS(iconsFS)).ServeHTTP(w, r)
+		http.StripPrefix(strings.TrimRight(s.basePath, "/"), http.FileServerFS(iconsFS)).ServeHTTP(w, r)
 		return
 	}
 
@@ -135,7 +144,7 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 	var ipAddr string
 	// Use the specified IP address for DLNA, or discover a private IP address if the HTTP server is bound to 0.0.0.0.
 	if net.ParseIP(httpAddr).IsUnspecified() {
-		s.logger.Info(fmt.Sprintf("HTTP server is listening on all interfaces (%s), attempting to find a private IP address for DLNA", httpAddr))
+		s.logger.Info("HTTP server is listening on all interfaces (" + httpAddr + "), attempting to find a private IP address for DLNA")
 		ip, err := utils.GetOutboundIP()
 		if err != nil {
 			s.logger.Warn("could not find outbound IP address, DLNA service will be disabled", "err", err)
@@ -180,11 +189,11 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 
-	go func() {
+	s.broadcastDone.Go(func() {
 		if err := upnp.BroadcastDevice(ctx, device, baseURL.String(), nil, notifyInterval); err != nil {
 			s.logger.Error("failed to broadcast DLNA device", "err", err)
 		}
-	}()
+	})
 
 	s.device = device
 	s.handler = device.HTTPHandler(s.basePath)
@@ -198,7 +207,6 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 
 func (s *Service) Stop() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	s.logger.Info("stopping DLNA service")
 
@@ -214,6 +222,13 @@ func (s *Service) Stop() error {
 		s.handler = nil
 		s.contentDirectory = nil
 	}
+
+	s.mu.Unlock()
+
+	// Wait for the broadcast goroutine to exit fully before returning.
+	// This ensures Stop is synchronous: any subsequent Start (or the next
+	// -count iteration in tests) cannot race with the previous goroutine.
+	s.broadcastDone.Wait()
 
 	s.logger.Info("DLNA service stopped")
 
