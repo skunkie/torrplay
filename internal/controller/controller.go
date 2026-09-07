@@ -68,6 +68,12 @@ var gotInfoTimeout = 30 * time.Second
 
 var _ api.ServerInterface = (*Controller)(nil)
 
+func init() {
+	chi.RegisterMethod("SUBSCRIBE")
+	chi.RegisterMethod("UNSUBSCRIBE")
+	chi.RegisterMethod("NOTIFY")
+}
+
 type torrentInfo struct {
 	lastUsedAt  time.Time
 	storageType api.TorrentStorage
