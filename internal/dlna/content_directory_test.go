@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"testing"
 	"time"
@@ -22,19 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
-	"github.com/torrplay/torrplay/internal/images"
 )
-
-type mockImages struct {
-	images.Unimplemented
-}
-
-func (m *mockImages) SaveData(data []byte) (*string, error) {
-	s := "test"
-	return &s, nil
-}
-
-func (m *mockImages) ServeHTTP(w http.ResponseWriter, r *http.Request) {}
 
 func TestClampUint(t *testing.T) {
 	assert.Zero(t, clampUint(-1))
@@ -217,7 +204,7 @@ func TestBrowseTorrent_ItemProperties(t *testing.T) {
 	db := &mockDB{}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 
 	didl, totalMatches, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0)
 	require.NoError(t, err)
@@ -258,7 +245,7 @@ func TestBrowseTorrent_WithPoster(t *testing.T) {
 	}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 
 	didl, totalMatches, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0)
 	require.NoError(t, err)
@@ -438,7 +425,7 @@ func TestRecentlyAddedAndRecentlyViewedTorrents(t *testing.T) {
 
 func TestContentDirectory_NilBaseURL(t *testing.T) {
 	db := &mockDB{}
-	cd := NewContentDirectory(db, &mockImages{}, nil, "/posters/")
+	cd := NewContentDirectory(db, nil, "/posters/")
 
 	uri := cd.fileURI("0123456789012345678901234567890123456789", "test.mp4")
 	assert.Empty(t, uri)
@@ -596,7 +583,7 @@ func TestContentDirectory_Categories(t *testing.T) {
 	db := &mockDBWithCategories{torrents: testTorrents}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	t.Run("categories container metadata", func(t *testing.T) {
@@ -761,7 +748,7 @@ func TestContentDirectory_NoTorrents(t *testing.T) {
 	db := &mockDBWithCategories{torrents: []*database.Torrent{}}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	t.Run("root metadata with no torrents", func(t *testing.T) {
@@ -865,7 +852,7 @@ func TestContentDirectory_TorrentsWithoutCategories(t *testing.T) {
 	db := &mockDBWithCategories{torrents: testTorrents}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	t.Run("root metadata when no categories set", func(t *testing.T) {
@@ -939,7 +926,7 @@ func TestContentDirectory_OnlyExplicitCategories_NoUncategorized(t *testing.T) {
 	db := &mockDBWithCategories{torrents: testTorrents}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	t.Run("categories list only has explicit categories and no Uncategorized", func(t *testing.T) {
@@ -976,7 +963,7 @@ func TestContentDirectory_DynamicCategoryTransition(t *testing.T) {
 	db := &mockDBWithCategories{torrents: []*database.Torrent{torrent}}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	// State 1: Torrent has no category
@@ -1043,7 +1030,7 @@ func TestContentDirectory_Categories_NonMediaTorrentsIgnored(t *testing.T) {
 	db := &mockDBWithCategories{torrents: []*database.Torrent{torrent}}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	// Since torrent has no media files, it is ignored by DLNA, so no categories exist
@@ -1087,7 +1074,7 @@ func TestContentDirectory_Categories_WhitespaceTrimming(t *testing.T) {
 	db := &mockDBWithCategories{torrents: testTorrents}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 	ctx := context.Background()
 
 	// Both should be grouped into a single "Movies" category

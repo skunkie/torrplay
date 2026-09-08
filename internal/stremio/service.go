@@ -21,7 +21,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
-	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -71,7 +70,6 @@ type AuthValidatorFunc func(token string) bool
 // Service implements the Stremio Addon Protocol v3.
 type Service struct {
 	db            database.DatabaseInterface
-	images        images.ServiceInterface
 	postersPath   string
 	logger        *slog.Logger
 	streamHandler StreamHandlerFunc
@@ -81,7 +79,6 @@ type Service struct {
 // NewService creates a new Stremio addon service.
 func NewService(
 	db database.DatabaseInterface,
-	imgService images.ServiceInterface,
 	postersPath string,
 	logger *slog.Logger,
 	streamHandler StreamHandlerFunc,
@@ -89,7 +86,6 @@ func NewService(
 ) *Service {
 	return &Service{
 		db:            db,
-		images:        imgService,
 		postersPath:   postersPath,
 		logger:        logger,
 		streamHandler: streamHandler,

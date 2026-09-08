@@ -92,7 +92,7 @@ func newTestService(t *testing.T) (*Service, func()) {
 
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	require.NoError(t, service.Start("test-server", "127.0.0.1", 8080))
 
@@ -102,7 +102,7 @@ func newTestService(t *testing.T) (*Service, func()) {
 func TestNewService(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	if service == nil {
 		t.Fatal("NewService returned nil")
@@ -137,7 +137,7 @@ func TestService_Start(t *testing.T) {
 func TestService_Start_NoErrorWithUnspecifiedIP(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	if err := service.Start("test-server", "0.0.0.0", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error for an unspecified IP: %v", err)
@@ -238,7 +238,7 @@ func TestAddHeader(t *testing.T) {
 func TestService_SetLogger(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	newLogger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	service.SetLogger(newLogger)
@@ -248,7 +248,7 @@ func TestService_SetLogger(t *testing.T) {
 func TestService_IncrementSystemUpdateID(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	// When content directory is nil (not started)
 	service.IncrementSystemUpdateID()
@@ -271,7 +271,7 @@ func TestService_IncrementSystemUpdateID(t *testing.T) {
 func TestService_SendUpdateNotification(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	// When stopped (no-op)
 	service.SendUpdateNotification()
@@ -326,7 +326,7 @@ func TestService_SendUpdateNotification(t *testing.T) {
 func TestService_ServeHTTP_IconsAndNotFound(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	t.Run("handler is nil when stopped", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/upnp/test", http.NoBody)

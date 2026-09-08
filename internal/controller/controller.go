@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -105,44 +104,47 @@ type torrentTracker struct {
 }
 
 type Controller struct {
-	client              *torrent.Client
-	dataDir             string
-	db                  database.DatabaseInterface
-	dlna                *dlna.Service
-	dlnaPath            string
-	downloader          *downloader.Downloader
-	httpAddr            string
-	httpClient          *httpclient.Client
-	httpServer          *httpserver.Server
-	images              images.ServiceInterface
-	logFile             io.Closer
-	logger              *slog.Logger
-	metrics             *metrics.Metrics
-	mu                  sync.RWMutex
-	port                int
-	pieceCompletion     piececompletion.DeletablePieceCompletion
-	posterCleanupDone   chan struct{}
-	posterCleanupTicker *time.Ticker
-	posterOpMu          sync.Mutex
-	postersPath         string
-	profilerAddr        string
-	profilerListener    net.Listener
-	profilerMu          sync.Mutex
-	profilerServer      *http.Server
-	preloadReadyTTL     time.Duration
-	router              *chi.Mux
-	settings            *api.Settings
-	shutdownOnce        sync.Once
-	speedMonitor        *speedMonitor
-	startedAt           time.Time
-	storageClient       *memstorage.Client
-	streamPool          *stream.Pool
-	stremio             *stremio.Service
-	preloadsMu          sync.Mutex
-	preloads            sync.Map
-	torrentTracker      torrentTracker
-	trackers            [][]string
-	runtimeConfig       controllerRuntimeConfig
+	client               *torrent.Client
+	dataDir              string
+	db                   database.DatabaseInterface
+	dlna                 *dlna.Service
+	dlnaPath             string
+	downloader           *downloader.Downloader
+	httpAddr             string
+	httpClient           *httpclient.Client
+	httpServer           *httpserver.Server
+	images               images.ServiceInterface
+	logFile              io.Closer
+	logger               *slog.Logger
+	metrics              *metrics.Metrics
+	mu                   sync.RWMutex
+	port                 int
+	pieceCompletion      piececompletion.DeletablePieceCompletion
+	posterCleanupDone    chan struct{}
+	posterCleanupTicker  *time.Ticker
+	posterOpMu           sync.Mutex
+	posterWorkers        sync.WaitGroup
+	posterWorkersMu      sync.Mutex
+	posterWorkersStopped bool
+	postersPath          string
+	profilerAddr         string
+	profilerListener     net.Listener
+	profilerMu           sync.Mutex
+	profilerServer       *http.Server
+	preloadReadyTTL      time.Duration
+	router               *chi.Mux
+	settings             *api.Settings
+	shutdownOnce         sync.Once
+	speedMonitor         *speedMonitor
+	startedAt            time.Time
+	storageClient        *memstorage.Client
+	streamPool           *stream.Pool
+	stremio              *stremio.Service
+	preloadsMu           sync.Mutex
+	preloads             sync.Map
+	torrentTracker       torrentTracker
+	trackers             [][]string
+	runtimeConfig        controllerRuntimeConfig
 
 	api.Unimplemented
 }
@@ -225,7 +227,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	c.pieceCompletion = pc
 
-	c.dlna = dlna.NewService(dbClient, imgService, c.dlnaPath, c.postersPath, c.logger)
+	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger)
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.
@@ -275,7 +277,6 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c.stremio = stremio.NewService(
 		dbClient,
-		imgService,
 		c.postersPath,
 		c.logger,
 		func(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdx int) {
@@ -285,7 +286,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	)
 
 	go c.startTorrentCleanup()
-	go c.startPosterCleanup()
+	c.startPosterWorker(c.startPosterCleanup)
 	go c.speedMonitor.Start(func() (int64, int64) {
 		c.mu.RLock()
 		client := c.client
@@ -357,12 +358,7 @@ func (c *Controller) buildRouter() *chi.Mux {
 	}
 
 	// Posters routes.
-	postersHandler := http.StripPrefix(c.postersPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		ext := path.Ext(p)
-		r.URL.Path = strings.TrimSuffix(p, ext)
-		c.images.ServeHTTP(w, r)
-	}))
+	postersHandler := http.StripPrefix(c.postersPath, c.images)
 	router.Mount(c.postersPath, postersHandler)
 
 	// Metrics routes.
@@ -637,12 +633,36 @@ func (c *Controller) Shutdown() {
 			_ = c.pieceCompletion.Close()
 		}
 		_ = c.client.Close()
+		c.stopPosterWorkers()
+		if c.images != nil {
+			_ = c.images.Close()
+		}
 		if c.logFile != nil {
 			_ = c.logFile.Close()
 		}
 
 		c.logger.Info("TorrPlay stopped")
 	})
+}
+
+func (c *Controller) startPosterWorker(worker func()) bool {
+	c.posterWorkersMu.Lock()
+	defer c.posterWorkersMu.Unlock()
+
+	if c.posterWorkersStopped {
+		return false
+	}
+
+	c.posterWorkers.Go(worker)
+	return true
+}
+
+func (c *Controller) stopPosterWorkers() {
+	c.posterWorkersMu.Lock()
+	c.posterWorkersStopped = true
+	c.posterWorkersMu.Unlock()
+
+	c.posterWorkers.Wait()
 }
 
 func profilerHandler() http.Handler {
@@ -763,7 +783,7 @@ func (c *Controller) cleanupUnusedPosters() {
 		}
 
 		if !isUsed {
-			if err := c.images.Delete(&id); err != nil {
+			if err := c.images.Delete(id); err != nil {
 				c.logger.Error("failed to delete unused poster", "err", err)
 			} else {
 				c.logger.Debug("deleted unused poster", "poster id", id)

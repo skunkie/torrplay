@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
-	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
 )
@@ -35,7 +34,7 @@ func TestAccessToken(t *testing.T) {
 }
 
 func TestBuildStreamURLDoesNotDoubleEscapeFilename(t *testing.T) {
-	svc := NewService(nil, nil, "", slog.Default(), nil, nil)
+	svc := NewService(nil, "", slog.Default(), nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "https://example.com/stremio/stream", http.NoBody)
 	ih := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
 
@@ -91,10 +90,6 @@ func (m *mockDB) GetTorrent(h metainfo.Hash) (*database.Torrent, error) {
 		}
 	}
 	return nil, database.ErrTorrentNotFound
-}
-
-type mockImages struct {
-	images.Unimplemented
 }
 
 func createTestTorrents() []*database.Torrent {
@@ -173,10 +168,9 @@ func setupTestService(t *testing.T, streamHandler StreamHandlerFunc, authValidat
 	t.Helper()
 
 	db := &mockDB{torrents: createTestTorrents()}
-	img := &mockImages{}
 	logger := slog.New(slog.DiscardHandler)
 
-	return NewService(db, img, "/posters/", logger, streamHandler, authValidator)
+	return NewService(db, "/posters/", logger, streamHandler, authValidator)
 }
 
 func TestManifest(t *testing.T) {
