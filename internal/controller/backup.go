@@ -91,9 +91,23 @@ func (c *Controller) RestoreTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, t := range backupData.Torrents {
-		if err := c.db.CreateTorrent(database.FromAPITorrent(t)); err != nil {
+		restored := database.FromAPITorrent(t)
+		restored.Storage = new(api.Memory)
+
+		if err := c.db.CreateTorrent(restored); err != nil {
 			if errors.Is(err, database.ErrTorrentExists) {
-				if err := c.db.UpdateTorrent(database.FromAPITorrent(t)); err != nil {
+				existing, getErr := c.db.GetTorrent(t.Hash)
+				if getErr != nil {
+					c.logger.Error("failed to get existing torrent on restore", "err", getErr, "hash", t.Hash.HexString())
+					continue
+				}
+
+				restored.Storage = existing.Storage
+				if existing.Storage != nil && *existing.Storage == api.File {
+					restored.InfoBytes = existing.InfoBytes
+				}
+
+				if err := c.db.UpdateTorrent(restored); err != nil {
 					c.logger.Error("failed to update torrent on restore", "err", err, "hash", t.Hash.HexString())
 				}
 			} else {
