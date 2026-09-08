@@ -19,7 +19,30 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/utils"
 )
+
+func restoreBackup(t *testing.T, ctrl *Controller, data backup) {
+	t.Helper()
+
+	var backupBytes bytes.Buffer
+	require.NoError(t, json.NewEncoder(&backupBytes).Encode(data))
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "torrplay.backup")
+	require.NoError(t, err)
+	_, err = part.Write(backupBytes.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/torrents/restore", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	rr := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusNoContent, rr.Code)
+}
 
 func TestBackupAndRestore(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
@@ -85,6 +108,93 @@ func TestRestoreInvalidBackup(t *testing.T) {
 	rr := httptest.NewRecorder()
 	ctrl.router.ServeHTTP(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestRestoreTorrentsPreservesTargetStorageChoices(t *testing.T) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = nil
+	})
+	defer cleanup()
+
+	fileHash := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+	memoryHash := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
+	newHash := metainfo.NewHashFromHex("3333333333333333333333333333333333333333")
+	fileStorage := api.File
+	memoryStorage := api.Memory
+	fileInfoBytes := []byte("existing file metadata")
+
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash: fileHash, Magnet: utils.MagnetURIFromHash(fileHash), Name: "old file name",
+			Files: []api.TorrentFile{}, Storage: &fileStorage, TotalSize: 1,
+		},
+		InfoBytes: fileInfoBytes,
+	}))
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash: memoryHash, Magnet: utils.MagnetURIFromHash(memoryHash), Name: "old memory name",
+			Files: []api.TorrentFile{}, Storage: &memoryStorage, TotalSize: 2,
+		},
+	}))
+
+	category := "restored"
+	restoreBackup(t, ctrl, backup{
+		Posters: map[string][]byte{},
+		Torrents: []*api.Torrent{
+			{
+				Hash: fileHash, Magnet: utils.MagnetURIFromHash(fileHash), Name: "updated file name",
+				Category: &category, Files: []api.TorrentFile{}, Storage: &memoryStorage, TotalSize: 10,
+			},
+			{
+				Hash: memoryHash, Magnet: utils.MagnetURIFromHash(memoryHash), Name: "updated memory name",
+				Category: &category, Files: []api.TorrentFile{}, Storage: &fileStorage, TotalSize: 20,
+			},
+			{
+				Hash: newHash, Magnet: utils.MagnetURIFromHash(newHash), Name: "new torrent",
+				Category: &category, Files: []api.TorrentFile{}, Storage: &fileStorage, TotalSize: 30,
+			},
+		},
+	})
+
+	restoredFile, err := ctrl.db.GetTorrent(fileHash)
+	require.NoError(t, err)
+	require.Equal(t, api.File, utils.Val(restoredFile.Storage))
+	assert.Equal(t, fileInfoBytes, restoredFile.InfoBytes)
+	assert.Equal(t, "updated file name", restoredFile.Name)
+	assert.Equal(t, int64(10), restoredFile.TotalSize)
+	assert.Equal(t, category, utils.Val(restoredFile.Category))
+
+	restoredMemory, err := ctrl.db.GetTorrent(memoryHash)
+	require.NoError(t, err)
+	require.Equal(t, api.Memory, utils.Val(restoredMemory.Storage))
+	assert.Empty(t, restoredMemory.InfoBytes)
+	assert.Equal(t, "updated memory name", restoredMemory.Name)
+	assert.Equal(t, int64(20), restoredMemory.TotalSize)
+
+	restoredNew, err := ctrl.db.GetTorrent(newHash)
+	require.NoError(t, err)
+	require.Equal(t, api.Memory, utils.Val(restoredNew.Storage))
+	assert.Empty(t, restoredNew.InfoBytes)
+	assert.Equal(t, "new torrent", restoredNew.Name)
+	assert.Equal(t, int64(30), restoredNew.TotalSize)
+}
+
+func TestBackupExcludesInfoBytes(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("4444444444444444444444444444444444444444")
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash: ih, Magnet: utils.MagnetURIFromHash(ih), Name: "file torrent",
+			Files: []api.TorrentFile{}, Storage: utils.Ptr(api.File),
+		},
+		InfoBytes: []byte("private metadata"),
+	}))
+
+	rr := testutil.NewRequest().Get("/api/v1/torrents/backup").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.NotContains(t, rr.Body.String(), "info_bytes")
 }
 
 func TestBackupAndRestoreWithPosters(t *testing.T) {
