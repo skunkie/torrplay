@@ -207,7 +207,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-to.GotInfo():
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		to.Drop()
 		<-to.Closed()
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
@@ -629,7 +629,7 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 		if err := json.NewEncoder(w).Encode(metadata); err != nil {
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		}
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		to.Drop()
 		<-to.Closed()
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
@@ -645,7 +645,7 @@ func (c *Controller) GetTorrentStats(w http.ResponseWriter, _ *http.Request, ih 
 
 	select {
 	case <-to.GotInfo():
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		to.Drop()
 		<-to.Closed()
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
@@ -1102,14 +1102,20 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			c.mu.Lock()
 			// Atomically swap the router and update the server address.
 			c.router = newRouter
+			httpServer := c.httpServer
 			addr := net.JoinHostPort(c.httpAddr, strconv.Itoa(c.resolveHTTPPort()))
-			c.httpServer.SetAddr(addr)
+			if httpServer != nil {
+				httpServer.SetAddr(addr)
+			}
 			c.mu.Unlock()
 
+			if httpServer == nil {
+				return
+			}
 			// Set the new router on the HTTP server and restart it.
-			c.httpServer.SetRouter(newRouter)
+			httpServer.SetRouter(newRouter)
 
-			if err := c.httpServer.Restart(); err != nil {
+			if err := httpServer.Restart(); err != nil {
 				c.logger.Debug(fmt.Sprintf("failed to update settings, %v", err))
 			}
 		}()
@@ -1632,7 +1638,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 
 	select {
 	case <-to.GotInfo():
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 		return
 	}
@@ -1818,7 +1824,7 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 				case <-to.GotInfo():
 					meta := to.Metainfo()
 					infoBytes = meta.InfoBytes
-				case <-time.After(gotInfoTimeout):
+				case <-time.After(c.runtimeConfig.gotInfoTimeout):
 					to.Drop()
 					<-to.Closed()
 					return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)

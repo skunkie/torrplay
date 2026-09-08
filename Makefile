@@ -73,19 +73,27 @@ lint:
 		"$$(go env GOPATH)/bin/golangci-lint" run; \
 	fi
 
+test:
+	go test ./...
+
+test-integration:
+	go test -count=1 -tags=integration -run '^TestIntegration' ./internal/controller
+
 help:
 	@echo "TorrPlay Build System"
 	@echo "====================="
 	@echo ""
 	@echo "Targets:"
-	@echo "  all          - Build all artifacts (application, android, docker) (default)"
-	@echo "  client       - Build web artifacts"
-	@echo "  application  - Build the application"
-	@echo "  android      - Build the Android APK files"
-	@echo "  docker       - Build the multi-platform Docker image"
-	@echo "  generate     - Run go generate to generate code"
-	@echo "  lint         - Run golangci-lint static analysis"
-	@echo "  help         - Show this help message"
+	@echo "  all              - Build all artifacts (application, android, docker) (default)"
+	@echo "  client           - Build web artifacts"
+	@echo "  application      - Build the application"
+	@echo "  android          - Build the Android APK files"
+	@echo "  docker           - Build the multi-platform Docker image"
+	@echo "  generate         - Run go generate to generate code"
+	@echo "  lint             - Run golangci-lint static analysis"
+	@echo "  test             - Run the fast offline test suite"
+	@echo "  test-integration - Run local controller integration tests"
+	@echo "  help             - Show this help message"
 	@echo ""
 	@echo "Variables:"
 	@echo "  VERSION         - Version tag for application and Docker images (default: 1.0.0)"
@@ -98,4 +106,4 @@ help:
 	@echo "  make lint                          # Run linter"
 	@echo ""
 
-.PHONY: all android application client docker generate help lint
+.PHONY: all android application client docker generate help lint test test-integration

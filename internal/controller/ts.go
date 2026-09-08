@@ -294,7 +294,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	if utils.Val(params.Preload) {
 		select {
 		case <-to.GotInfo():
-		case <-time.After(gotInfoTimeout):
+		case <-time.After(c.runtimeConfig.gotInfoTimeout):
 			to.Drop()
 			<-to.Closed()
 			return
@@ -319,7 +319,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	if utils.Val(params.Stat) {
 		select {
 		case <-to.GotInfo():
-		case <-time.After(gotInfoTimeout):
+		case <-time.After(c.runtimeConfig.gotInfoTimeout):
 			to.Drop()
 			<-to.Closed()
 			api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
@@ -416,7 +416,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 
 		select {
 		case <-to.GotInfo():
-		case <-time.After(gotInfoTimeout):
+		case <-time.After(c.runtimeConfig.gotInfoTimeout):
 			to.Drop()
 			<-to.Closed()
 			api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
@@ -525,7 +525,7 @@ func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-to.GotInfo():
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		to.Drop()
 		<-to.Closed()
 		api.HandleError(w, api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout))

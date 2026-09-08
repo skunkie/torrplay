@@ -36,6 +36,7 @@ const (
 type preloadTask struct {
 	cancel          context.CancelFunc
 	clearProtection func()
+	done            chan struct{}
 	expiryTimer     *time.Timer
 	targetBytes     int64
 	fileIndex       int
@@ -89,7 +90,7 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 
 	select {
 	case <-to.GotInfo():
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 		return
 	}
@@ -313,6 +314,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 	preload := &preloadTask{
 		cancel:          cancel,
 		clearProtection: clearProtection,
+		done:            make(chan struct{}),
 		targetBytes:     targetBytes,
 		fileIndex:       fileIndex,
 		filePath:        file.Path(),
@@ -325,16 +327,11 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		}
 	}
 	c.preloadsMu.Unlock()
-	removePreload := func() bool {
-		return c.removePreload(ih, preload)
-	}
 
+	completed := false
 	go func() {
 		defer func() {
-			if ctx.Err() != nil {
-				removePreload()
-			}
-			cancel()
+			c.finishPreload(ih, preload, completed && ctx.Err() == nil)
 		}()
 
 		if c.downloader != nil {
@@ -370,7 +367,6 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 			}
 		}
 		if preloadErr != nil {
-			removePreload()
 			c.logger.Warn("torrent preload failed", "hash", ih, "error", preloadErr)
 			return
 		}
@@ -380,9 +376,19 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 
 		preload.bytesRead.Store(preload.targetBytes)
 		preload.ready.Store(true)
-		c.schedulePreloadExpiry(ih, preload)
+		completed = true
 	}()
 	return preload
+}
+
+func (c *Controller) finishPreload(ih metainfo.Hash, preload *preloadTask, completed bool) {
+	close(preload.done)
+	if completed {
+		c.schedulePreloadExpiry(ih, preload)
+	} else {
+		c.removePreload(ih, preload)
+	}
+	preload.cancel()
 }
 
 func preloadRange(ctx context.Context, pool *stream.Pool, file *torrent.File, mode stream.StorageMode, start, end int64, bytesRead *atomic.Int64) error {
@@ -485,6 +491,9 @@ func releasePreload(preload *preloadTask) {
 	}
 	if preload.cancel != nil {
 		preload.cancel()
+	}
+	if preload.done != nil {
+		<-preload.done
 	}
 	if preload.clearProtection != nil {
 		preload.clearProtection()

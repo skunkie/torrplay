@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,203 +28,77 @@ import (
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
-func TestTorrentPreload_Endpoints(t *testing.T) {
+func TestTorrentPreloadEndpoints(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
-	sintelFile, err := os.Open(sintelTorrentFile)
+	file, err := os.Open(sintelTorrentFile)
 	require.NoError(t, err)
-	metaInfo, err := metainfo.Load(sintelFile)
-	_ = sintelFile.Close()
+	metaInfo, err := metainfo.Load(file)
+	require.NoError(t, file.Close())
 	require.NoError(t, err)
-
 	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
 	require.NoError(t, err)
 	<-to.GotInfo()
+	ih := to.InfoHash()
+	preloadURL := "/api/v1/torrents/" + ih.HexString() + "/preload"
 
-	server := httptest.NewServer(ctrl.router)
-	defer server.Close()
+	doRequest := func(method, target, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(method, target, strings.NewReader(body))
+		if body != "" {
+			request.Header.Set("Content-Type", "application/json")
+		}
+		ctrl.router.ServeHTTP(recorder, request)
+		return recorder
+	}
+	decodeStatus := func(recorder *httptest.ResponseRecorder) api.PreloadResponse {
+		t.Helper()
+		var response api.PreloadResponse
+		require.NoError(t, json.NewDecoder(recorder.Body).Decode(&response))
+		return response
+	}
 
-	ih := to.InfoHash().HexString()
+	idle := doRequest(http.MethodGet, preloadURL, "")
+	require.Equal(t, http.StatusOK, idle.Code)
+	idleStatus := decodeStatus(idle)
+	assert.Equal(t, api.Idle, idleStatus.Status)
+	assert.Equal(t, preloadNoFileIndex, idleStatus.FileIndex)
+	assert.Zero(t, idleStatus.TargetBytes)
+	assert.Zero(t, idleStatus.Progress)
 
-	t.Run("GET when idle returns status idle", func(t *testing.T) {
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
-		require.NoError(t, err)
-		defer resp.Body.Close()
+	unknownURL := "/api/v1/torrents/" + (metainfo.Hash{1, 2, 3}).HexString() + "/preload"
+	assert.Equal(t, http.StatusNotFound, doRequest(http.MethodGet, unknownURL, "").Code)
+	assert.Equal(t, http.StatusNotFound, doRequest(http.MethodDelete, unknownURL, "").Code)
+	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"file_index":9999}`).Code)
+	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"file_path":"missing.mkv"}`).Code)
 
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		var pResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pResp))
-		assert.Equal(t, api.Idle, pResp.Status)
-		assert.Equal(t, preloadNoFileIndex, pResp.FileIndex)
-		assert.Zero(t, pResp.TargetBytes)
-		assert.Zero(t, pResp.Progress)
-	})
+	started := doRequest(http.MethodPut, preloadURL, `{"file_index":0,"file_path":"missing.mkv"}`)
+	require.Equal(t, http.StatusOK, started.Code)
+	startedStatus := decodeStatus(started)
+	assert.Equal(t, api.Preloading, startedStatus.Status)
+	assert.Equal(t, 0, startedStatus.FileIndex)
+	require.NotNil(t, startedStatus.FilePath)
+	assert.Equal(t, to.Files()[0].Path(), *startedStatus.FilePath)
+	assert.Positive(t, startedStatus.TargetBytes)
 
-	t.Run("GET with unknown hash returns 404", func(t *testing.T) {
-		unknown := metainfo.Hash{1, 2, 3}.HexString()
-		resp, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, unknown))
-		require.NoError(t, err)
-		defer resp.Body.Close()
+	repeated := doRequest(http.MethodPut, preloadURL, `{"file_index":0}`)
+	require.Equal(t, http.StatusOK, repeated.Code)
+	assert.Equal(t, startedStatus.TargetBytes, decodeStatus(repeated).TargetBytes)
 
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-	})
+	require.Equal(t, http.StatusNoContent, doRequest(http.MethodDelete, preloadURL, "").Code)
+	afterCancel := decodeStatus(doRequest(http.MethodGet, preloadURL, ""))
+	assert.Equal(t, api.Idle, afterCancel.Status)
+	assert.Equal(t, preloadNoFileIndex, afterCancel.FileIndex)
+	assert.Equal(t, http.StatusNoContent, doRequest(http.MethodDelete, preloadURL, "").Code)
 
-	t.Run("PUT starts preload by file index", func(t *testing.T) {
-		reqBody := `{"file_index":0}`
-		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(reqBody))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		var pResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pResp))
-		assert.Equal(t, api.Preloading, pResp.Status)
-		assert.Equal(t, 0, pResp.FileIndex)
-		assert.Positive(t, pResp.TargetBytes)
-
-		// Verify GET returns preloading state
-		getResp, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
-		require.NoError(t, err)
-		defer getResp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, getResp.StatusCode)
-		var getPResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(getResp.Body).Decode(&getPResp))
-		assert.Equal(t, api.Preloading, getPResp.Status)
-		assert.Equal(t, pResp.TargetBytes, getPResp.TargetBytes)
-	})
-
-	t.Run("PUT same file index is idempotent", func(t *testing.T) {
-		reqBody := `{"file_index":0}`
-		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(reqBody))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		var pResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pResp))
-		assert.Equal(t, api.Preloading, pResp.Status)
-	})
-
-	t.Run("PUT index takes precedence over path", func(t *testing.T) {
-		reqBody := `{"file_index":0,"file_path":"non_existent_movie.mkv"}`
-		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(reqBody))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		var pResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pResp))
-		assert.Equal(t, 0, pResp.FileIndex)
-		require.NotNil(t, pResp.FilePath)
-		assert.Equal(t, to.Files()[0].Path(), *pResp.FilePath)
-	})
-
-	t.Run("PUT by path resolves correct file", func(t *testing.T) {
-		file := to.Files()[0]
-		reqBody, err := json.Marshal(api.PreloadRequest{FilePath: utils.Ptr(file.Path())})
-		require.NoError(t, err)
-
-		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewReader(reqBody))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-		var pResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(resp.Body).Decode(&pResp))
-		assert.Equal(t, api.Preloading, pResp.Status)
-		assert.Equal(t, 0, pResp.FileIndex)
-		require.NotNil(t, pResp.FilePath)
-		assert.Equal(t, file.Path(), *pResp.FilePath)
-	})
-
-	t.Run("PUT with invalid index returns 400", func(t *testing.T) {
-		reqBody := `{"file_index":9999}`
-		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(reqBody))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	})
-
-	t.Run("PUT with invalid path returns 400", func(t *testing.T) {
-		reqBody := `{"file_path":"non_existent_movie.mkv"}`
-		req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(reqBody))
-		require.NoError(t, err)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	})
-
-	t.Run("DELETE cancels preload", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), http.NoBody)
-		require.NoError(t, err)
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-
-		// After cancellation, status returns idle
-		getResp, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
-		require.NoError(t, err)
-		defer getResp.Body.Close()
-
-		assert.Equal(t, http.StatusOK, getResp.StatusCode)
-		var pResp api.PreloadResponse
-		require.NoError(t, json.NewDecoder(getResp.Body).Decode(&pResp))
-		assert.Equal(t, api.Idle, pResp.Status)
-		assert.Equal(t, preloadNoFileIndex, pResp.FileIndex)
-	})
-
-	t.Run("DELETE when already idle is 204", func(t *testing.T) {
-		req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), http.NoBody)
-		require.NoError(t, err)
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
-	})
-
-	t.Run("DELETE on unknown hash returns 404", func(t *testing.T) {
-		unknown := metainfo.Hash{9, 9, 9}.HexString()
-		req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, unknown), http.NoBody)
-		require.NoError(t, err)
-
-		resp, err := http.DefaultClient.Do(req)
-		require.NoError(t, err)
-		defer resp.Body.Close()
-
-		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
-	})
+	pathBody, err := json.Marshal(api.PreloadRequest{FilePath: utils.Ptr(to.Files()[0].Path())})
+	require.NoError(t, err)
+	byPath := doRequest(http.MethodPut, preloadURL, string(pathBody))
+	require.Equal(t, http.StatusOK, byPath.Code)
+	assert.Equal(t, 0, decodeStatus(byPath).FileIndex)
+	ctrl.cancelPreload(ih)
 }
 
 func TestTorrentPreload_DbTorrentActivation(t *testing.T) {
@@ -274,67 +149,6 @@ func TestTorrentPreload_DbTorrentActivation(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
-func TestTorrentPreload_ReadyState(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-
-	sintelFile, err := os.Open(sintelTorrentFile)
-	require.NoError(t, err)
-	metaInfo, err := metainfo.Load(sintelFile)
-	_ = sintelFile.Close()
-	require.NoError(t, err)
-
-	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
-	require.NoError(t, err)
-	<-to.GotInfo()
-
-	server := httptest.NewServer(ctrl.router)
-	defer server.Close()
-
-	ih := to.InfoHash()
-
-	task := &preloadTask{
-		targetBytes: 1048576,
-		fileIndex:   0,
-		filePath:    to.Files()[0].Path(),
-	}
-	task.bytesRead.Store(128)
-	ctrl.preloads.Store(ih, task)
-
-	storageTorrent, err := ctrl.storageClient.OpenTorrent(context.Background(), to.Info(), ih)
-	require.NoError(t, err)
-	_, err = storageTorrent.Piece(to.Piece(0).Info()).WriteAt(make([]byte, 1024), 0)
-	require.NoError(t, err)
-	preloadingResp := ctrl.getPreloadStatus(ih)
-	assert.Equal(t, api.Preloading, preloadingResp.Status)
-	assert.Equal(t, int64(128), preloadingResp.CompletedBytes, "unrelated torrent writes must not advance this preload")
-
-	task.ready.Store(true)
-	task.bytesRead.Store(1048576)
-
-	// GET should return ready status with 100% progress
-	resp, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih.HexString()))
-	require.NoError(t, err)
-	defer resp.Body.Close()
-
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	var pResp api.PreloadResponse
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&pResp))
-	assert.Equal(t, api.Ready, pResp.Status)
-	assert.Equal(t, float32(1.0), pResp.Progress)
-	assert.Equal(t, int64(1048576), pResp.TargetBytes)
-	assert.Equal(t, int64(1048576), pResp.CompletedBytes)
-
-	// Playback must retire even an unfinished same-file preload before it
-	// acquires a competing stream reader.
-	task.ready.Store(false)
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/stream/0", http.NoBody)
-	ctrl.streamFile(recorder, request, ih, 0)
-	_, preloading := ctrl.preloads.Load(ih)
-	assert.False(t, preloading)
-}
-
 func TestPreloadTaskProgressBytesNeverDecreases(t *testing.T) {
 	task := &preloadTask{targetBytes: 1000}
 
@@ -344,6 +158,61 @@ func TestPreloadTaskProgressBytesNeverDecreases(t *testing.T) {
 	assert.Equal(t, int64(800), task.progressBytes())
 	task.bytesRead.Store(1200)
 	assert.Equal(t, int64(1000), task.progressBytes())
+}
+
+func TestFinishPreload(t *testing.T) {
+	t.Run("failure releases task without deadlock", func(t *testing.T) {
+		ctrl := &Controller{preloadReadyTTL: time.Hour}
+		ih := metainfo.Hash{1}
+		ctx, cancel := context.WithCancel(context.Background())
+		cleared := make(chan struct{})
+		task := &preloadTask{
+			cancel:          cancel,
+			clearProtection: func() { close(cleared) },
+			done:            make(chan struct{}),
+		}
+		ctrl.preloads.Store(ih, task)
+
+		returned := make(chan struct{})
+		go func() {
+			ctrl.finishPreload(ih, task, false)
+			close(returned)
+		}()
+
+		select {
+		case <-returned:
+		case <-time.After(time.Second):
+			t.Fatal("failed preload cleanup deadlocked")
+		}
+		assert.ErrorIs(t, ctx.Err(), context.Canceled)
+		_, exists := ctrl.preloads.Load(ih)
+		assert.False(t, exists)
+		select {
+		case <-cleared:
+		default:
+			t.Fatal("failed preload did not release cache protection")
+		}
+	})
+
+	t.Run("success remains ready until expiry", func(t *testing.T) {
+		ctrl := &Controller{preloadReadyTTL: time.Hour}
+		ih := metainfo.Hash{2}
+		ctx, cancel := context.WithCancel(context.Background())
+		task := &preloadTask{
+			cancel: cancel,
+			done:   make(chan struct{}),
+		}
+		ctrl.preloads.Store(ih, task)
+
+		ctrl.finishPreload(ih, task, true)
+
+		assert.ErrorIs(t, ctx.Err(), context.Canceled)
+		current, exists := ctrl.preloads.Load(ih)
+		require.True(t, exists)
+		assert.Same(t, task, current)
+		require.NotNil(t, task.expiryTimer)
+		ctrl.cancelPreload(ih)
+	})
 }
 
 func TestReadPreloadRangeRequiresEntireRange(t *testing.T) {

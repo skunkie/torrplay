@@ -64,9 +64,24 @@ const (
 	torrentTrackerTTL         = 3 * time.Hour
 )
 
-var gotInfoTimeout = 30 * time.Second
-
 var _ api.ServerInterface = (*Controller)(nil)
+
+// controllerRuntimeConfig contains private runtime dependencies and timing knobs
+// used to keep controller tests deterministic without expanding the public API.
+type controllerRuntimeConfig struct {
+	fetchTrackers    func(context.Context, *httpclient.Client) ([][]string, error)
+	configureClient  func(*torrent.ClientConfig)
+	gotInfoTimeout   time.Duration
+	clientCloseDelay time.Duration
+}
+
+func defaultControllerRuntimeConfig() controllerRuntimeConfig {
+	return controllerRuntimeConfig{
+		fetchTrackers:    utils.FetchTrackers,
+		gotInfoTimeout:   30 * time.Second,
+		clientCloseDelay: 500 * time.Millisecond,
+	}
+}
 
 func init() {
 	chi.RegisterMethod("SUBSCRIBE")
@@ -127,11 +142,28 @@ type Controller struct {
 	preloads            sync.Map
 	torrentTracker      torrentTracker
 	trackers            [][]string
+	runtimeConfig       controllerRuntimeConfig
 
 	api.Unimplemented
 }
 
 func NewController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, imgService images.ServiceInterface, metricsRegistry *metrics.Metrics) (*Controller, error) {
+	return newController(dataDir, ipAddr, port, dbClient, imgService, metricsRegistry, defaultControllerRuntimeConfig())
+}
+
+func newController(dataDir string, ipAddr string, port int, dbClient database.DatabaseInterface, imgService images.ServiceInterface, metricsRegistry *metrics.Metrics, runtimeConfig controllerRuntimeConfig) (*Controller, error) {
+	defaults := defaultControllerRuntimeConfig()
+	if runtimeConfig.fetchTrackers == nil {
+		runtimeConfig.fetchTrackers = defaults.fetchTrackers
+	}
+	if runtimeConfig.gotInfoTimeout <= 0 {
+		runtimeConfig.gotInfoTimeout = defaults.gotInfoTimeout
+	}
+	// A zero close delay intentionally disables the production settling delay.
+	if runtimeConfig.clientCloseDelay < 0 {
+		runtimeConfig.clientCloseDelay = defaults.clientCloseDelay
+	}
+
 	dbSettings, err := dbClient.GetSettings()
 	if err != nil {
 		if errors.Is(err, database.ErrSettingsNotFound) {
@@ -155,6 +187,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	c := &Controller{
 		dataDir:           dataDir,
+		runtimeConfig:     runtimeConfig,
 		db:                dbClient,
 		dlnaPath:          "/upnp/",
 		images:            imgService,
@@ -216,7 +249,7 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	trackers, err := utils.FetchTrackers(ctx, c.httpClient)
+	trackers, err := c.runtimeConfig.fetchTrackers(ctx, c.httpClient)
 	if err != nil {
 		c.logger.Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
 	}
@@ -254,10 +287,13 @@ func NewController(dataDir string, ipAddr string, port int, dbClient database.Da
 	go c.startTorrentCleanup()
 	go c.startPosterCleanup()
 	go c.speedMonitor.Start(func() (int64, int64) {
-		if c.client == nil {
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
+		if client == nil {
 			return 0, 0
 		}
-		stats := c.client.ConnStats()
+		stats := client.ConnStats()
 		return stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64()
 	})
 
@@ -802,7 +838,7 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		fetchedTrackers, err := utils.FetchTrackers(ctx, c.httpClient)
+		fetchedTrackers, err := c.runtimeConfig.fetchTrackers(ctx, c.httpClient)
 		if err != nil {
 			logger.Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
 		}
@@ -813,7 +849,9 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	if oldClient != nil {
 		_ = oldClient.Close()
 		<-oldClient.Closed()
-		<-time.After(500 * time.Millisecond)
+		if c.runtimeConfig.clientCloseDelay > 0 {
+			<-time.After(c.runtimeConfig.clientCloseDelay)
+		}
 	}
 	if oldStorageClient != nil {
 		_ = oldStorageClient.Close()
@@ -850,6 +888,9 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	clientConfig.ExtendedHandshakeClientVersion = "qBittorrent/5.1.4"
 	clientConfig.ListenPort = 0
 	clientConfig.Slogger = c.configureLogger(clientLevel, currentSettings)
+	if c.runtimeConfig.configureClient != nil {
+		c.runtimeConfig.configureClient(clientConfig)
+	}
 
 	storageClient := memstorage.New(*currentSettings.MaxMemory, logger)
 	clientConfig.DefaultStorage = storageClient
