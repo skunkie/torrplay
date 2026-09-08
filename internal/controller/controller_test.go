@@ -310,10 +310,60 @@ func TestAddDuplicateTorrent(t *testing.T) {
 	req := api.TorrentAdd{Magnet: &magnet}
 	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 	require.Equal(t, http.StatusCreated, rr.Code)
+	ctrl.torrentTracker.mu.RLock()
+	tracked := ctrl.torrentTracker.torrents[ih]
+	ctrl.torrentTracker.mu.RUnlock()
+	assert.Equal(t, api.Memory, tracked.storageType)
+	dbTorrent, err := ctrl.db.GetTorrent(ih)
+	require.NoError(t, err)
+	assert.Equal(t, api.Memory, utils.Val(dbTorrent.Storage))
 
 	primeSampleMetadata(t, ctrl, ih)
 	rr = testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
 	assert.Equal(t, http.StatusConflict, rr.Code)
+}
+
+func TestAddTorrentHonorsRequestedFileStorage(t *testing.T) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = new(t.TempDir())
+	})
+	defer cleanup()
+
+	primeSampleMetadata(t, ctrl, bunnyHash)
+	magnet := samples[bunnyHash]
+	req := api.TorrentAdd{Magnet: &magnet, Storage: utils.Ptr(api.File)}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	ctrl.torrentTracker.mu.RLock()
+	tracked := ctrl.torrentTracker.torrents[bunnyHash]
+	ctrl.torrentTracker.mu.RUnlock()
+	assert.Equal(t, api.File, tracked.storageType)
+}
+
+func TestAddTorrentUsesExistingStorageBeforeConflict(t *testing.T) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = new(t.TempDir())
+	})
+	defer cleanup()
+
+	primeSampleMetadata(t, ctrl, bunnyHash)
+	to, ok := ctrl.client.Torrent(bunnyHash)
+	require.True(t, ok)
+	stored := database.FromAPITorrent(torrentToMetadata(to))
+	stored.Storage = utils.Ptr(api.File)
+	stored.InfoBytes = to.Metainfo().InfoBytes
+	require.NoError(t, ctrl.db.CreateTorrent(stored))
+
+	magnet := samples[bunnyHash]
+	req := api.TorrentAdd{Magnet: &magnet, Storage: utils.Ptr(api.Memory)}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusConflict, rr.Code)
+
+	ctrl.torrentTracker.mu.RLock()
+	tracked := ctrl.torrentTracker.torrents[bunnyHash]
+	ctrl.torrentTracker.mu.RUnlock()
+	assert.Equal(t, api.File, tracked.storageType)
 }
 
 func TestGetTorrent(t *testing.T) {
