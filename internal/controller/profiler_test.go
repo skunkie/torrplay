@@ -1,3 +1,5 @@
+//go:build integration
+
 // SPDX-FileCopyrightText: 2026 TorrPlay
 //
 // SPDX-License-Identifier: MIT
@@ -18,11 +20,12 @@ import (
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
-func TestProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
+func TestIntegrationProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
 	ctrl, _ := newTestController(t, func(c *Controller) {
 		c.settings.LogLevel = utils.Ptr(slog.LevelDebug)
 		c.profilerAddr = "127.0.0.1:0"
 	})
+	ctrl.reconcileProfiler()
 
 	publicResponse := httptest.NewRecorder()
 	ctrl.SetupRouter().ServeHTTP(publicResponse, httptest.NewRequest(http.MethodGet, "/debug/pprof/", http.NoBody))
@@ -44,7 +47,7 @@ func TestProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.StatusCode)
 }
 
-func TestProfilerFollowsLogLevelUpdates(t *testing.T) {
+func TestIntegrationProfilerFollowsLogLevelUpdates(t *testing.T) {
 	ctrl, _ := newTestController(t, func(c *Controller) {
 		c.profilerAddr = "127.0.0.1:0"
 	})

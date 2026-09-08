@@ -115,7 +115,7 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 
 	select {
 	case <-to.GotInfo():
-	case <-time.After(gotInfoTimeout):
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 		return
 	}

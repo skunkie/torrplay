@@ -41,7 +41,7 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 
 			select {
 			case <-to.GotInfo():
-			case <-time.After(gotInfoTimeout):
+			case <-time.After(c.runtimeConfig.gotInfoTimeout):
 				to.Drop()
 				<-to.Closed()
 				api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
@@ -110,7 +110,7 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 
 				select {
 				case <-to.GotInfo():
-				case <-time.After(gotInfoTimeout):
+				case <-time.After(c.runtimeConfig.gotInfoTimeout):
 					to.Drop()
 					<-to.Closed()
 					api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
