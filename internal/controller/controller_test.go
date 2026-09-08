@@ -1323,6 +1323,53 @@ func TestController_ShutdownIdempotent(t *testing.T) {
 	})
 }
 
+func TestController_StopPosterWorkersPreventsLateRegistration(t *testing.T) {
+	ctrl := &Controller{}
+	workerStarted := make(chan struct{})
+	releaseWorker := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseWorker)
+		})
+	}
+	defer release()
+
+	require.True(t, ctrl.startPosterWorker(func() {
+		close(workerStarted)
+		<-releaseWorker
+	}))
+	<-workerStarted
+
+	workersStopped := make(chan struct{})
+	go func() {
+		ctrl.stopPosterWorkers()
+		close(workersStopped)
+	}()
+
+	require.Eventually(t, func() bool {
+		ctrl.posterWorkersMu.Lock()
+		defer ctrl.posterWorkersMu.Unlock()
+		return ctrl.posterWorkersStopped
+	}, time.Second, time.Millisecond)
+	assert.False(t, ctrl.startPosterWorker(func() {
+		t.Error("poster worker started after shutdown")
+	}))
+
+	select {
+	case <-workersStopped:
+		t.Fatal("poster worker shutdown completed before active work finished")
+	default:
+	}
+
+	release()
+	select {
+	case <-workersStopped:
+	case <-time.After(time.Second):
+		t.Fatal("poster worker shutdown did not complete")
+	}
+}
+
 func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

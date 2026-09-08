@@ -5,9 +5,12 @@
 package images
 
 import (
+	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,10 +19,9 @@ import (
 
 func TestService_DownloadAndSaveData(t *testing.T) {
 	ctx := t.Context()
-	path := tempfile()
-	s, err := NewBBoltDBService(path)
+	dbPath := filepath.Join(t.TempDir(), "posters.db")
+	s, err := NewBBoltDBService(dbPath)
 	require.NoError(t, err)
-	defer os.Remove(path)
 	defer s.Close()
 
 	// Test with a data URI.
@@ -28,7 +30,7 @@ func TestService_DownloadAndSaveData(t *testing.T) {
 	require.NoError(t, err)
 	id, err := s.SaveData(data)
 	require.NoError(t, err)
-	assert.NotNil(t, id)
+	assert.NotEmpty(t, id)
 
 	// Test with a real image URL.
 	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,46 +43,104 @@ func TestService_DownloadAndSaveData(t *testing.T) {
 	require.NoError(t, err)
 	id2, err := s.SaveData(data2)
 	require.NoError(t, err)
-	assert.NotNil(t, id2)
-	assert.NotEqual(t, *id, *id2)
+	assert.NotEmpty(t, id2)
+	assert.NotEqual(t, id, id2)
 
-	// Test getting the images.
-	req := httptest.NewRequest(http.MethodGet, "/"+*id, http.NoBody)
+	// Verify ListIDs
+	ids, err := s.ListIDs()
+	require.NoError(t, err)
+	assert.Contains(t, ids, id)
+	assert.Contains(t, ids, id2)
+
+	// Test getting the images via ServeHTTP.
+	req := httptest.NewRequest(http.MethodGet, "/"+id, http.NoBody)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
+	assert.Equal(t, `"`+id+`"`, rr.Header().Get("ETag"))
+	assert.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
+	assert.Contains(t, rr.Header().Get("Cache-Control"), "immutable")
 
-	req = httptest.NewRequest(http.MethodGet, "/"+*id2, http.NoBody)
-	rr = httptest.NewRecorder()
-	s.ServeHTTP(rr, req)
+	// Test getting with extension stripped.
+	reqExt := httptest.NewRequest(http.MethodGet, "/"+id+".png", http.NoBody)
+	rrExt := httptest.NewRecorder()
+	s.ServeHTTP(rrExt, reqExt)
+	assert.Equal(t, http.StatusOK, rrExt.Code)
 
-	assert.Equal(t, http.StatusOK, rr.Code)
-	assert.Equal(t, "image/png", rr.Header().Get("Content-Type"))
+	// Test conditional request (If-None-Match -> 304).
+	reqETag := httptest.NewRequest(http.MethodGet, "/"+id, http.NoBody)
+	reqETag.Header.Set("If-None-Match", `"`+id+`"`)
+	rrETag := httptest.NewRecorder()
+	s.ServeHTTP(rrETag, reqETag)
+	assert.Equal(t, http.StatusNotModified, rrETag.Code)
+
+	// Test HEAD request.
+	reqHead := httptest.NewRequest(http.MethodHead, "/"+id, http.NoBody)
+	rrHead := httptest.NewRecorder()
+	s.ServeHTTP(rrHead, reqHead)
+	assert.Equal(t, http.StatusOK, rrHead.Code)
+	assert.Empty(t, rrHead.Body.Bytes())
+
+	// Test unsupported method (POST -> 405).
+	reqPost := httptest.NewRequest(http.MethodPost, "/"+id, http.NoBody)
+	rrPost := httptest.NewRecorder()
+	s.ServeHTTP(rrPost, reqPost)
+	assert.Equal(t, http.StatusMethodNotAllowed, rrPost.Code)
+
+	// Test Delete.
+	err = s.Delete(id)
+	require.NoError(t, err)
+
+	_, err = s.Get(id)
+	assert.ErrorIs(t, err, ErrImageNotFound)
+
+	// Delete non-existent ID should succeed as no-op.
+	err = s.Delete("non-existent")
+	require.NoError(t, err)
+
+	// Delete empty string should succeed as no-op.
+	err = s.Delete("")
+	require.NoError(t, err)
 }
 
 func TestService_Invalid(t *testing.T) {
 	ctx := t.Context()
-	path := tempfile()
-	s, err := NewBBoltDBService(path)
+	dbPath := filepath.Join(t.TempDir(), "posters.db")
+	s, err := NewBBoltDBService(dbPath)
 	require.NoError(t, err)
-	defer os.Remove(path)
 	defer s.Close()
 
-	// Test with an empty URL.
+	// Empty URL.
 	_, err = s.DownloadImageData(ctx, "")
 	assert.Error(t, err)
 
-	// Test with an invalid data URI.
+	// Invalid data URI.
 	_, err = s.DownloadImageData(ctx, "data:image/png;base64,invalid-data")
 	assert.Error(t, err)
 
-	// Test with a non-existent image URL.
+	// Oversized base64 is rejected before decoding it.
+	_, err = s.DownloadImageData(ctx, "data:image/png;base64,"+strings.Repeat("A", base64EncodedLimit()+1))
+	assert.ErrorIs(t, err, ErrImageTooLarge)
+
+	// Data URI missing comma.
+	_, err = s.DownloadImageData(ctx, "data:image/png;base64")
+	assert.Error(t, err)
+
+	// Non-existent image URL.
 	_, err = s.DownloadImageData(ctx, "http://localhost:12345/image.jpg")
 	assert.Error(t, err)
 
-	// Test with an unsupported content type.
+	// Non-200 HTTP response.
+	statusServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer statusServer.Close()
+	_, err = s.DownloadImageData(ctx, statusServer.URL)
+	assert.Error(t, err)
+
+	// Unsupported content type.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte("<html></html>"))
@@ -90,7 +150,7 @@ func TestService_Invalid(t *testing.T) {
 	_, err = s.DownloadImageData(ctx, server.URL)
 	assert.Error(t, err)
 
-	// Test with fake image data.
+	// Fake image data.
 	server2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		_, _ = w.Write([]byte("fake-image-data"))
@@ -99,11 +159,128 @@ func TestService_Invalid(t *testing.T) {
 
 	_, err = s.DownloadImageData(ctx, server2.URL)
 	assert.Error(t, err)
+
+	// HTTP download exceeding maxImageSize.
+	largeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(make([]byte, maxImageSize+100))
+	}))
+	defer largeServer.Close()
+	_, err = s.DownloadImageData(ctx, largeServer.URL)
+	assert.ErrorIs(t, err, ErrImageTooLarge)
+
+	// SaveData with empty data.
+	_, err = s.SaveData([]byte{})
+	assert.Error(t, err)
+
+	// SaveData with oversized data.
+	_, err = s.SaveData(make([]byte, maxImageSize+100))
+	assert.ErrorIs(t, err, ErrImageTooLarge)
+
+	// Get with empty ID.
+	_, err = s.Get("")
+	assert.ErrorIs(t, err, ErrImageNotFound)
+
+	// Get with non-existent ID.
+	_, err = s.Get("doesnotexist")
+	assert.ErrorIs(t, err, ErrImageNotFound)
+
+	// ServeHTTP with non-existent ID.
+	req := httptest.NewRequest(http.MethodGet, "/doesnotexist", http.NoBody)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestService_SVG(t *testing.T) {
+	ctx := t.Context()
+	dbPath := filepath.Join(t.TempDir(), "posters.db")
+	s, err := NewBBoltDBService(dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	svgData := `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		_, _ = w.Write([]byte(svgData))
+	}))
+	defer server.Close()
+
+	data, err := s.DownloadImageData(ctx, server.URL)
+	require.NoError(t, err)
+	id, err := s.SaveData(data)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/"+id, http.NoBody)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "image/svg+xml", rr.Header().Get("Content-Type"))
+	assert.Equal(t, "default-src 'none'", rr.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "nosniff", rr.Header().Get("X-Content-Type-Options"))
+
+	// A non-base64 data URI preserves literal plus signs.
+	data, err = s.DownloadImageData(ctx, `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><text>+</text></svg>`)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), ">+<")
+
+	// Merely containing an SVG tag does not make an HTML document an image.
+	assert.NotEqual(t, "image/svg+xml", DetectContentType([]byte(`<html><svg></svg></html>`)))
+	assert.NotEqual(t, "image/svg+xml", DetectContentType([]byte(`<svg><g></svg>`)))
+}
+
+func base64EncodedLimit() int {
+	return base64.StdEncoding.EncodedLen(maxImageSize)
+}
+
+func TestService_BMPAndAVIF(t *testing.T) {
+	ctx := t.Context()
+	dbPath := filepath.Join(t.TempDir(), "posters.db")
+	s, err := NewBBoltDBService(dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	// BMP header: 'BM' + 12 bytes minimum
+	bmpBytes := append([]byte("BM"), make([]byte, 12)...)
+	serverBMP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(bmpBytes)
+	}))
+	defer serverBMP.Close()
+
+	dataBMP, err := s.DownloadImageData(ctx, serverBMP.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "image/bmp", DetectContentType(dataBMP))
+
+	// AVIF header: 4 bytes length + 'ftyp' + 'avif'
+	avifBytes := append([]byte{0, 0, 0, 16}, []byte("ftypavif")...)
+	serverAVIF := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(avifBytes)
+	}))
+	defer serverAVIF.Close()
+
+	dataAVIF, err := s.DownloadImageData(ctx, serverAVIF.URL)
+	require.NoError(t, err)
+	assert.Equal(t, "image/avif", DetectContentType(dataAVIF))
+}
+
+func TestService_DuplicateSaveData(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "posters.db")
+	s, err := NewBBoltDBService(dbPath)
+	require.NoError(t, err)
+	defer s.Close()
+
+	data := []byte("BM000000000000")
+	id1, err := s.SaveData(data)
+	require.NoError(t, err)
+
+	id2, err := s.SaveData(data)
+	require.NoError(t, err)
+	assert.Equal(t, id1, id2)
 }
 
 func TestService_WithCookieJar(t *testing.T) {
 	ctx := t.Context()
-	// Create a test server that requires a cookie.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/login" {
 			http.SetCookie(w, &http.Cookie{Name: "session", Value: "loggedin"})
@@ -123,32 +300,41 @@ func TestService_WithCookieJar(t *testing.T) {
 	}))
 	defer server.Close()
 
-	path := tempfile()
-	s, err := NewBBoltDBService(path)
+	dbPath := filepath.Join(t.TempDir(), "posters.db")
+	s, err := NewBBoltDBService(dbPath)
 	require.NoError(t, err)
-	defer os.Remove(path)
 	defer s.Close()
 
-	// Login to get the cookie.
 	resp, err := s.httpClient.Get(ctx, server.URL+"/login")
 	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	// Try to get the image, which should now work.
 	data, err := s.DownloadImageData(ctx, server.URL+"/image.jpg")
 	require.NoError(t, err)
 	id, err := s.SaveData(data)
 	require.NoError(t, err)
-	assert.NotNil(t, id)
+	assert.NotEmpty(t, id)
 }
 
-func tempfile() string {
-	f, err := os.CreateTemp("", "images-test-")
-	if err != nil {
-		panic(err)
-	}
-	if err := f.Close(); err != nil {
-		panic(err)
-	}
-	return f.Name()
+func TestUnimplemented(t *testing.T) {
+	u := Unimplemented{}
+	assert.ErrorIs(t, u.Close(), ErrUnimplemented)
+	assert.ErrorIs(t, u.Delete(""), ErrUnimplemented)
+	_, err := u.DownloadImageData(context.Background(), "")
+	assert.ErrorIs(t, err, ErrUnimplemented)
+	_, err = u.Get("")
+	assert.ErrorIs(t, err, ErrUnimplemented)
+	_, err = u.ListIDs()
+	assert.ErrorIs(t, err, ErrUnimplemented)
+	_, err = u.SaveData(nil)
+	assert.ErrorIs(t, err, ErrUnimplemented)
+
+	rr := httptest.NewRecorder()
+	u.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", http.NoBody))
+	assert.Equal(t, http.StatusNotImplemented, rr.Code)
+}
+
+func TestNewBBoltDBService_Error(t *testing.T) {
+	_, err := NewBBoltDBService(filepath.Join(string(filepath.Separator), "dev", "null", "impossible", "db"))
+	assert.Error(t, err)
 }

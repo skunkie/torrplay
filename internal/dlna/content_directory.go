@@ -26,7 +26,6 @@ import (
 	"github.com/ethulhu/helix/xmltypes"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
-	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -52,7 +51,6 @@ type (
 	ContentDirectory struct {
 		baseURL        *url.URL
 		db             database.DatabaseInterface
-		images         images.ServiceInterface
 		mu             sync.RWMutex
 		postersPath    string
 		systemUpdateID uint
@@ -90,11 +88,10 @@ func clampUint(value int64) uint {
 	return uint(value)
 }
 
-func NewContentDirectory(db database.DatabaseInterface, imgService images.ServiceInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
+func NewContentDirectory(db database.DatabaseInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
 	return &ContentDirectory{
 		baseURL:        baseURL,
 		db:             db,
-		images:         imgService,
 		postersPath:    postersPath,
 		systemUpdateID: clampUint(time.Now().Unix()),
 	}
