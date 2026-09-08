@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/utils"
@@ -102,7 +103,7 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 				}
 				magnetStr := magnet.String()
 
-				to, err := c.addTorrentByMagnet(magnetStr)
+				to, err := c.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), api.File)
 				if err != nil {
 					api.HandleError(w, err)
 					return

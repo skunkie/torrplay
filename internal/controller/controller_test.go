@@ -457,9 +457,10 @@ func TestQBittorrentAddTorrentFromURL(t *testing.T) {
 }
 
 func TestQBittorrentAddTorrentFromFile(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.FileStoragePath = new(t.TempDir())
+	})
 	defer cleanup()
-	primeSampleMetadata(t, ctrl, sintelHash)
 
 	body, writer := createMultipartForm(t, nil, "torrents")
 
@@ -471,6 +472,11 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "Ok.", rr.Body.String())
+
+	dbTorrent, err := ctrl.db.GetTorrent(sintelHash)
+	require.NoError(t, err)
+	assert.Equal(t, api.File, utils.Val(dbTorrent.Storage))
+	assert.NotEmpty(t, dbTorrent.InfoBytes)
 }
 
 func TestTorrentMetadataFetchTimesOut(t *testing.T) {
@@ -969,7 +975,6 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 
 	posterURL := "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	primeSampleMetadata(t, ctrl, ih)
 
 	body, writer := createMultipartForm(t, map[string]string{"poster": posterURL})
 
@@ -985,6 +990,11 @@ func TestTSTorrentUploadWithPoster(t *testing.T) {
 	err := json.NewDecoder(rr.Body).Decode(&result)
 	require.NoError(t, err)
 	assert.Equal(t, ih.HexString(), result["hash"])
+
+	dbTorrent, err := ctrl.db.GetTorrent(ih)
+	require.NoError(t, err)
+	assert.Equal(t, api.Memory, utils.Val(dbTorrent.Storage))
+	assert.Empty(t, dbTorrent.InfoBytes)
 
 	// Wait for the poster to be fetched asynchronously
 	require.Eventually(t, func() bool {

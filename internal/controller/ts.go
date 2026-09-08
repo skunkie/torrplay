@@ -517,7 +517,7 @@ func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	to, err := c.addTorrentByMagnet(magnetV2.String())
+	to, err := c.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), api.Memory)
 	if err != nil {
 		api.HandleError(w, err)
 		return
