@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -54,6 +53,7 @@ func NewBBoltDB(path string) (*BBoltDB, error) {
 		return nil
 	})
 	if err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -65,6 +65,10 @@ func (b *BBoltDB) Close() error {
 }
 
 func (b *BBoltDB) CreateTorrent(t *Torrent) error {
+	if t == nil {
+		return errors.New("torrent cannot be nil")
+	}
+
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
 		if bucket == nil {
@@ -153,16 +157,20 @@ func (b *BBoltDB) GetTorrent(ih metainfo.Hash) (*Torrent, error) {
 }
 
 func (b *BBoltDB) IsPosterUsed(posterID string) (bool, error) {
-	var count int
+	var used bool
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
 		if bucket == nil {
 			return errBucketNotFound
 		}
 
-		return bucket.ForEach(func(k, v []byte) error {
-			if strings.Contains(string(v), posterID) {
-				count++
+		return bucket.ForEach(func(_, v []byte) error {
+			var t Torrent
+			if err := json.Unmarshal(v, &t); err != nil {
+				return fmt.Errorf("failed to unmarshal torrent: %w", err)
+			}
+			if t.Poster != nil && *t.Poster == posterID {
+				used = true
 			}
 			return nil
 		})
@@ -172,10 +180,14 @@ func (b *BBoltDB) IsPosterUsed(posterID string) (bool, error) {
 		return false, err
 	}
 
-	return count > 0, nil
+	return used, nil
 }
 
 func (b *BBoltDB) UpdateTorrent(t *Torrent) error {
+	if t == nil {
+		return errors.New("torrent cannot be nil")
+	}
+
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(torrentsBucket))
 		if bucket == nil {
