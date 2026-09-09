@@ -22,19 +22,23 @@ import (
 	"github.com/ethulhu/helix/upnp"
 	"github.com/ethulhu/helix/upnpav/contentdirectory"
 	"github.com/sirupsen/logrus"
-	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
 const notifyInterval = 30 * time.Second
 
+type serviceDatabase interface {
+	torrentReader
+	GetDLNAUDN() (string, error)
+}
+
 type Service struct {
 	basePath         string
 	broadcastDone    sync.WaitGroup
 	cancel           context.CancelFunc
 	contentDirectory *ContentDirectory
-	db               database.DatabaseInterface
+	db               serviceDatabase
 	device           *upnp.Device
 	handler          http.Handler
 	logger           *slog.Logger
@@ -42,7 +46,7 @@ type Service struct {
 	postersPath      string
 }
 
-func NewService(db database.DatabaseInterface, basePath, postersPath string, logger *slog.Logger) *Service {
+func NewService(db serviceDatabase, basePath, postersPath string, logger *slog.Logger) *Service {
 	// Configure the global logrus logger used by helix to use our slog hook.
 	logrus.SetOutput(io.Discard)
 	logrus.AddHook(logging.NewSlogHook(logger))

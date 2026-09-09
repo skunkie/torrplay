@@ -67,9 +67,14 @@ type StreamHandlerFunc func(w http.ResponseWriter, r *http.Request, ih metainfo.
 // AuthValidatorFunc validates a token string when authentication is enabled.
 type AuthValidatorFunc func(token string) bool
 
+type torrentReader interface {
+	GetTorrents() ([]*database.Torrent, error)
+	GetTorrent(ih metainfo.Hash) (*database.Torrent, error)
+}
+
 // Service implements the Stremio Addon Protocol v3.
 type Service struct {
-	db            database.DatabaseInterface
+	db            torrentReader
 	postersPath   string
 	logger        *slog.Logger
 	streamHandler StreamHandlerFunc
@@ -78,7 +83,7 @@ type Service struct {
 
 // NewService creates a new Stremio addon service.
 func NewService(
-	db database.DatabaseInterface,
+	db torrentReader,
 	postersPath string,
 	logger *slog.Logger,
 	streamHandler StreamHandlerFunc,

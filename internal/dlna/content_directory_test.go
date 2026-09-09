@@ -220,8 +220,11 @@ func TestBrowseTorrent_ItemProperties(t *testing.T) {
 }
 
 type mockDBWithTorrent struct {
-	database.Unimplemented
 	torrent *database.Torrent
+}
+
+func (m *mockDBWithTorrent) GetTorrents() ([]*database.Torrent, error) {
+	return []*database.Torrent{m.torrent}, nil
 }
 
 func (m *mockDBWithTorrent) GetTorrent(ih metainfo.Hash) (*database.Torrent, error) {
@@ -475,7 +478,6 @@ func TestContentDirectory_BrowseChildren_RecentlyViewed(t *testing.T) {
 }
 
 type mockDBWithCategories struct {
-	database.Unimplemented
 	torrents []*database.Torrent
 }
 

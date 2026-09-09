@@ -8,6 +8,7 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
+// DatabaseInterface provides access to TorrPlay's persisted application data.
 type DatabaseInterface interface {
 	CreateTorrent(t *Torrent) error
 	GetTorrents() ([]*Torrent, error)

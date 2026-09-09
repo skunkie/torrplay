@@ -75,7 +75,6 @@ func TestRedactPathToken(t *testing.T) {
 }
 
 type mockDB struct {
-	database.Unimplemented
 	torrents []*database.Torrent
 }
 

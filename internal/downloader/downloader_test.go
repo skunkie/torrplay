@@ -30,9 +30,8 @@ func TestMain(m *testing.M) {
 	tputil.VerifyTestMain(m)
 }
 
-// MockDB is a mock implementation of the DatabaseInterface for testing.
+// MockDB provides the database reads used by Downloader in tests.
 type MockDB struct {
-	database.DatabaseInterface
 	err      error
 	settings *database.Settings
 	torrents []*database.Torrent
