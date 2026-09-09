@@ -289,6 +289,9 @@ func TestBBoltDB_CorruptedData(t *testing.T) {
 	_, err = db.GetTorrents()
 	assert.Error(t, err)
 
+	_, err = db.IsPosterUsed("poster-id")
+	assert.Error(t, err)
+
 	// Insert corrupted JSON into settingsBucket
 	err = db.db.Update(func(tx *bbolt.Tx) error {
 		return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), []byte("{invalid-json"))
@@ -339,6 +342,46 @@ func TestBBoltDB_MissingBuckets(t *testing.T) {
 func TestNewBBoltDB_Error(t *testing.T) {
 	_, err := NewBBoltDB("/non/existent/path/db.bolt")
 	assert.Error(t, err)
+}
+
+func TestBBoltDB_RejectsNilTorrent(t *testing.T) {
+	dbPath := tempfile(t)
+	db, err := NewBBoltDB(dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	assert.Error(t, db.CreateTorrent(nil))
+	assert.Error(t, db.UpdateTorrent(nil))
+}
+
+func TestBBoltDB_IsPosterUsedMatchesPosterExactly(t *testing.T) {
+	dbPath := tempfile(t)
+	db, err := NewBBoltDB(dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	posterID := "0123456789abcdef"
+	require.NoError(t, db.CreateTorrent(&Torrent{Torrent: api.Torrent{
+		Hash: metainfo.NewHashFromHex("1111111111111111111111111111111111111111"),
+		Name: "title containing " + posterID,
+	}}))
+
+	used, err := db.IsPosterUsed(posterID)
+	require.NoError(t, err)
+	assert.False(t, used)
+
+	require.NoError(t, db.CreateTorrent(&Torrent{Torrent: api.Torrent{
+		Hash:   metainfo.NewHashFromHex("2222222222222222222222222222222222222222"),
+		Poster: new(posterID),
+	}}))
+
+	used, err = db.IsPosterUsed(posterID)
+	require.NoError(t, err)
+	assert.True(t, used)
+
+	used, err = db.IsPosterUsed("01234567")
+	require.NoError(t, err)
+	assert.False(t, used)
 }
 
 func TestTypesConversions(t *testing.T) {
