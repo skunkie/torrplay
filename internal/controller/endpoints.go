@@ -1134,7 +1134,7 @@ func (c *Controller) UpdateTorrent(w http.ResponseWriter, r *http.Request, ih me
 
 	var posterNeedsUpdate bool
 	if req.Poster != nil && *req.Poster != "" {
-		go c.handlePosterUpdate(ih, *req.Poster)
+		c.startPosterUpdate(ih, *req.Poster)
 		posterNeedsUpdate = true
 	}
 
@@ -1218,7 +1218,7 @@ func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	if err != nil {
 		return nil
 	}
-	contentType := http.DetectContentType(data)
+	contentType := images.DetectContentType(data)
 	ext, ok := images.ImageTypes[contentType]
 	if ok {
 		posterURL.Path = path.Join(c.postersPath, id+ext)
@@ -1370,7 +1370,7 @@ func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.Torren
 	}
 
 	if req.Poster != nil && *req.Poster != "" {
-		go c.handlePosterUpdate(t.Hash, *req.Poster)
+		c.startPosterUpdate(t.Hash, *req.Poster)
 	} else if *c.settings.EnableDlna {
 		// If there's no poster, we can notify DLNA clients immediately.
 		c.dlna.IncrementSystemUpdateID()
@@ -1458,11 +1458,11 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 	}
 
 	// If the poster is the same, do nothing.
-	if t.Poster != nil && imageID != nil && *t.Poster == *imageID {
+	if t.Poster != nil && *t.Poster == imageID {
 		return
 	}
 
-	t.Poster = imageID
+	t.Poster = &imageID
 	t.UpdatedAt = new(time.Now())
 
 	if err := c.db.UpdateTorrent(t); err != nil {
@@ -1476,6 +1476,12 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 	}
 
 	c.logger.Debug("successfully updated torrent poster", "hash", ih)
+}
+
+func (c *Controller) startPosterUpdate(ih metainfo.Hash, urlStr string) {
+	c.startPosterWorker(func() {
+		c.handlePosterUpdate(ih, urlStr)
+	})
 }
 
 func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) ([]*api.Torrent, error) {

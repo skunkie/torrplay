@@ -23,10 +23,15 @@ const checkInterval = 1 * time.Minute
 
 var gotInfoTimeout = 30 * time.Second
 
+type databaseReader interface {
+	GetSettings() (*database.Settings, error)
+	GetTorrents() ([]*database.Torrent, error)
+}
+
 // Downloader is responsible for downloading torrents in the background.
 type Downloader struct {
 	client          *torrent.Client
-	db              database.DatabaseInterface
+	db              databaseReader
 	downloading     map[metainfo.Hash]struct{}
 	fileStoragePath string
 	logger          *slog.Logger
@@ -39,7 +44,7 @@ type Downloader struct {
 }
 
 // New creates a new Downloader.
-func New(client *torrent.Client, db database.DatabaseInterface, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string) *Downloader {
+func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string) *Downloader {
 	return &Downloader{
 		client:          client,
 		db:              db,

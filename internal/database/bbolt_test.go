@@ -172,173 +172,218 @@ func TestBBoltDB(t *testing.T) {
 			assert.Equal(t, secret, secret2)
 		})
 	})
+
+	t.Run("empty database", func(t *testing.T) {
+		t.Run("GetJWTSecret on empty DB", func(t *testing.T) {
+			dbPath := tempfile(t)
+			db, err := NewBBoltDB(dbPath)
+			require.NoError(t, err)
+			defer db.Close()
+
+			secret, err := db.GetJWTSecret()
+			require.NoError(t, err)
+			assert.NotEmpty(t, secret)
+		})
+
+		t.Run("GetDLNAUDN on empty DB", func(t *testing.T) {
+			dbPath := tempfile(t)
+			db, err := NewBBoltDB(dbPath)
+			require.NoError(t, err)
+			defer db.Close()
+
+			udn, err := db.GetDLNAUDN()
+			require.NoError(t, err)
+			assert.NotEmpty(t, udn)
+		})
+
+		t.Run("UpdateSettings on empty DB", func(t *testing.T) {
+			dbPath := tempfile(t)
+			db, err := NewBBoltDB(dbPath)
+			require.NoError(t, err)
+			defer db.Close()
+
+			assert.Error(t, db.UpdateSettings(nil))
+
+			newPort := 8081
+			err = db.UpdateSettings(&Settings{Settings: api.Settings{HTTPServerPort: &newPort}})
+			require.NoError(t, err)
+
+			s, err := db.GetSettings()
+			require.NoError(t, err)
+			assert.Equal(t, newPort, *s.HTTPServerPort)
+		})
+
+		t.Run("GetJWTSecret and GetDLNAUDN on empty DB followed by UpdateSettings preserves both", func(t *testing.T) {
+			dbPath := tempfile(t)
+			db, err := NewBBoltDB(dbPath)
+			require.NoError(t, err)
+			defer db.Close()
+
+			secret, err := db.GetJWTSecret()
+			require.NoError(t, err)
+			assert.NotEmpty(t, secret)
+
+			udn, err := db.GetDLNAUDN()
+			require.NoError(t, err)
+			assert.NotEmpty(t, udn)
+
+			newPort := 8084
+			err = db.UpdateSettings(&Settings{Settings: api.Settings{HTTPServerPort: &newPort}})
+			require.NoError(t, err)
+
+			s, err := db.GetSettings()
+			require.NoError(t, err)
+			assert.Equal(t, newPort, *s.HTTPServerPort)
+
+			secretAfter, err := db.GetJWTSecret()
+			require.NoError(t, err)
+			assert.Equal(t, secret, secretAfter)
+
+			udnAfter, err := db.GetDLNAUDN()
+			require.NoError(t, err)
+			assert.Equal(t, udn, udnAfter)
+		})
+
+		t.Run("UpdateSettings on empty DB followed by GetJWTSecret and GetDLNAUDN preserves settings", func(t *testing.T) {
+			dbPath := tempfile(t)
+			db, err := NewBBoltDB(dbPath)
+			require.NoError(t, err)
+			defer db.Close()
+
+			newPort := 8085
+			err = db.UpdateSettings(&Settings{Settings: api.Settings{HTTPServerPort: &newPort}})
+			require.NoError(t, err)
+
+			secret, err := db.GetJWTSecret()
+			require.NoError(t, err)
+			assert.NotEmpty(t, secret)
+
+			udn, err := db.GetDLNAUDN()
+			require.NoError(t, err)
+			assert.NotEmpty(t, udn)
+
+			s, err := db.GetSettings()
+			require.NoError(t, err)
+			assert.Equal(t, newPort, *s.HTTPServerPort)
+		})
+	})
+
+	t.Run("corrupted data", func(t *testing.T) {
+		dbPath := tempfile(t)
+		db, err := NewBBoltDB(dbPath)
+		require.NoError(t, err)
+		defer db.Close()
+
+		hash := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+		// Insert corrupted JSON into torrentsBucket
+		err = db.db.Update(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(torrentsBucket)).Put(hash.Bytes(), []byte("{invalid-json"))
+		})
+		require.NoError(t, err)
+
+		_, err = db.GetTorrent(hash)
+		assert.Error(t, err)
+
+		_, err = db.GetTorrents()
+		assert.Error(t, err)
+
+		_, err = db.IsPosterUsed("poster-id")
+		assert.Error(t, err)
+
+		// Insert corrupted JSON into settingsBucket
+		err = db.db.Update(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), []byte("{invalid-json"))
+		})
+		require.NoError(t, err)
+
+		_, err = db.GetSettings()
+		assert.Error(t, err)
+
+		_, err = db.GetDLNAUDN()
+		assert.Error(t, err)
+
+		_, err = db.GetJWTSecret()
+		assert.Error(t, err)
+	})
+
+	t.Run("missing buckets", func(t *testing.T) {
+		dbPath := tempfile(t)
+		db, err := NewBBoltDB(dbPath)
+		require.NoError(t, err)
+		defer db.Close()
+
+		err = db.db.Update(func(tx *bbolt.Tx) error {
+			if err := tx.DeleteBucket([]byte(torrentsBucket)); err != nil {
+				return err
+			}
+			return tx.DeleteBucket([]byte(settingsBucket))
+		})
+		require.NoError(t, err)
+
+		hash := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+		torrent := &Torrent{Torrent: api.Torrent{Hash: hash}}
+
+		assert.ErrorIs(t, db.CreateTorrent(torrent), errBucketNotFound)
+		_, err = db.GetTorrents()
+		assert.ErrorIs(t, err, errBucketNotFound)
+		_, err = db.GetTorrent(hash)
+		assert.ErrorIs(t, err, errBucketNotFound)
+		_, err = db.IsPosterUsed("test")
+		assert.ErrorIs(t, err, errBucketNotFound)
+		assert.ErrorIs(t, db.UpdateTorrent(torrent), errBucketNotFound)
+		assert.ErrorIs(t, db.DeleteTorrent(hash), errBucketNotFound)
+		_, err = db.GetSettings()
+		assert.ErrorIs(t, err, errBucketNotFound)
+		assert.ErrorIs(t, db.UpdateSettings(&Settings{}), errBucketNotFound)
+	})
+
+	t.Run("rejects nil torrent", func(t *testing.T) {
+		dbPath := tempfile(t)
+		db, err := NewBBoltDB(dbPath)
+		require.NoError(t, err)
+		defer db.Close()
+
+		assert.Error(t, db.CreateTorrent(nil))
+		assert.Error(t, db.UpdateTorrent(nil))
+	})
 }
 
-func TestBBoltDB_EmptyDB_DirectCalls(t *testing.T) {
-	t.Run("GetJWTSecret on empty DB", func(t *testing.T) {
-		dbPath := tempfile(t)
-		db, err := NewBBoltDB(dbPath)
-		require.NoError(t, err)
-		defer db.Close()
-
-		secret, err := db.GetJWTSecret()
-		require.NoError(t, err)
-		assert.NotEmpty(t, secret)
-	})
-
-	t.Run("GetDLNAUDN on empty DB", func(t *testing.T) {
-		dbPath := tempfile(t)
-		db, err := NewBBoltDB(dbPath)
-		require.NoError(t, err)
-		defer db.Close()
-
-		udn, err := db.GetDLNAUDN()
-		require.NoError(t, err)
-		assert.NotEmpty(t, udn)
-	})
-
-	t.Run("UpdateSettings on empty DB", func(t *testing.T) {
-		dbPath := tempfile(t)
-		db, err := NewBBoltDB(dbPath)
-		require.NoError(t, err)
-		defer db.Close()
-
-		assert.Error(t, db.UpdateSettings(nil))
-
-		newPort := 8081
-		err = db.UpdateSettings(&Settings{Settings: api.Settings{HTTPServerPort: &newPort}})
-		require.NoError(t, err)
-
-		s, err := db.GetSettings()
-		require.NoError(t, err)
-		assert.Equal(t, newPort, *s.HTTPServerPort)
-	})
-
-	t.Run("GetJWTSecret and GetDLNAUDN on empty DB followed by UpdateSettings preserves both", func(t *testing.T) {
-		dbPath := tempfile(t)
-		db, err := NewBBoltDB(dbPath)
-		require.NoError(t, err)
-		defer db.Close()
-
-		secret, err := db.GetJWTSecret()
-		require.NoError(t, err)
-		assert.NotEmpty(t, secret)
-
-		udn, err := db.GetDLNAUDN()
-		require.NoError(t, err)
-		assert.NotEmpty(t, udn)
-
-		newPort := 8084
-		err = db.UpdateSettings(&Settings{Settings: api.Settings{HTTPServerPort: &newPort}})
-		require.NoError(t, err)
-
-		s, err := db.GetSettings()
-		require.NoError(t, err)
-		assert.Equal(t, newPort, *s.HTTPServerPort)
-
-		secretAfter, err := db.GetJWTSecret()
-		require.NoError(t, err)
-		assert.Equal(t, secret, secretAfter)
-
-		udnAfter, err := db.GetDLNAUDN()
-		require.NoError(t, err)
-		assert.Equal(t, udn, udnAfter)
-	})
-
-	t.Run("UpdateSettings on empty DB followed by GetJWTSecret and GetDLNAUDN preserves settings", func(t *testing.T) {
-		dbPath := tempfile(t)
-		db, err := NewBBoltDB(dbPath)
-		require.NoError(t, err)
-		defer db.Close()
-
-		newPort := 8085
-		err = db.UpdateSettings(&Settings{Settings: api.Settings{HTTPServerPort: &newPort}})
-		require.NoError(t, err)
-
-		secret, err := db.GetJWTSecret()
-		require.NoError(t, err)
-		assert.NotEmpty(t, secret)
-
-		udn, err := db.GetDLNAUDN()
-		require.NoError(t, err)
-		assert.NotEmpty(t, udn)
-
-		s, err := db.GetSettings()
-		require.NoError(t, err)
-		assert.Equal(t, newPort, *s.HTTPServerPort)
-	})
-}
-
-func TestBBoltDB_CorruptedData(t *testing.T) {
-	dbPath := tempfile(t)
-	db, err := NewBBoltDB(dbPath)
-	require.NoError(t, err)
-	defer db.Close()
-
-	hash := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-
-	// Insert corrupted JSON into torrentsBucket
-	err = db.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket([]byte(torrentsBucket)).Put(hash.Bytes(), []byte("{invalid-json"))
-	})
-	require.NoError(t, err)
-
-	_, err = db.GetTorrent(hash)
-	assert.Error(t, err)
-
-	_, err = db.GetTorrents()
-	assert.Error(t, err)
-
-	// Insert corrupted JSON into settingsBucket
-	err = db.db.Update(func(tx *bbolt.Tx) error {
-		return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), []byte("{invalid-json"))
-	})
-	require.NoError(t, err)
-
-	_, err = db.GetSettings()
-	assert.Error(t, err)
-
-	_, err = db.GetDLNAUDN()
-	assert.Error(t, err)
-
-	_, err = db.GetJWTSecret()
-	assert.Error(t, err)
-}
-
-func TestBBoltDB_MissingBuckets(t *testing.T) {
-	dbPath := tempfile(t)
-	db, err := NewBBoltDB(dbPath)
-	require.NoError(t, err)
-	defer db.Close()
-
-	err = db.db.Update(func(tx *bbolt.Tx) error {
-		if err := tx.DeleteBucket([]byte(torrentsBucket)); err != nil {
-			return err
-		}
-		return tx.DeleteBucket([]byte(settingsBucket))
-	})
-	require.NoError(t, err)
-
-	hash := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	torrent := &Torrent{Torrent: api.Torrent{Hash: hash}}
-
-	assert.ErrorIs(t, db.CreateTorrent(torrent), errBucketNotFound)
-	_, err = db.GetTorrents()
-	assert.ErrorIs(t, err, errBucketNotFound)
-	_, err = db.GetTorrent(hash)
-	assert.ErrorIs(t, err, errBucketNotFound)
-	_, err = db.IsPosterUsed("test")
-	assert.ErrorIs(t, err, errBucketNotFound)
-	assert.ErrorIs(t, db.UpdateTorrent(torrent), errBucketNotFound)
-	assert.ErrorIs(t, db.DeleteTorrent(hash), errBucketNotFound)
-	_, err = db.GetSettings()
-	assert.ErrorIs(t, err, errBucketNotFound)
-	assert.ErrorIs(t, db.UpdateSettings(&Settings{}), errBucketNotFound)
-}
-
-func TestNewBBoltDB_Error(t *testing.T) {
+// TestNewBBoltDB verifies that NewBBoltDB rejects an unusable path.
+func TestNewBBoltDB(t *testing.T) {
 	_, err := NewBBoltDB("/non/existent/path/db.bolt")
 	assert.Error(t, err)
+}
+
+// TestBBoltDB_IsPosterUsed verifies that IsPosterUsed matches poster IDs exactly.
+func TestBBoltDB_IsPosterUsed(t *testing.T) {
+	dbPath := tempfile(t)
+	db, err := NewBBoltDB(dbPath)
+	require.NoError(t, err)
+	defer db.Close()
+
+	posterID := "0123456789abcdef"
+	require.NoError(t, db.CreateTorrent(&Torrent{Torrent: api.Torrent{
+		Hash: metainfo.NewHashFromHex("1111111111111111111111111111111111111111"),
+		Name: "title containing " + posterID,
+	}}))
+
+	used, err := db.IsPosterUsed(posterID)
+	require.NoError(t, err)
+	assert.False(t, used)
+
+	require.NoError(t, db.CreateTorrent(&Torrent{Torrent: api.Torrent{
+		Hash:   metainfo.NewHashFromHex("2222222222222222222222222222222222222222"),
+		Poster: new(posterID),
+	}}))
+
+	used, err = db.IsPosterUsed(posterID)
+	require.NoError(t, err)
+	assert.True(t, used)
+
+	used, err = db.IsPosterUsed("01234567")
+	require.NoError(t, err)
+	assert.False(t, used)
 }
 
 func TestTypesConversions(t *testing.T) {

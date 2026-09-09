@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/ethulhu/helix/media"
 	"github.com/ethulhu/helix/upnpav"
 	"github.com/ethulhu/helix/upnpav/contentdirectory"
@@ -26,7 +27,6 @@ import (
 	"github.com/ethulhu/helix/xmltypes"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
-	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -49,10 +49,14 @@ const (
 )
 
 type (
+	torrentReader interface {
+		GetTorrents() ([]*database.Torrent, error)
+		GetTorrent(ih metainfo.Hash) (*database.Torrent, error)
+	}
+
 	ContentDirectory struct {
 		baseURL        *url.URL
-		db             database.DatabaseInterface
-		images         images.ServiceInterface
+		db             torrentReader
 		mu             sync.RWMutex
 		postersPath    string
 		systemUpdateID uint
@@ -90,11 +94,10 @@ func clampUint(value int64) uint {
 	return uint(value)
 }
 
-func NewContentDirectory(db database.DatabaseInterface, imgService images.ServiceInterface, baseURL *url.URL, postersPath string) *ContentDirectory {
+func NewContentDirectory(db torrentReader, baseURL *url.URL, postersPath string) *ContentDirectory {
 	return &ContentDirectory{
 		baseURL:        baseURL,
 		db:             db,
-		images:         imgService,
 		postersPath:    postersPath,
 		systemUpdateID: clampUint(time.Now().Unix()),
 	}
