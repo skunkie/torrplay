@@ -18,6 +18,9 @@ import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import torrplay.App;
 import torrplay.Torrplay;
 
@@ -28,24 +31,17 @@ public class TorrPlayService extends Service {
     private App torrplayApp;
     private WifiManager.MulticastLock multicastLock;
     private PowerManager.WakeLock wakeLock;
-    private volatile boolean isAppRunning = false;
+    private final Object lifecycleLock = new Object();
+    private final ExecutorService appExecutor = Executors.newSingleThreadExecutor();
+    private boolean startScheduled;
+    private boolean destroyed;
 
     @Override
     public void onCreate() {
         super.onCreate();
         Log.i("TorrPlayService", "Service onCreate");
         createNotificationChannel();
-
-        try {
-            String dataDir = getFilesDir().getAbsolutePath();
-            String ipAddress = "0.0.0.0";
-            int port = -1;
-            Log.i("TorrPlayService", "Initializing TorrPlay with data dir: " + dataDir + ", IP: " + ipAddress + ", Port: " + port);
-            torrplayApp = Torrplay.new_(dataDir, ipAddress, port);
-        } catch (Exception e) {
-            Log.e("TorrPlayService", "Failed to initialize TorrPlay app", e);
-            torrplayApp = null;
-        }
+        startForeground(NOTIFICATION_ID, getNotification());
 
         PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
         if (powerManager != null) {
@@ -64,62 +60,103 @@ public class TorrPlayService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Log.i("TorrPlayService", "Service onStartCommand");
-
-        if (torrplayApp == null) {
-            Log.e("TorrPlayService", "TorrPlay app not initialized. Stopping service.");
-            stopSelf();
-            return START_NOT_STICKY;
-        }
-
-        if (isAppRunning) {
-            Log.i("TorrPlayService", "TorrPlay app is already running.");
-            return START_STICKY;
-        }
-
-        startForeground(NOTIFICATION_ID, getNotification());
-
-        new Thread(() -> {
-            try {
-                isAppRunning = true;
-                Log.i("TorrPlayService", "Starting TorrPlay app");
-                torrplayApp.start();
-                Log.i("TorrPlayService", "TorrPlay app has stopped.");
-            } catch (Exception e) {
-                Log.e("TorrPlayService", "TorrPlay app crashed", e);
-            } finally {
-                isAppRunning = false;
-            }
-        }).start();
+        scheduleAppStart();
 
         return START_STICKY;
     }
 
+    private void scheduleAppStart() {
+        synchronized (lifecycleLock) {
+            if (destroyed || startScheduled) {
+                return;
+            }
+            startScheduled = true;
+        }
+        appExecutor.execute(this::initializeAndStartApp);
+    }
+
+    private void initializeAndStartApp() {
+        App app;
+        try {
+            String dataDir = getFilesDir().getAbsolutePath();
+            String ipAddress = "0.0.0.0";
+            int port = -1;
+            Log.i("TorrPlayService", "Initializing TorrPlay with data dir: " + dataDir + ", IP: " + ipAddress + ", Port: " + port);
+            app = Torrplay.new_(dataDir, ipAddress, port);
+        } catch (Exception e) {
+            Log.e("TorrPlayService", "Failed to initialize TorrPlay app", e);
+            stopSelf();
+            return;
+        }
+
+        boolean discardApp = false;
+        try {
+            synchronized (lifecycleLock) {
+                if (destroyed) {
+                    discardApp = true;
+                } else {
+                    torrplayApp = app;
+                    Log.i("TorrPlayService", "Starting TorrPlay app");
+                    app.start();
+                }
+            }
+            if (discardApp) {
+                stopApp(app, "Failed to stop TorrPlay app after service destruction");
+                return;
+            }
+            Log.i("TorrPlayService", "TorrPlay app started successfully.");
+        } catch (Exception e) {
+            Log.e("TorrPlayService", "Failed to start TorrPlay app", e);
+            boolean ownsApp;
+            synchronized (lifecycleLock) {
+                ownsApp = torrplayApp == app;
+                if (ownsApp) {
+                    torrplayApp = null;
+                }
+            }
+            if (ownsApp) {
+                stopApp(app, "Failed to clean up TorrPlay app after startup failure");
+            }
+            stopSelf();
+        }
+    }
+
     @Override
     public void onDestroy() {
-        super.onDestroy();
-        Log.e("TorrPlayService", "Service onDestroy. The service is being killed! Stopping app and scheduling restart...");
+        Log.i("TorrPlayService", "Service onDestroy. Stopping TorrPlay app.");
 
-        if (torrplayApp != null) {
-            try {
-                torrplayApp.stop();
-                Log.i("TorrPlayService", "TorrPlay app stopped successfully.");
-            } catch (Exception e) {
-                Log.e("TorrPlayService", "Failed to stop TorrPlay app", e);
-            }
+        App app;
+        synchronized (lifecycleLock) {
+            destroyed = true;
+            app = torrplayApp;
+            torrplayApp = null;
+        }
+        appExecutor.shutdownNow();
+
+        if (app != null) {
+            stopApp(app, "Failed to stop TorrPlay app");
         }
 
         if (wakeLock != null && wakeLock.isHeld()) {
             wakeLock.release();
             wakeLock = null;
         }
-        if (multicastLock != null) {
+        if (multicastLock != null && multicastLock.isHeld()) {
             multicastLock.release();
             multicastLock = null;
         }
 
-        Intent broadcastIntent = new Intent(this, Restarter.class);
-        broadcastIntent.setAction(Restarter.ACTION_RESTART_SERVICE);
-        this.sendBroadcast(broadcastIntent);
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        super.onDestroy();
+    }
+
+    private void stopApp(App app, String errorMessage) {
+        try {
+            app.stop();
+            Log.i("TorrPlayService", "TorrPlay app stopped successfully.");
+        } catch (Exception e) {
+            Log.e("TorrPlayService", errorMessage, e);
+        }
     }
 
     @Override
