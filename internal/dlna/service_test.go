@@ -23,7 +23,6 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/testutil"
-	"github.com/torrplay/torrplay/internal/utils"
 )
 
 func TestMain(m *testing.M) {
@@ -45,30 +44,8 @@ var (
 	}
 )
 
-// mockDB is a mock implementation of the DatabaseInterface for testing purposes.
-// It embeds the Unimplemented struct to satisfy the interface while allowing
-// specific methods to be overridden for tests.
-type mockDB struct {
-	database.Unimplemented
-}
-
-// GetSettings returns mock settings for the test environment.
-func (m *mockDB) GetSettings() (*database.Settings, error) {
-	return &database.Settings{
-		Settings: api.Settings{
-			EnableDlna:     new(true),
-			FriendlyName:   new("test-server"),
-			HTTPServerPort: new(8080),
-			LogLevel:       utils.Ptr(slog.LevelInfo),
-			MaxMemory:      new(int64(1024 * 1024 * 1024)),
-			TorrentClient: &api.TorrentClient{
-				DisableIPv6:                new(false),
-				EstablishedConnsPerTorrent: new(50),
-				TorrentPeersHighWater:      new(100),
-			},
-		},
-	}, nil
-}
+// mockDB provides the database reads used by the DLNA service in tests.
+type mockDB struct{}
 
 func (m *mockDB) GetDLNAUDN() (string, error) {
 	return "uuid:12345678-1234-5678-1234-567812345678", nil
