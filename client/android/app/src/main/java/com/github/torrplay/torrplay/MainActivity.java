@@ -13,7 +13,8 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
 import android.util.Log;
 import android.webkit.WebSettings;
@@ -28,15 +29,17 @@ import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.BridgeActivity;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayDeque;
 import java.util.Locale;
 import java.util.Scanner;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.json.JSONObject;
 
@@ -46,14 +49,21 @@ public class MainActivity extends BridgeActivity {
     private static final int PERMISSIONS_REQUEST_NOTIFICATIONS = 103;
     private static final String PREFS_NAME = "torrplay_prefs";
     private static final String KEY_DISMISSED_VERSION = "dismissed_version";
+    private static final int MAX_TORRENT_FILE_BYTES = 16 * 1024 * 1024;
+    private static final long TORRENT_DELIVERY_RETRY_DELAY_MS = 250;
+    private final ExecutorService torrentIntentExecutor = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final ArrayDeque<String> pendingTorrentFiles = new ArrayDeque<>();
     private long backPressedTime;
     private Toast backToast;
+    private boolean torrentDeliveryInProgress;
+    private boolean destroyed;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        checkAndRequestPermissions();
+        startServiceAndRequestPermissions();
 
         WebView webView = getBridge().getWebView();
         WebSettings settings = webView.getSettings();
@@ -224,7 +234,10 @@ public class MainActivity extends BridgeActivity {
             }
 
             inputStream = connection.getInputStream();
-            File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            File downloadDir = new File(getCacheDir(), "updates");
+            if (!downloadDir.exists() && !downloadDir.mkdirs()) {
+                throw new IOException("Could not create update directory");
+            }
             File apkFile = new File(downloadDir, "torrplay-update.apk");
 
             fos = new FileOutputStream(apkFile);
@@ -283,13 +296,20 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
-    private void checkAndRequestPermissions() {
+    private void startServiceAndRequestPermissions() {
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(
+                    this,
+                    new String[]{Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    PERMISSIONS_REQUEST_STORAGE
+            );
+            return;
+        }
+
+        startTorrPlayService();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, PERMISSIONS_REQUEST_NOTIFICATIONS);
-        } else if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, PERMISSIONS_REQUEST_STORAGE);
-        } else {
-            startTorrPlayService();
         }
     }
 
@@ -313,31 +333,67 @@ public class MainActivity extends BridgeActivity {
         }
 
         if (uri != null && ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
-            try {
-                ContentResolver resolver = getContentResolver();
-                InputStream inputStream = resolver.openInputStream(uri);
-                byte[] bytes = getBytes(inputStream);
-                String base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP);
-
-                String jsFunction = "window.handleTorrentFileBase64";
-                String js = "if (" + jsFunction + ") { " + jsFunction + "('" + base64Data + "'); }";
-
-                getBridge().getWebView().post(() -> getBridge().getWebView().evaluateJavascript(js, null));
-            } catch (IOException e) {
-                Log.e("MainActivity", "Error processing content URI to Base64", e);
-            }
+            final Uri contentUri = uri;
+            torrentIntentExecutor.execute(() -> readAndQueueTorrentFile(contentUri));
         }
     }
 
-    private byte[] getBytes(InputStream inputStream) throws IOException {
-        if (inputStream == null) return new byte[0];
-        ByteArrayOutputStream byteBuffer = new ByteArrayOutputStream();
-        byte[] buffer = new byte[1024];
-        int len;
-        while ((len = inputStream.read(buffer)) != -1) {
-            byteBuffer.write(buffer, 0, len);
+    private void readAndQueueTorrentFile(Uri uri) {
+        try (InputStream inputStream = getContentResolver().openInputStream(uri)) {
+            if (inputStream == null) {
+                throw new IOException("Content provider returned no data");
+            }
+
+            byte[] bytes = TorrentFileReader.read(inputStream, MAX_TORRENT_FILE_BYTES);
+            String base64Data = Base64.encodeToString(bytes, Base64.NO_WRAP);
+
+            mainHandler.post(() -> {
+                if (destroyed) return;
+                pendingTorrentFiles.add(base64Data);
+                deliverPendingTorrentFile();
+            });
+        } catch (Exception e) {
+            Log.e("MainActivity", "Error processing content URI", e);
+            mainHandler.post(() -> {
+                if (!destroyed) {
+                    Toast.makeText(MainActivity.this, "Unable to open torrent file: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                }
+            });
         }
-        return byteBuffer.toByteArray();
+    }
+
+    private void deliverPendingTorrentFile() {
+        if (destroyed || torrentDeliveryInProgress || pendingTorrentFiles.isEmpty()) return;
+
+        String base64Data = pendingTorrentFiles.peek();
+        String js = "(function() {"
+                + "if (typeof window.handleTorrentFileBase64 !== 'function') return false;"
+                + "window.handleTorrentFileBase64(" + JSONObject.quote(base64Data) + ");"
+                + "return true;"
+                + "})()";
+
+        torrentDeliveryInProgress = true;
+        getBridge().getWebView().evaluateJavascript(js, result -> {
+            torrentDeliveryInProgress = false;
+            if ("true".equals(result)) {
+                pendingTorrentFiles.remove();
+                deliverPendingTorrentFile();
+            } else if (!destroyed) {
+                mainHandler.postDelayed(this::deliverPendingTorrentFile, TORRENT_DELIVERY_RETRY_DELAY_MS);
+            }
+        });
+    }
+
+    @Override
+    public void onDestroy() {
+        destroyed = true;
+        mainHandler.removeCallbacksAndMessages(null);
+        torrentIntentExecutor.shutdownNow();
+        if (backToast != null) {
+            backToast.cancel();
+            backToast = null;
+        }
+        super.onDestroy();
     }
 
     private void startTorrPlayService() {
@@ -353,29 +409,17 @@ public class MainActivity extends BridgeActivity {
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 
-        switch (requestCode) {
-            case PERMISSIONS_REQUEST_NOTIFICATIONS:
-                // After notification permission, request storage permission.
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, PERMISSIONS_REQUEST_STORAGE);
-                } else {
-                    startTorrPlayService();
-                }
-                break;
-            case PERMISSIONS_REQUEST_STORAGE:
-                // After storage permission, all required permissions have been requested.
-                startTorrPlayService();
-                break;
-            default:
-                break;
+        if (requestCode == PERMISSIONS_REQUEST_STORAGE) {
+            startTorrPlayService();
         }
 
-        if (grantResults.length > 0 && grantResults[0] != PackageManager.PERMISSION_GRANTED) {
-            if (requestCode == PERMISSIONS_REQUEST_NOTIFICATIONS) {
-                Toast.makeText(this, "Notification permission is required for background tasks.", Toast.LENGTH_LONG).show();
-            } else if (requestCode == PERMISSIONS_REQUEST_STORAGE) {
-                Toast.makeText(this, "Storage permission is recommended for full functionality.", Toast.LENGTH_LONG).show();
-            }
+        if (requestCode == PERMISSIONS_REQUEST_NOTIFICATIONS
+                && grantResults.length > 0
+                && grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Notifications are disabled; background activity may be less visible.", Toast.LENGTH_LONG).show();
+        } else if (requestCode == PERMISSIONS_REQUEST_STORAGE
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Shared-storage downloads are unavailable without storage permission.", Toast.LENGTH_LONG).show();
         }
     }
 }

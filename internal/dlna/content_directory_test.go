@@ -92,29 +92,116 @@ func TestContentDirectory_BrowseMetadata(t *testing.T) {
 }
 
 func TestContentDirectory_BrowseChildren(t *testing.T) {
-	service, cleanup := newTestService(t)
-	defer cleanup()
+	t.Run("lists torrent files", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
 
-	didl, totalMatches, err := service.contentDirectory.BrowseChildren(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("BrowseChildren returned an error: %v", err)
-	}
+		didl, totalMatches, err := service.contentDirectory.BrowseChildren(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0, nil)
+		if err != nil {
+			t.Fatalf("BrowseChildren returned an error: %v", err)
+		}
 
-	if didl == nil {
-		t.Fatal("BrowseChildren returned nil DIDLLite")
-	}
+		if didl == nil {
+			t.Fatal("BrowseChildren returned nil DIDLLite")
+		}
 
-	if totalMatches != 1 {
-		t.Errorf("expected totalMatches 1, got %d", totalMatches)
-	}
+		if totalMatches != 1 {
+			t.Errorf("expected totalMatches 1, got %d", totalMatches)
+		}
 
-	if len(didl.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(didl.Items))
-	}
+		if len(didl.Items) != 1 {
+			t.Fatalf("expected 1 item, got %d", len(didl.Items))
+		}
 
-	if didl.Items[0].Title != testTorrentFileName {
-		t.Errorf("expected title '%s', got '%s'", testTorrentFileName, didl.Items[0].Title)
-	}
+		if didl.Items[0].Title != testTorrentFileName {
+			t.Errorf("expected title '%s', got '%s'", testTorrentFileName, didl.Items[0].Title)
+		}
+	})
+
+	t.Run("recently viewed", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
+
+		ctx := context.Background()
+		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, recentlyViewedContainerID, 0, 10, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint(0), totalMatches)
+		assert.Empty(t, didl.Containers)
+	})
+
+	t.Run("pagination", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
+
+		ctx := context.Background()
+
+		t.Run("root pagination - first page", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, rootID, 0, 2, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(3), totalMatches)
+			require.Len(t, didl.Containers, 2)
+			assert.Equal(t, upnpav.ObjectID(allTorrentsContainerID), didl.Containers[0].ID)
+			assert.Equal(t, upnpav.ObjectID(recentlyAddedContainerID), didl.Containers[1].ID)
+		})
+
+		t.Run("root pagination - second page", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, rootID, 2, 2, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(3), totalMatches)
+			require.Len(t, didl.Containers, 1)
+			assert.Equal(t, upnpav.ObjectID(recentlyViewedContainerID), didl.Containers[0].ID)
+		})
+
+		t.Run("root pagination - offset beyond count", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, rootID, 3, 2, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(3), totalMatches)
+			require.Empty(t, didl.Containers)
+		})
+
+		t.Run("all torrents container pagination", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, allTorrentsContainerID, 0, 10, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(1), totalMatches)
+			require.Len(t, didl.Containers, 1)
+			assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()), didl.Containers[0].ID)
+
+			didlEmpty, totalMatchesEmpty, err := service.contentDirectory.BrowseChildren(ctx, allTorrentsContainerID, 1, 10, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didlEmpty)
+			require.Equal(t, uint(1), totalMatchesEmpty)
+			require.Empty(t, didlEmpty.Containers)
+		})
+
+		t.Run("recently added container pagination", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, recentlyAddedContainerID, 0, 10, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(1), totalMatches)
+			require.Len(t, didl.Containers, 1)
+			assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()), didl.Containers[0].ID)
+		})
+
+		t.Run("torrent files pagination", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, upnpav.ObjectID(testTorrentHash.HexString()), 0, 1, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(1), totalMatches)
+			require.Len(t, didl.Items, 1)
+			assert.Equal(t, testTorrentFileName, didl.Items[0].Title)
+			assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()+"/0"), didl.Items[0].ID)
+
+			didlEmpty, totalMatchesEmpty, err := service.contentDirectory.BrowseChildren(ctx, upnpav.ObjectID(testTorrentHash.HexString()), 1, 1, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didlEmpty)
+			require.Equal(t, uint(1), totalMatchesEmpty)
+			require.Empty(t, didlEmpty.Items)
+		})
+	})
 }
 
 func TestContentDirectory_Search(t *testing.T) {
@@ -168,55 +255,132 @@ func TestContentDirectory_Search(t *testing.T) {
 		assert.Equal(t, uint(1), totalMatchesEmpty)
 		assert.Empty(t, didlEmpty.Items)
 	})
+
+	t.Run("categories and errors", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
+
+		ctx := context.Background()
+		criteria, err := search.Parse(`(dc:title contains "Test")`)
+		require.NoError(t, err)
+
+		t.Run("search in recently added container", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.Search(ctx, recentlyAddedContainerID, criteria, 0, 10, nil)
+			require.NoError(t, err)
+			assert.Equal(t, uint(2), totalMatches)
+			assert.Len(t, didl.Containers, 1)
+		})
+
+		t.Run("search in recently viewed container", func(t *testing.T) {
+			didl, totalMatches, err := service.contentDirectory.Search(ctx, recentlyViewedContainerID, criteria, 0, 10, nil)
+			require.NoError(t, err)
+			assert.Equal(t, uint(0), totalMatches)
+			assert.Empty(t, didl.Containers)
+		})
+
+		t.Run("search in non-existent container", func(t *testing.T) {
+			_, _, err := service.contentDirectory.Search(ctx, "nonexistent-container", criteria, 0, 10, nil)
+			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+		})
+	})
 }
 
-func TestContentDirectory_fileURI(t *testing.T) {
-	service, cleanup := newTestService(t)
-	defer cleanup()
+func TestContentDirectory_FileURI(t *testing.T) {
+	t.Run("builds stream URI", func(t *testing.T) {
+		service, cleanup := newTestService(t, func() (string, error) {
+			return "playback-token", nil
+		})
+		defer cleanup()
 
-	didl, _, err := service.contentDirectory.BrowseChildren(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0, nil)
-	if err != nil {
-		t.Fatalf("BrowseChildren returned an error: %v", err)
-	}
+		didl, _, err := service.contentDirectory.BrowseChildren(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0, nil)
+		if err != nil {
+			t.Fatalf("BrowseChildren returned an error: %v", err)
+		}
 
-	if len(didl.Items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(didl.Items))
-	}
+		if len(didl.Items) != 1 {
+			t.Fatalf("expected 1 item, got %d", len(didl.Items))
+		}
 
-	uriString := didl.Items[0].Resources[0].URI
-	uri, err := url.Parse(uriString)
-	if err != nil {
-		t.Fatalf("failed to parse URI: %v", err)
-	}
+		uriString := didl.Items[0].Resources[0].URI
+		uri, err := url.Parse(uriString)
+		if err != nil {
+			t.Fatalf("failed to parse URI: %v", err)
+		}
 
-	expectedPath := "/api/v1/stream/" + testTorrentHash.HexString()
-	if uri.Path != expectedPath {
-		t.Errorf("URI path is incorrect, got: %s, want: %s", uri.Path, expectedPath)
-	}
+		expectedPath := "/api/v1/stream/" + testTorrentHash.HexString()
+		if uri.Path != expectedPath {
+			t.Errorf("URI path is incorrect, got: %s, want: %s", uri.Path, expectedPath)
+		}
 
-	filepath := uri.Query().Get("path")
-	if filepath != testTorrentFileName {
-		t.Errorf("file path query parameter is incorrect, got: %s, want: %s", filepath, testTorrentFileName)
-	}
+		filepath := uri.Query().Get("path")
+		if filepath != testTorrentFileName {
+			t.Errorf("file path query parameter is incorrect, got: %s, want: %s", filepath, testTorrentFileName)
+		}
+		assert.Equal(t, "playback-token", uri.Query().Get("token"))
+	})
+
+	t.Run("playback token error", func(t *testing.T) {
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+
+		cd := NewContentDirectory(&mockDB{}, baseURL, "/posters/", func() (string, error) {
+			return "", errors.New("token unavailable")
+		})
+
+		assert.Empty(t, cd.fileURI(testTorrentHash.HexString(), testTorrentFileName))
+	})
 }
 
-func TestBrowseTorrent_ItemProperties(t *testing.T) {
-	db := &mockDB{}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
+func TestContentDirectory_BrowseTorrent(t *testing.T) {
+	t.Run("item properties", func(t *testing.T) {
+		db := &mockDB{}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
 
-	didl, totalMatches, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0)
-	require.NoError(t, err)
-	require.Equal(t, uint(1), totalMatches)
-	require.Len(t, didl.Items, 1)
+		didl, totalMatches, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint(1), totalMatches)
+		require.Len(t, didl.Items, 1)
 
-	item := didl.Items[0]
-	assert.Equal(t, testTorrentFileName, item.Title)
-	expectedIconURL := fmt.Sprintf("%s/icons/media/videofile-128x128.png", baseURL)
-	require.NotNil(t, item.Icon)
-	assert.Equal(t, expectedIconURL, item.Icon.String())
-	assert.Contains(t, item.AlbumArtURIs, expectedIconURL)
+		item := didl.Items[0]
+		assert.Equal(t, testTorrentFileName, item.Title)
+		expectedIconURL := fmt.Sprintf("%s/icons/media/videofile-128x128.png", baseURL)
+		require.NotNil(t, item.Icon)
+		assert.Equal(t, expectedIconURL, item.Icon.String())
+		assert.Contains(t, item.AlbumArtURIs, expectedIconURL)
+	})
+
+	t.Run("with poster", func(t *testing.T) {
+		poster := "test-poster.jpg"
+		torrentWithPoster := &database.Torrent{
+			Torrent: api.Torrent{
+				Hash:   testTorrentHash,
+				Name:   "Poster Torrent",
+				Poster: &poster,
+				Files: []api.TorrentFile{
+					{Path: "movie.mp4", Name: "movie.mp4", Length: 2048},
+				},
+			},
+		}
+		db := &mockDBWithTorrent{
+			torrent: torrentWithPoster,
+		}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
+
+		didl, totalMatches, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0)
+		require.NoError(t, err)
+		require.Equal(t, uint(1), totalMatches)
+		require.Len(t, didl.Items, 1)
+
+		item := didl.Items[0]
+		expectedPosterURL := fmt.Sprintf("%s/posters/test-poster.jpg", baseURL)
+		require.NotNil(t, item.Icon)
+		assert.Equal(t, expectedPosterURL, item.Icon.String())
+		assert.Contains(t, item.AlbumArtURIs, expectedPosterURL)
+	})
 }
 
 type mockDBWithTorrent struct {
@@ -231,112 +395,7 @@ func (m *mockDBWithTorrent) GetTorrent(ih metainfo.Hash) (*database.Torrent, err
 	return m.torrent, nil
 }
 
-func TestBrowseTorrent_WithPoster(t *testing.T) {
-	poster := "test-poster.jpg"
-	torrentWithPoster := &database.Torrent{
-		Torrent: api.Torrent{
-			Hash:   testTorrentHash,
-			Name:   "Poster Torrent",
-			Poster: &poster,
-			Files: []api.TorrentFile{
-				{Path: "movie.mp4", Name: "movie.mp4", Length: 2048},
-			},
-		},
-	}
-	db := &mockDBWithTorrent{
-		torrent: torrentWithPoster,
-	}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
-
-	didl, totalMatches, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()), 0, 0)
-	require.NoError(t, err)
-	require.Equal(t, uint(1), totalMatches)
-	require.Len(t, didl.Items, 1)
-
-	item := didl.Items[0]
-	expectedPosterURL := fmt.Sprintf("%s/posters/test-poster.jpg", baseURL)
-	require.NotNil(t, item.Icon)
-	assert.Equal(t, expectedPosterURL, item.Icon.String())
-	assert.Contains(t, item.AlbumArtURIs, expectedPosterURL)
-}
-
-func TestContentDirectory_BrowseChildren_Pagination(t *testing.T) {
-	service, cleanup := newTestService(t)
-	defer cleanup()
-
-	ctx := context.Background()
-
-	t.Run("root pagination - first page", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, rootID, 0, 2, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(3), totalMatches)
-		require.Len(t, didl.Containers, 2)
-		assert.Equal(t, upnpav.ObjectID(allTorrentsContainerID), didl.Containers[0].ID)
-		assert.Equal(t, upnpav.ObjectID(recentlyAddedContainerID), didl.Containers[1].ID)
-	})
-
-	t.Run("root pagination - second page", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, rootID, 2, 2, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(3), totalMatches)
-		require.Len(t, didl.Containers, 1)
-		assert.Equal(t, upnpav.ObjectID(recentlyViewedContainerID), didl.Containers[0].ID)
-	})
-
-	t.Run("root pagination - offset beyond count", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, rootID, 3, 2, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(3), totalMatches)
-		require.Empty(t, didl.Containers)
-	})
-
-	t.Run("all torrents container pagination", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, allTorrentsContainerID, 0, 10, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(1), totalMatches)
-		require.Len(t, didl.Containers, 1)
-		assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()), didl.Containers[0].ID)
-
-		didlEmpty, totalMatchesEmpty, err := service.contentDirectory.BrowseChildren(ctx, allTorrentsContainerID, 1, 10, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didlEmpty)
-		require.Equal(t, uint(1), totalMatchesEmpty)
-		require.Empty(t, didlEmpty.Containers)
-	})
-
-	t.Run("recently added container pagination", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, recentlyAddedContainerID, 0, 10, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(1), totalMatches)
-		require.Len(t, didl.Containers, 1)
-		assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()), didl.Containers[0].ID)
-	})
-
-	t.Run("torrent files pagination", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, upnpav.ObjectID(testTorrentHash.HexString()), 0, 1, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(1), totalMatches)
-		require.Len(t, didl.Items, 1)
-		assert.Equal(t, testTorrentFileName, didl.Items[0].Title)
-		assert.Equal(t, upnpav.ObjectID(testTorrentHash.HexString()+"/0"), didl.Items[0].ID)
-
-		didlEmpty, totalMatchesEmpty, err := service.contentDirectory.BrowseChildren(ctx, upnpav.ObjectID(testTorrentHash.HexString()), 1, 1, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didlEmpty)
-		require.Equal(t, uint(1), totalMatchesEmpty)
-		require.Empty(t, didlEmpty.Items)
-	})
-}
-
-func TestContentDirectory_Capabilities(t *testing.T) {
+func TestContentDirectoryCapabilities(t *testing.T) {
 	service, cleanup := newTestService(t)
 	defer cleanup()
 
@@ -426,9 +485,9 @@ func TestRecentlyAddedAndRecentlyViewedTorrents(t *testing.T) {
 	})
 }
 
-func TestContentDirectory_NilBaseURL(t *testing.T) {
+func TestContentDirectoryWithoutBaseURL(t *testing.T) {
 	db := &mockDB{}
-	cd := NewContentDirectory(db, nil, "/posters/")
+	cd := NewContentDirectory(db, nil, "/posters/", nil)
 
 	uri := cd.fileURI("0123456789012345678901234567890123456789", "test.mp4")
 	assert.Empty(t, uri)
@@ -436,45 +495,6 @@ func TestContentDirectory_NilBaseURL(t *testing.T) {
 	assert.Nil(t, cd.posterURI("poster.jpg"))
 	assert.Nil(t, cd.posterURI(""))
 	assert.Nil(t, cd.iconURI("test.mp4"))
-}
-
-func TestContentDirectory_Search_CategoriesAndErrors(t *testing.T) {
-	service, cleanup := newTestService(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	criteria, err := search.Parse(`(dc:title contains "Test")`)
-	require.NoError(t, err)
-
-	t.Run("search in recently added container", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.Search(ctx, recentlyAddedContainerID, criteria, 0, 10, nil)
-		require.NoError(t, err)
-		assert.Equal(t, uint(2), totalMatches)
-		assert.Len(t, didl.Containers, 1)
-	})
-
-	t.Run("search in recently viewed container", func(t *testing.T) {
-		didl, totalMatches, err := service.contentDirectory.Search(ctx, recentlyViewedContainerID, criteria, 0, 10, nil)
-		require.NoError(t, err)
-		assert.Equal(t, uint(0), totalMatches)
-		assert.Empty(t, didl.Containers)
-	})
-
-	t.Run("search in non-existent container", func(t *testing.T) {
-		_, _, err := service.contentDirectory.Search(ctx, "nonexistent-container", criteria, 0, 10, nil)
-		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-	})
-}
-
-func TestContentDirectory_BrowseChildren_RecentlyViewed(t *testing.T) {
-	service, cleanup := newTestService(t)
-	defer cleanup()
-
-	ctx := context.Background()
-	didl, totalMatches, err := service.contentDirectory.BrowseChildren(ctx, recentlyViewedContainerID, 0, 10, nil)
-	require.NoError(t, err)
-	assert.Equal(t, uint(0), totalMatches)
-	assert.Empty(t, didl.Containers)
 }
 
 type mockDBWithCategories struct {
@@ -494,7 +514,7 @@ func (m *mockDBWithCategories) GetTorrent(ih metainfo.Hash) (*database.Torrent, 
 	return nil, errors.New("not found")
 }
 
-func TestContentDirectory_Categories(t *testing.T) {
+func TestContentDirectoryCategories(t *testing.T) {
 	moviesCat := "Movies"
 	animeCat := "Anime"
 	slashCat := "TV/Shows"
@@ -585,7 +605,7 @@ func TestContentDirectory_Categories(t *testing.T) {
 	db := &mockDBWithCategories{torrents: testTorrents}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/", nil)
 	ctx := context.Background()
 
 	t.Run("categories container metadata", func(t *testing.T) {
@@ -734,6 +754,277 @@ func TestContentDirectory_Categories(t *testing.T) {
 		_, _, err = cd.Search(ctx, "category:NonExistent", criteria, 0, 10, nil)
 		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
 	})
+
+	t.Run("trims whitespace", func(t *testing.T) {
+		catWithSpaces := "   Movies   "
+		normalCat := "Movies"
+		hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+		hash2 := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
+
+		testTorrents := []*database.Torrent{
+			{
+				Torrent: api.Torrent{
+					Hash:     hash1,
+					Name:     "Movie Spaced",
+					Category: &catWithSpaces,
+					Files: []api.TorrentFile{
+						{Path: "m1.mp4", Name: "m1.mp4", Length: 1000},
+					},
+				},
+			},
+			{
+				Torrent: api.Torrent{
+					Hash:     hash2,
+					Name:     "Movie Normal",
+					Category: &normalCat,
+					Files: []api.TorrentFile{
+						{Path: "m2.mp4", Name: "m2.mp4", Length: 2000},
+					},
+				},
+			},
+		}
+
+		db := &mockDBWithCategories{torrents: testTorrents}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
+		ctx := context.Background()
+
+		// Both should be grouped into a single "Movies" category
+		didl, totalMatches, err := cd.BrowseChildren(ctx, categoriesContainerID, 0, 10, nil)
+		require.NoError(t, err)
+		require.Equal(t, uint(1), totalMatches)
+		require.Len(t, didl.Containers, 1)
+		assert.Equal(t, "Movies", didl.Containers[0].Title)
+		assert.Equal(t, 2, didl.Containers[0].ChildCount)
+
+		// Browsing "Movies" category returns both torrents
+		moviesChildren, count, err := cd.BrowseChildren(ctx, "category:Movies", 0, 10, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint(2), count)
+		assert.Len(t, moviesChildren.Containers, 2)
+	})
+
+	t.Run("ignores non-media torrents", func(t *testing.T) {
+		docsCat := "Documents"
+		hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+		torrent := &database.Torrent{
+			Torrent: api.Torrent{
+				Hash:     hash1,
+				Name:     "Non-Media Torrent",
+				Category: &docsCat,
+				Files: []api.TorrentFile{
+					{Path: "manual.pdf", Name: "manual.pdf", Length: 1000},
+				},
+			},
+		}
+
+		db := &mockDBWithCategories{torrents: []*database.Torrent{torrent}}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
+		ctx := context.Background()
+
+		// Since torrent has no media files, it is ignored by DLNA, so no categories exist
+		didl, err := cd.BrowseMetadata(ctx, rootID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 3, didl.Containers[0].ChildCount)
+
+		_, err = cd.BrowseMetadata(ctx, categoriesContainerID, nil)
+		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+	})
+
+	t.Run("dynamic category transition", func(t *testing.T) {
+		hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+		torrent := &database.Torrent{
+			Torrent: api.Torrent{
+				Hash:     hash1,
+				Name:     "Dynamic Torrent",
+				Category: nil,
+				Files: []api.TorrentFile{
+					{Path: "dyn.mp4", Name: "dyn.mp4", Length: 1000},
+				},
+			},
+		}
+
+		db := &mockDBWithCategories{torrents: []*database.Torrent{torrent}}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
+		ctx := context.Background()
+
+		// State 1: Torrent has no category
+		didl, err := cd.BrowseMetadata(ctx, rootID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 3, didl.Containers[0].ChildCount)
+
+		rootChildren, totalMatches, err := cd.BrowseChildren(ctx, rootID, 0, 10, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint(3), totalMatches)
+		assert.Len(t, rootChildren.Containers, 3)
+
+		_, err = cd.BrowseMetadata(ctx, categoriesContainerID, nil)
+		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+
+		// State 2: Assign a category
+		cat := "Documentaries"
+		torrent.Category = &cat
+
+		didl, err = cd.BrowseMetadata(ctx, rootID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 4, didl.Containers[0].ChildCount)
+
+		rootChildren, totalMatches, err = cd.BrowseChildren(ctx, rootID, 0, 10, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint(4), totalMatches)
+		require.Len(t, rootChildren.Containers, 4)
+		assert.Equal(t, upnpav.ObjectID(categoriesContainerID), rootChildren.Containers[3].ID)
+
+		catMetadata, err := cd.BrowseMetadata(ctx, categoriesContainerID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 1, catMetadata.Containers[0].ChildCount)
+
+		// State 3: Remove category
+		torrent.Category = nil
+
+		didl, err = cd.BrowseMetadata(ctx, rootID, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 3, didl.Containers[0].ChildCount)
+
+		rootChildren, totalMatches, err = cd.BrowseChildren(ctx, rootID, 0, 10, nil)
+		require.NoError(t, err)
+		assert.Equal(t, uint(3), totalMatches)
+		assert.Len(t, rootChildren.Containers, 3)
+
+		_, err = cd.BrowseMetadata(ctx, categoriesContainerID, nil)
+		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+	})
+
+	t.Run("only explicit categories omit uncategorized", func(t *testing.T) {
+		moviesCat := "Movies"
+		seriesCat := "Series"
+		hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+		hash2 := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
+
+		testTorrents := []*database.Torrent{
+			{
+				Torrent: api.Torrent{
+					Hash:     hash1,
+					Name:     "Movie 1",
+					Category: &moviesCat,
+					Files: []api.TorrentFile{
+						{Path: "m1.mp4", Name: "m1.mp4", Length: 1000},
+					},
+				},
+			},
+			{
+				Torrent: api.Torrent{
+					Hash:     hash2,
+					Name:     "Series 1",
+					Category: &seriesCat,
+					Files: []api.TorrentFile{
+						{Path: "s1.mp4", Name: "s1.mp4", Length: 2000},
+					},
+				},
+			},
+		}
+
+		db := &mockDBWithCategories{torrents: testTorrents}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
+		ctx := context.Background()
+
+		t.Run("categories list only has explicit categories and no Uncategorized", func(t *testing.T) {
+			didl, totalMatches, err := cd.BrowseChildren(ctx, categoriesContainerID, 0, 10, nil)
+			require.NoError(t, err)
+			require.Equal(t, uint(2), totalMatches)
+			require.Len(t, didl.Containers, 2)
+			assert.Equal(t, "Movies", didl.Containers[0].Title)
+			assert.Equal(t, "Series", didl.Containers[1].Title)
+		})
+
+		t.Run("browse Uncategorized returns ErrNoSuchObject when all torrents are categorized", func(t *testing.T) {
+			_, err := cd.BrowseMetadata(ctx, "category:Uncategorized", nil)
+			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+
+			_, _, err = cd.BrowseChildren(ctx, "category:Uncategorized", 0, 10, nil)
+			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+		})
+	})
+
+	t.Run("torrents without categories", func(t *testing.T) {
+		emptyCat := "   "
+		hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+		hash2 := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
+
+		testTorrents := []*database.Torrent{
+			{
+				Torrent: api.Torrent{
+					Hash:     hash1,
+					Name:     "Torrent Nil Cat",
+					Category: nil,
+					Files: []api.TorrentFile{
+						{Path: "t1.mp4", Name: "t1.mp4", Length: 1000},
+					},
+				},
+			},
+			{
+				Torrent: api.Torrent{
+					Hash:     hash2,
+					Name:     "Torrent Empty Cat",
+					Category: &emptyCat,
+					Files: []api.TorrentFile{
+						{Path: "t2.mp4", Name: "t2.mp4", Length: 2000},
+					},
+				},
+			},
+		}
+
+		db := &mockDBWithCategories{torrents: testTorrents}
+		baseURL, err := url.Parse("http://127.0.0.1:8080")
+		require.NoError(t, err)
+		cd := NewContentDirectory(db, baseURL, "/posters/", nil)
+		ctx := context.Background()
+
+		t.Run("root metadata when no categories set", func(t *testing.T) {
+			didl, err := cd.BrowseMetadata(ctx, rootID, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Len(t, didl.Containers, 1)
+			assert.Equal(t, upnpav.ObjectID(rootID), didl.Containers[0].ID)
+			assert.Equal(t, 3, didl.Containers[0].ChildCount)
+		})
+
+		t.Run("browse root when no categories set", func(t *testing.T) {
+			didl, totalMatches, err := cd.BrowseChildren(ctx, rootID, 0, 10, nil)
+			require.NoError(t, err)
+			require.NotNil(t, didl)
+			require.Equal(t, uint(3), totalMatches)
+			require.Len(t, didl.Containers, 3)
+			assert.Equal(t, upnpav.ObjectID(allTorrentsContainerID), didl.Containers[0].ID)
+			assert.Equal(t, upnpav.ObjectID(recentlyAddedContainerID), didl.Containers[1].ID)
+			assert.Equal(t, upnpav.ObjectID(recentlyViewedContainerID), didl.Containers[2].ID)
+		})
+
+		t.Run("categories container metadata returns ErrNoSuchObject when no categories set", func(t *testing.T) {
+			_, err := cd.BrowseMetadata(ctx, categoriesContainerID, nil)
+			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+		})
+
+		t.Run("categories container browse returns ErrNoSuchObject when no categories set", func(t *testing.T) {
+			_, _, err := cd.BrowseChildren(ctx, categoriesContainerID, 0, 10, nil)
+			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+		})
+
+		t.Run("categories container search returns ErrNoSuchObject when no categories set", func(t *testing.T) {
+			criteria, err := search.Parse(`(dc:title contains "Torrent")`)
+			require.NoError(t, err)
+
+			_, _, err = cd.Search(ctx, categoriesContainerID, criteria, 0, 10, nil)
+			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
+		})
+	})
 }
 
 func TestPageBoundsDoesNotOverflow(t *testing.T) {
@@ -746,11 +1037,11 @@ func TestPageBoundsDoesNotOverflow(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestContentDirectory_NoTorrents(t *testing.T) {
+func TestContentDirectoryWithoutTorrents(t *testing.T) {
 	db := &mockDBWithCategories{torrents: []*database.Torrent{}}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/", nil)
 	ctx := context.Background()
 
 	t.Run("root metadata with no torrents", func(t *testing.T) {
@@ -821,275 +1112,4 @@ func TestContentDirectory_NoTorrents(t *testing.T) {
 		_, _, err = cd.Search(ctx, "category:Movies", criteria, 0, 10, nil)
 		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
 	})
-}
-
-func TestContentDirectory_TorrentsWithoutCategories(t *testing.T) {
-	emptyCat := "   "
-	hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
-	hash2 := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
-
-	testTorrents := []*database.Torrent{
-		{
-			Torrent: api.Torrent{
-				Hash:     hash1,
-				Name:     "Torrent Nil Cat",
-				Category: nil,
-				Files: []api.TorrentFile{
-					{Path: "t1.mp4", Name: "t1.mp4", Length: 1000},
-				},
-			},
-		},
-		{
-			Torrent: api.Torrent{
-				Hash:     hash2,
-				Name:     "Torrent Empty Cat",
-				Category: &emptyCat,
-				Files: []api.TorrentFile{
-					{Path: "t2.mp4", Name: "t2.mp4", Length: 2000},
-				},
-			},
-		},
-	}
-
-	db := &mockDBWithCategories{torrents: testTorrents}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
-	ctx := context.Background()
-
-	t.Run("root metadata when no categories set", func(t *testing.T) {
-		didl, err := cd.BrowseMetadata(ctx, rootID, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Len(t, didl.Containers, 1)
-		assert.Equal(t, upnpav.ObjectID(rootID), didl.Containers[0].ID)
-		assert.Equal(t, 3, didl.Containers[0].ChildCount)
-	})
-
-	t.Run("browse root when no categories set", func(t *testing.T) {
-		didl, totalMatches, err := cd.BrowseChildren(ctx, rootID, 0, 10, nil)
-		require.NoError(t, err)
-		require.NotNil(t, didl)
-		require.Equal(t, uint(3), totalMatches)
-		require.Len(t, didl.Containers, 3)
-		assert.Equal(t, upnpav.ObjectID(allTorrentsContainerID), didl.Containers[0].ID)
-		assert.Equal(t, upnpav.ObjectID(recentlyAddedContainerID), didl.Containers[1].ID)
-		assert.Equal(t, upnpav.ObjectID(recentlyViewedContainerID), didl.Containers[2].ID)
-	})
-
-	t.Run("categories container metadata returns ErrNoSuchObject when no categories set", func(t *testing.T) {
-		_, err := cd.BrowseMetadata(ctx, categoriesContainerID, nil)
-		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-	})
-
-	t.Run("categories container browse returns ErrNoSuchObject when no categories set", func(t *testing.T) {
-		_, _, err := cd.BrowseChildren(ctx, categoriesContainerID, 0, 10, nil)
-		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-	})
-
-	t.Run("categories container search returns ErrNoSuchObject when no categories set", func(t *testing.T) {
-		criteria, err := search.Parse(`(dc:title contains "Torrent")`)
-		require.NoError(t, err)
-
-		_, _, err = cd.Search(ctx, categoriesContainerID, criteria, 0, 10, nil)
-		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-	})
-}
-
-func TestContentDirectory_OnlyExplicitCategories_NoUncategorized(t *testing.T) {
-	moviesCat := "Movies"
-	seriesCat := "Series"
-	hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
-	hash2 := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
-
-	testTorrents := []*database.Torrent{
-		{
-			Torrent: api.Torrent{
-				Hash:     hash1,
-				Name:     "Movie 1",
-				Category: &moviesCat,
-				Files: []api.TorrentFile{
-					{Path: "m1.mp4", Name: "m1.mp4", Length: 1000},
-				},
-			},
-		},
-		{
-			Torrent: api.Torrent{
-				Hash:     hash2,
-				Name:     "Series 1",
-				Category: &seriesCat,
-				Files: []api.TorrentFile{
-					{Path: "s1.mp4", Name: "s1.mp4", Length: 2000},
-				},
-			},
-		},
-	}
-
-	db := &mockDBWithCategories{torrents: testTorrents}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
-	ctx := context.Background()
-
-	t.Run("categories list only has explicit categories and no Uncategorized", func(t *testing.T) {
-		didl, totalMatches, err := cd.BrowseChildren(ctx, categoriesContainerID, 0, 10, nil)
-		require.NoError(t, err)
-		require.Equal(t, uint(2), totalMatches)
-		require.Len(t, didl.Containers, 2)
-		assert.Equal(t, "Movies", didl.Containers[0].Title)
-		assert.Equal(t, "Series", didl.Containers[1].Title)
-	})
-
-	t.Run("browse Uncategorized returns ErrNoSuchObject when all torrents are categorized", func(t *testing.T) {
-		_, err := cd.BrowseMetadata(ctx, "category:Uncategorized", nil)
-		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-
-		_, _, err = cd.BrowseChildren(ctx, "category:Uncategorized", 0, 10, nil)
-		assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-	})
-}
-
-func TestContentDirectory_DynamicCategoryTransition(t *testing.T) {
-	hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
-	torrent := &database.Torrent{
-		Torrent: api.Torrent{
-			Hash:     hash1,
-			Name:     "Dynamic Torrent",
-			Category: nil,
-			Files: []api.TorrentFile{
-				{Path: "dyn.mp4", Name: "dyn.mp4", Length: 1000},
-			},
-		},
-	}
-
-	db := &mockDBWithCategories{torrents: []*database.Torrent{torrent}}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
-	ctx := context.Background()
-
-	// State 1: Torrent has no category
-	didl, err := cd.BrowseMetadata(ctx, rootID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 3, didl.Containers[0].ChildCount)
-
-	rootChildren, totalMatches, err := cd.BrowseChildren(ctx, rootID, 0, 10, nil)
-	require.NoError(t, err)
-	assert.Equal(t, uint(3), totalMatches)
-	assert.Len(t, rootChildren.Containers, 3)
-
-	_, err = cd.BrowseMetadata(ctx, categoriesContainerID, nil)
-	assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-
-	// State 2: Assign a category
-	cat := "Documentaries"
-	torrent.Category = &cat
-
-	didl, err = cd.BrowseMetadata(ctx, rootID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 4, didl.Containers[0].ChildCount)
-
-	rootChildren, totalMatches, err = cd.BrowseChildren(ctx, rootID, 0, 10, nil)
-	require.NoError(t, err)
-	assert.Equal(t, uint(4), totalMatches)
-	require.Len(t, rootChildren.Containers, 4)
-	assert.Equal(t, upnpav.ObjectID(categoriesContainerID), rootChildren.Containers[3].ID)
-
-	catMetadata, err := cd.BrowseMetadata(ctx, categoriesContainerID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 1, catMetadata.Containers[0].ChildCount)
-
-	// State 3: Remove category
-	torrent.Category = nil
-
-	didl, err = cd.BrowseMetadata(ctx, rootID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 3, didl.Containers[0].ChildCount)
-
-	rootChildren, totalMatches, err = cd.BrowseChildren(ctx, rootID, 0, 10, nil)
-	require.NoError(t, err)
-	assert.Equal(t, uint(3), totalMatches)
-	assert.Len(t, rootChildren.Containers, 3)
-
-	_, err = cd.BrowseMetadata(ctx, categoriesContainerID, nil)
-	assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-}
-
-func TestContentDirectory_Categories_NonMediaTorrentsIgnored(t *testing.T) {
-	docsCat := "Documents"
-	hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
-	torrent := &database.Torrent{
-		Torrent: api.Torrent{
-			Hash:     hash1,
-			Name:     "Non-Media Torrent",
-			Category: &docsCat,
-			Files: []api.TorrentFile{
-				{Path: "manual.pdf", Name: "manual.pdf", Length: 1000},
-			},
-		},
-	}
-
-	db := &mockDBWithCategories{torrents: []*database.Torrent{torrent}}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
-	ctx := context.Background()
-
-	// Since torrent has no media files, it is ignored by DLNA, so no categories exist
-	didl, err := cd.BrowseMetadata(ctx, rootID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 3, didl.Containers[0].ChildCount)
-
-	_, err = cd.BrowseMetadata(ctx, categoriesContainerID, nil)
-	assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
-}
-
-func TestContentDirectory_Categories_WhitespaceTrimming(t *testing.T) {
-	catWithSpaces := "   Movies   "
-	normalCat := "Movies"
-	hash1 := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
-	hash2 := metainfo.NewHashFromHex("2222222222222222222222222222222222222222")
-
-	testTorrents := []*database.Torrent{
-		{
-			Torrent: api.Torrent{
-				Hash:     hash1,
-				Name:     "Movie Spaced",
-				Category: &catWithSpaces,
-				Files: []api.TorrentFile{
-					{Path: "m1.mp4", Name: "m1.mp4", Length: 1000},
-				},
-			},
-		},
-		{
-			Torrent: api.Torrent{
-				Hash:     hash2,
-				Name:     "Movie Normal",
-				Category: &normalCat,
-				Files: []api.TorrentFile{
-					{Path: "m2.mp4", Name: "m2.mp4", Length: 2000},
-				},
-			},
-		},
-	}
-
-	db := &mockDBWithCategories{torrents: testTorrents}
-	baseURL, err := url.Parse("http://127.0.0.1:8080")
-	require.NoError(t, err)
-	cd := NewContentDirectory(db, baseURL, "/posters/")
-	ctx := context.Background()
-
-	// Both should be grouped into a single "Movies" category
-	didl, totalMatches, err := cd.BrowseChildren(ctx, categoriesContainerID, 0, 10, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint(1), totalMatches)
-	require.Len(t, didl.Containers, 1)
-	assert.Equal(t, "Movies", didl.Containers[0].Title)
-	assert.Equal(t, 2, didl.Containers[0].ChildCount)
-
-	// Browsing "Movies" category returns both torrents
-	moviesChildren, count, err := cd.BrowseChildren(ctx, "category:Movies", 0, 10, nil)
-	require.NoError(t, err)
-	assert.Equal(t, uint(2), count)
-	assert.Len(t, moviesChildren.Containers, 2)
 }
