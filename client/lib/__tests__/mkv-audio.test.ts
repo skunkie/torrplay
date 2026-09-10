@@ -317,6 +317,26 @@ describe('mkv-audio utilities', () => {
       expect(mockAudioCtx.createMediaElementSource).toHaveBeenCalledWith(secondVideoEl);
     });
 
+    it('refuses WASM playback when native audio isolation fails', () => {
+      const onError = vi.fn();
+      mockAudioCtx.createMediaElementSource = vi.fn(() => {
+        throw new DOMException('already connected', 'InvalidStateError');
+      });
+      const mockInput = { dispose: vi.fn() } as unknown as Input;
+      const engine = new MkvAudioSyncEngine(
+        mockInput,
+        [mockRawTracks[0] as unknown as InputAudioTrack],
+        onError,
+      );
+      const audioTracks = [{ enabled: true }];
+      const mockVideoEl = { audioTracks } as unknown as HTMLMediaElement;
+
+      expect(engine.attachMediaElement(mockVideoEl)).toBe(false);
+      expect(engine.setWasmActive(true)).toBe(false);
+      expect(audioTracks[0].enabled).toBe(true);
+      expect(onError).toHaveBeenCalledOnce();
+    });
+
     it('resumes suspended audio context on play', () => {
       Object.defineProperty(mockAudioCtx, 'state', { value: 'suspended', configurable: true });
       const mockInput = { dispose: vi.fn() } as unknown as Input;

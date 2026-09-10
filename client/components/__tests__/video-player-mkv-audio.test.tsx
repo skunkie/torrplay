@@ -38,9 +38,10 @@ const { mockTracks, mockEngine } = vi.hoisted(() => {
   ];
 
   const mockEngine = {
-    selectTrack: vi.fn(),
-    setWasmActive: vi.fn(),
-    attachMediaElement: vi.fn(),
+    selectTrack: vi.fn().mockReturnValue(true),
+    setWasmActive: vi.fn().mockReturnValue(true),
+    setNativeTrackIndex: vi.fn(),
+    attachMediaElement: vi.fn().mockReturnValue(true),
     setVolume: vi.fn(),
     setMuted: vi.fn(),
     setPlaybackRate: vi.fn(),
@@ -72,6 +73,9 @@ vi.mock('@/lib/mkv-audio', async importOriginal => {
 describe('VideoPlayer MKV Audio Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockEngine.selectTrack.mockReturnValue(true);
+    mockEngine.setWasmActive.mockReturnValue(true);
+    mockEngine.attachMediaElement.mockReturnValue(true);
   });
 
   it('probes audio tracks when source is MKV and initializes sync engine', async () => {
@@ -370,5 +374,23 @@ describe('VideoPlayer MKV Audio Integration', () => {
 
     unmount();
     expect(mockEngine.destroy).toHaveBeenCalled();
+  });
+
+  it('remounts the media element when the source changes', async () => {
+    const { container, rerender } = render(<VideoPlayer options={{
+      src: 'http://test-server/first.mp4',
+      title: 'First',
+    }} />);
+    const firstPlayer = container.querySelector('.group.bg-black');
+    expect(firstPlayer).not.toBeNull();
+
+    rerender(<VideoPlayer options={{
+      src: 'http://test-server/second.mp4',
+      title: 'Second',
+    }} />);
+
+    await waitFor(() => {
+      expect(container.querySelector('.group.bg-black')).not.toBe(firstPlayer);
+    });
   });
 });

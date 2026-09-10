@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { type VideoSrc } from '@vidstack/react';
+import { type PlayerSrc } from '@vidstack/react';
 import React from 'react';
 
 import {
@@ -26,7 +26,7 @@ interface TorrentPlayerDialogLayoutProps {
   setSelectedFile: (file: TorrentFile) => void,
   isPlayerVisible: boolean,
   videoPlayerOptions: {
-    src: VideoSrc,
+    src: PlayerSrc,
     title?: string,
     autoPlay?: boolean,
     tracks?: SubtitleTrackInfo[]
