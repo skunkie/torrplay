@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import type { Input, InputAudioTrack } from 'mediabunny';
+import { AudioSampleSink, type Input, type InputAudioTrack } from 'mediabunny';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -52,16 +52,15 @@ vi.mock('mediabunny', async importOriginal => {
     UrlSource: vi.fn(),
     AudioSampleSink: vi.fn(function MockAudioSampleSink() {
       return {
-        samples: vi.fn().mockReturnValue({
-          [Symbol.asyncIterator]: async function* () {
+        samples: vi.fn().mockImplementation(() => {
+          return (async function* () {
             yield {
               toAudioBuffer: vi.fn().mockReturnValue({}),
               close: vi.fn(),
               timestamp: 0,
               duration: 1,
             };
-          },
-          return: vi.fn().mockResolvedValue({ done: true }),
+          })();
         }),
       };
     }),
@@ -359,26 +358,118 @@ describe('mkv-audio utilities', () => {
       expect(mockAudioCtx.resume).toHaveBeenCalled();
     });
 
-    it('corrects clock drift on timeupdate using hysteresis and debounce thresholds', () => {
+    it('corrects clock drift on timeupdate using tight hysteresis thresholds', () => {
       Object.defineProperty(mockAudioCtx, 'state', { value: 'running', configurable: true });
       Object.defineProperty(mockAudioCtx, 'currentTime', { value: 10, configurable: true });
       const mockInput = { dispose: vi.fn() } as unknown as Input;
       const engine = new MkvAudioSyncEngine(mockInput, [mockRawTracks[0] as unknown as InputAudioTrack]);
+      const sinkConstructor = vi.mocked(AudioSampleSink);
+      sinkConstructor.mockClear();
 
       engine.onPlay(0); // Epoch: ctx 10, video 0
+      expect(sinkConstructor).toHaveBeenCalledTimes(1);
 
-      // Small drift within tolerance (e.g. 50ms) does not restart
+      // Drift below 50ms remains within the lip-sync tolerance.
       Object.defineProperty(mockAudioCtx, 'currentTime', { value: 12, configurable: true });
-      engine.onTimeUpdate(2.05); // Expected 2.0, drift = 0.05s <= 0.15s
+      engine.onTimeUpdate(2.04);
+      expect(sinkConstructor).toHaveBeenCalledTimes(1);
 
-      // Single soft drift tick (> 150ms but <= 1.0s) does not restart immediately (debounced)
-      engine.onTimeUpdate(2.2); // drift = 0.2s (tick 1)
-      engine.onTimeUpdate(2.2); // drift = 0.2s (tick 2)
-      // 3rd consecutive soft drift tick triggers resync
-      engine.onTimeUpdate(2.2); // drift = 0.2s (tick 3)
+      // Sustained drift above 50ms is debounced by elapsed time (not by call count) to
+      // avoid correction thrash, so the clock must actually advance between samples.
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 12.1, configurable: true });
+      engine.onTimeUpdate(2.2); // drift = 0.1s, debounce window starts at ctx 12.1
+      expect(sinkConstructor).toHaveBeenCalledTimes(1);
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 12.2, configurable: true });
+      engine.onTimeUpdate(2.3); // drift = 0.1s, only 0.1s elapsed since the window started
+      expect(sinkConstructor).toHaveBeenCalledTimes(1);
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 12.3, configurable: true });
+      engine.onTimeUpdate(2.4); // drift = 0.1s, 0.2s elapsed - resync fires
+      expect(sinkConstructor).toHaveBeenCalledTimes(2);
 
-      // Hard drift (> 1.0s) triggers immediate resync
-      engine.onTimeUpdate(5.0); // drift = 3.0s > 1.0s
+      // Drift above 250ms is corrected immediately, regardless of elapsed time.
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 13, configurable: true });
+      engine.onTimeUpdate(3.5);
+      expect(sinkConstructor).toHaveBeenCalledTimes(3);
+    });
+
+    it('uses presented video frames as the primary clock and cancels observation on destroy', () => {
+      Object.defineProperty(mockAudioCtx, 'state', { value: 'running', configurable: true });
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 10, configurable: true });
+      mockAudioCtx.createMediaElementSource = vi.fn(() => ({
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      }) as unknown as MediaElementAudioSourceNode);
+
+      const callbacks = new Map<number, VideoFrameRequestCallback>();
+      let nextCallbackId = 0;
+      const videoEl = document.createElement('video');
+      videoEl.requestVideoFrameCallback = vi.fn(callback => {
+        const id = ++nextCallbackId;
+        callbacks.set(id, callback);
+        return id;
+      });
+      videoEl.cancelVideoFrameCallback = vi.fn(id => callbacks.delete(id));
+
+      const mockInput = { dispose: vi.fn() } as unknown as Input;
+      const engine = new MkvAudioSyncEngine(mockInput, [mockRawTracks[0] as unknown as InputAudioTrack]);
+      const sinkConstructor = vi.mocked(AudioSampleSink);
+      sinkConstructor.mockClear();
+
+      expect(engine.attachMediaElement(videoEl)).toBe(true);
+      engine.onPlay(0);
+      expect(sinkConstructor).toHaveBeenCalledTimes(1);
+
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 12, configurable: true });
+      const now = performance.now();
+      callbacks.get(1)?.(now, {
+        mediaTime: 2.04,
+        expectedDisplayTime: now + 40,
+      } as VideoFrameCallbackMetadata);
+
+      // A fresh frame observation suppresses the coarser timeupdate fallback.
+      engine.onTimeUpdate(3);
+      expect(sinkConstructor).toHaveBeenCalledTimes(1);
+
+      // Sustained drift is debounced by elapsed ctx-time, not call count, so each
+      // successive frame observation must also advance the (mocked) Web Audio clock -
+      // matching how ctx.currentTime actually progresses between real rVFC callbacks.
+      const displayDelay = 0.04; // (expectedDisplayTime - now) / 1000, from the +40ms offset below
+      let callbackId = 2;
+      for (const ctxTime of [12.08, 12.16, 12.24]) {
+        Object.defineProperty(mockAudioCtx, 'currentTime', { value: ctxTime, configurable: true });
+        const expectedVideoTime = (ctxTime + displayDelay) - 10; // epoch: ctx 10, video 0
+        callbacks.get(callbackId++)?.(now, {
+          mediaTime: expectedVideoTime + 0.1, // ~100ms sustained drift
+          expectedDisplayTime: now + 40,
+        } as VideoFrameCallbackMetadata);
+      }
+      expect(sinkConstructor).toHaveBeenCalledTimes(2);
+
+      engine.destroy();
+      expect(videoEl.cancelVideoFrameCallback).toHaveBeenCalledWith(5);
+    });
+
+    it('schedules decoded audio early to compensate for output latency', async () => {
+      Object.defineProperty(mockAudioCtx, 'currentTime', { value: 10, configurable: true });
+      Object.defineProperty(mockAudioCtx, 'outputLatency', { value: 0.08, configurable: true });
+      const start = vi.fn();
+      mockAudioCtx.createBufferSource = vi.fn(() => ({
+        buffer: null,
+        playbackRate: { value: 1 },
+        connect: vi.fn(),
+        start,
+        stop: vi.fn(),
+        disconnect: vi.fn(),
+      })) as unknown as typeof mockAudioCtx.createBufferSource;
+
+      const mockInput = { dispose: vi.fn() } as unknown as Input;
+      const engine = new MkvAudioSyncEngine(mockInput, [mockRawTracks[0] as unknown as InputAudioTrack]);
+      engine.onPlay(0);
+
+      await vi.waitFor(() => expect(start).toHaveBeenCalled());
+      expect(start.mock.calls[0][0]).toBe(10);
+      expect(start.mock.calls[0][1]).toBeCloseTo(0.08);
+      engine.destroy();
     });
 
     it('synchronously stops active sources when stopping or restarting to prevent async race condition', async () => {
