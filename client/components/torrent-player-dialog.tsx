@@ -42,6 +42,14 @@ export const TorrentPlayerDialog = ({
   const activePreloadHashRef = useRef<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The torrent/file the caller hands us gets a brand-new object identity on every
+  // poll refresh upstream (e.g. SWR revalidation), even when nothing relevant changed.
+  // The preload-trigger effect below must not restart on that churn, so it keys off
+  // the stable torrent.hash/selectedFile.path below and reads the latest objects via
+  // these refs instead of depending on the objects themselves.
+  const torrentRef = useRef(torrent);
+  torrentRef.current = torrent;
+  const selectedFileForEffectRef = useRef<TorrentFile | null>(null);
 
   const stopPreloadPolling = useCallback(() => {
     if (pollTimerRef.current) {
@@ -77,6 +85,7 @@ export const TorrentPlayerDialog = ({
 
   const videoFiles = open ? computed.videoFiles : [];
   const selectedFile = open ? (userSelectedFile ?? computed.selectedFile) : null;
+  selectedFileForEffectRef.current = selectedFile;
 
   const handleExit = useCallback(() => {
     cancelActivePreload();
@@ -91,30 +100,41 @@ export const TorrentPlayerDialog = ({
     }
   }, [cancelActivePreload, onOpenChange, videoFiles.length]);
 
-  // Implicit preload trigger when a playable file is selected
+  // Implicit preload trigger when a playable file is selected.
+  // Keyed on torrent.hash/selectedFile.path (stable strings) rather than the torrent/
+  // selectedFile objects themselves: the caller's torrent prop gets a brand-new object
+  // identity on every upstream poll refresh even when nothing relevant changed, and
+  // depending on the objects directly would cancel and restart this preload on every
+  // such refresh - potentially forever, if a preload takes longer than the poll interval.
+  const torrentHash = torrent?.hash ?? null;
+  const selectedFilePath = selectedFile?.path ?? null;
+
   useEffect(() => {
-    if (!open || !torrent || !selectedFile || !enablePreload) {
+    const currentTorrent = torrentRef.current;
+    const currentSelectedFile = selectedFileForEffectRef.current;
+
+    if (!open || !currentTorrent || !currentSelectedFile || !enablePreload) {
       cancelActivePreload();
       return;
     }
 
-    if (preloadedFileRef.current === selectedFile.path) {
+    if (preloadedFileRef.current === currentSelectedFile.path) {
       return;
     }
 
     let isMounted = true;
 
-    if (activePreloadHashRef.current && activePreloadHashRef.current !== torrent.hash) {
+    if (activePreloadHashRef.current && activePreloadHashRef.current !== currentTorrent.hash) {
       cancelPreload(activePreloadHashRef.current).catch(() => {});
     }
-    activePreloadHashRef.current = torrent.hash;
+    activePreloadHashRef.current = currentTorrent.hash;
 
     setIsPreloading(true);
     setPreloadProgress(0);
     setCompletedBytes(0);
     setTargetBytes(0);
 
-    startPreload(torrent.hash, { filePath: selectedFile.path })
+    startPreload(currentTorrent.hash, { filePath: currentSelectedFile.path })
       .then(resp => {
         if (!isMounted) return;
         setPreloadProgress(current => Math.max(current, resp.progress || 0));
@@ -123,7 +143,7 @@ export const TorrentPlayerDialog = ({
 
         if (resp.status === 'idle') {
           cancelActivePreload();
-          preloadedFileRef.current = selectedFile.path;
+          preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
           return;
         }
@@ -134,7 +154,7 @@ export const TorrentPlayerDialog = ({
           setTargetBytes(resp.targetBytes || 0);
           setTimeout(() => {
             if (!isMounted) return;
-            preloadedFileRef.current = selectedFile.path;
+            preloadedFileRef.current = currentSelectedFile.path;
             setIsPreloading(false);
           }, 300);
           return;
@@ -143,7 +163,7 @@ export const TorrentPlayerDialog = ({
         // Start polling for preload progress
         pollTimerRef.current = setInterval(async () => {
           try {
-            const statusResp = await getPreload(torrent.hash);
+            const statusResp = await getPreload(currentTorrent.hash);
             if (!isMounted) return;
             const progress = statusResp.progress || 0;
             setPreloadProgress(current => Math.max(current, progress));
@@ -152,7 +172,7 @@ export const TorrentPlayerDialog = ({
 
             if (statusResp.status === 'idle') {
               cancelActivePreload();
-              preloadedFileRef.current = selectedFile.path;
+              preloadedFileRef.current = currentSelectedFile.path;
               setIsPreloading(false);
               return;
             }
@@ -162,14 +182,14 @@ export const TorrentPlayerDialog = ({
               setPreloadProgress(1.0);
               setTimeout(() => {
                 if (!isMounted) return;
-                preloadedFileRef.current = selectedFile.path;
+                preloadedFileRef.current = currentSelectedFile.path;
                 setIsPreloading(false);
               }, 300);
             }
           } catch {
             // Polling error: stop preloading indicator
             cancelActivePreload();
-            preloadedFileRef.current = selectedFile.path;
+            preloadedFileRef.current = currentSelectedFile.path;
             setIsPreloading(false);
           }
         }, 400);
@@ -178,7 +198,7 @@ export const TorrentPlayerDialog = ({
         timeoutTimerRef.current = setTimeout(() => {
           if (!isMounted) return;
           cancelActivePreload();
-          preloadedFileRef.current = selectedFile.path;
+          preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
         }, 15000);
       })
@@ -186,7 +206,7 @@ export const TorrentPlayerDialog = ({
         if (!isMounted) return;
         // Network/API error: stop preloading indicator
         cancelActivePreload();
-        preloadedFileRef.current = selectedFile.path;
+        preloadedFileRef.current = currentSelectedFile.path;
         setIsPreloading(false);
       });
 
@@ -194,7 +214,7 @@ export const TorrentPlayerDialog = ({
       isMounted = false;
       stopPreloadPolling();
     };
-  }, [cancelActivePreload, open, torrent, selectedFile, enablePreload, stopPreloadPolling]);
+  }, [cancelActivePreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
 
   // Clean up when dialog closes
   useEffect(() => {
@@ -209,11 +229,12 @@ export const TorrentPlayerDialog = ({
   const videoPlayerOptions = useMemo(() => {
     if (selectedFile && torrent) {
       const subtitleTracks = getSubtitleTracksForVideo(selectedFile, torrent.files, torrent.hash);
+      const streamUrl = getTorrentStreamUrl(torrent.hash, selectedFile.path);
+      const videoType = getVideoType(selectedFile.name);
       return {
-        src: {
-          src: getTorrentStreamUrl(torrent.hash, selectedFile.path),
-          type: getVideoType(selectedFile.name),
-        },
+        // Leave containers that Vidstack cannot describe untyped so the browser
+        // can determine the format instead of being told they are MP4.
+        src: videoType ? { src: streamUrl, type: videoType } : streamUrl,
         title: selectedFile.name,
         autoPlay: true,
         tracks: subtitleTracks,
@@ -245,7 +266,12 @@ export const TorrentPlayerDialog = ({
     }
     : undefined;
 
-  const preloadBadge = isPreloading
+  // Block the media source on the very first render for a newly selected file.
+  // Waiting for the preload effect would allow the browser to issue a stream
+  // request before preloading has even started.
+  const shouldBlockForPreload = enablePreload && open && !!torrent && !!selectedFile &&
+    (isPreloading || preloadedFileRef.current !== selectedFile.path);
+  const preloadBadge = shouldBlockForPreload
     ? {
       progress: preloadProgress,
       completedBytes,

@@ -40,13 +40,25 @@ describe('video-utils', () => {
       expect(getVideoType('video.mpg')).toBe('video/mpeg');
     });
 
-    it('defaults to video/mp4 for mkv, mp4, and unknown/undefined formats', () => {
-      expect(getVideoType('movie.mkv')).toBe('video/mp4');
+    it('uses MP4 for MP4-family extensions and for containers Vidstack cannot describe on its own', () => {
       expect(getVideoType('movie.mp4')).toBe('video/mp4');
       expect(getVideoType('movie.m4v')).toBe('video/mp4');
-      expect(getVideoType('movie.mov')).toBe('video/mp4');
-      expect(getVideoType(undefined)).toBe('video/mp4');
-      expect(getVideoType('')).toBe('video/mp4');
+      // Vidstack's own provider-selection can't recognize these extensions or infer
+      // a matching type from the server's Content-Type, so without a hint it refuses
+      // to hand the source to a provider at all. Tagging them as MP4 gets Vidstack to
+      // select the native <video> provider, which decodes the real container itself.
+      expect(getVideoType('movie.mkv')).toBe('video/mp4');
+      expect(getVideoType('movie.flv')).toBe('video/mp4');
+      expect(getVideoType('movie.wmv')).toBe('video/mp4');
+      expect(getVideoType('movie.vob')).toBe('video/mp4');
+    });
+
+    it('leaves genuinely unrecognized filenames untyped so Vidstack can sniff them', () => {
+      // '.mov' is in Vidstack's own extension regex, so it resolves a provider
+      // without needing an explicit type hint.
+      expect(getVideoType('movie.mov')).toBeUndefined();
+      expect(getVideoType(undefined)).toBeUndefined();
+      expect(getVideoType('')).toBeUndefined();
     });
   });
 

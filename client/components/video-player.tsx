@@ -9,10 +9,11 @@ import { ActivityAction, IntentLauncher, type IntentLauncherParams } from '@capg
 import { isTauri } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
+  type MediaErrorDetail,
   MediaPlayer,
   type MediaPlayerInstance,
   MediaProvider,
-  type VideoSrc,
+  type PlayerSrc,
 } from '@vidstack/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -30,9 +31,25 @@ import { getVidstackVideoElement } from '@/lib/vidstack-media';
 
 import { useVideoPlayerControls, VideoPlayerCaptions, VideoPlayerControls } from './video-player-controls';
 
+// Standard HTMLMediaElement error codes (MEDIA_ERR_*), which Vidstack forwards as-is
+// on `detail.code` for both native decode errors and its own source-resolution failures.
+const PLAYBACK_ERROR_MESSAGES: Record<number, string> = {
+  1: 'Playback was aborted.',
+  2: 'A network error interrupted playback. Check your connection and try again.',
+  3: 'This video could not be decoded by the internal player.',
+  4: 'This video container or codec is not supported by the internal player.',
+};
+
+function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
+  if (detail.code && PLAYBACK_ERROR_MESSAGES[detail.code]) {
+    return PLAYBACK_ERROR_MESSAGES[detail.code];
+  }
+  return detail.message || 'Playback failed in the internal player.';
+}
+
 export interface VideoPlayerProps {
   options: {
-    src?: VideoSrc,
+    src?: PlayerSrc,
     title?: string,
     autoPlay?: boolean,
     tracks?: SubtitleTrackInfo[]
@@ -72,6 +89,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>(0);
   const [isWasmAudioActive, setIsWasmAudioActive] = useState<boolean>(false);
+  const [playbackError, setPlaybackError] = useState<{ source?: string, message: string } | null>(null);
   const syncEngineRef = useRef<MkvAudioSyncEngine | null>(null);
   const nativeAudioTrackIndexRef = useRef(0);
 
@@ -158,14 +176,15 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
           const defaultTrackIndex = getDefaultAudioTrackIndex(tracks);
           nativeAudioTrackIndexRef.current = defaultTrackIndex;
+          engine.setNativeTrackIndex(defaultTrackIndex);
           const defaultTrack = tracks[defaultTrackIndex];
           const requiresWasm = defaultTrack ? !defaultTrack.isNativelySupported : false;
 
           setSelectedAudioTrack(defaultTrackIndex);
           if (requiresWasm) {
-            setIsWasmAudioActive(true);
-            engine.setWasmActive(true);
-            engine.selectTrack(defaultTrackIndex);
+            const activated = engine.selectTrack(defaultTrackIndex);
+            setIsWasmAudioActive(activated);
+            if (!activated) return;
 
             // If the player is already playing when probing finishes, start audio immediately
             if (player.current && !player.current.paused) {
@@ -207,8 +226,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     // The browser owns the container's default native track. All other tracks
     // route through the sync engine because HTML media lacks portable switching.
     const requiresWasm = index !== nativeAudioTrackIndexRef.current || !track.isNativelySupported;
-    setIsWasmAudioActive(requiresWasm);
-    engine.setWasmActive(requiresWasm);
 
     const videoEl = getVidstackVideoElement(player.current);
     if (videoEl) {
@@ -216,11 +233,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
 
     if (requiresWasm) {
-      engine.selectTrack(index);
+      const activated = engine.selectTrack(index);
+      setIsWasmAudioActive(activated);
+      if (!activated) return;
       if (player.current && !player.current.paused) {
         engine.onPlay(player.current.currentTime);
       }
     } else {
+      engine.setNativeTrackIndex(index);
+      setIsWasmAudioActive(false);
+      engine.setWasmActive(false);
       engine.onPause();
     }
   };
@@ -238,11 +260,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     hasPlayedRef.current = true;
     if (syncEngineRef.current && player.current) {
       const videoEl = getVidstackVideoElement(player.current);
-      if (videoEl) {
-        syncEngineRef.current.attachMediaElement(videoEl);
-      }
-      if (isWasmAudioActive) {
+      if (videoEl && syncEngineRef.current.attachMediaElement(videoEl) && isWasmAudioActive) {
         syncEngineRef.current.onPlay(player.current.currentTime);
+      } else if (isWasmAudioActive) {
+        syncEngineRef.current.setWasmActive(false);
+        setIsWasmAudioActive(false);
       }
     }
   };
@@ -274,11 +296,11 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const handlePlaying = () => {
     if (syncEngineRef.current && player.current) {
       const videoEl = getVidstackVideoElement(player.current);
-      if (videoEl) {
-        syncEngineRef.current.attachMediaElement(videoEl);
-      }
-      if (isWasmAudioActive) {
+      if (videoEl && syncEngineRef.current.attachMediaElement(videoEl) && isWasmAudioActive) {
         syncEngineRef.current.onPlaying(player.current.currentTime);
+      } else if (isWasmAudioActive) {
+        syncEngineRef.current.setWasmActive(false);
+        setIsWasmAudioActive(false);
       }
     }
   };
@@ -313,7 +335,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           if (onExit) onExit();
         } catch (error) {
           console.error(error);
-          if (onExit) onExit();
+          setUseExternalPlayer(false);
         }
       } else if (IS_NATIVE) {
         intentLaunched.current = true;
@@ -331,11 +353,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
             };
           }
 
-          IntentLauncher.startActivityAsync(intentPayload);
+          await IntentLauncher.startActivityAsync(intentPayload);
           if (onExit) onExit();
         } catch (error) {
           console.error('Failed to open URL with IntentLauncher', error);
-          if (onExit) onExit();
+          intentLaunched.current = false;
+          setUseExternalPlayer(false);
         }
       }
     };
@@ -368,6 +391,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const handleCanPlay = useCallback(() => {
     canPlayRef.current = true;
+    setPlaybackError(null);
     if (!isPreloading && options.autoPlay) {
       tryPlay();
     }
@@ -388,8 +412,13 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return null;
   }
 
+  const playbackErrorMessage = playbackError && playbackError.source === streamUrl
+    ? playbackError.message
+    : null;
+
   return (
     <MediaPlayer
+      key={streamUrl ?? 'video-player'}
       ref={player}
       className='group bg-black text-white font-sans rounded-lg aspect-video w-full'
       title={options.title}
@@ -406,9 +435,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onSeeked={handleSeeked}
       onVolumeChange={handleVolumeChange}
       onRateChange={handleRateChange}
+      onError={detail => setPlaybackError({
+        source: streamUrl,
+        message: getPlaybackErrorMessage(detail),
+      })}
       playsInline
     >
       <MediaProvider />
+      {playbackErrorMessage && !isPreloading && (
+        <div
+          role='alert'
+          className='absolute inset-0 z-[5] flex items-center justify-center bg-black/85 px-6 text-center text-sm text-white sm:text-base'
+        >
+          {playbackErrorMessage}
+        </div>
+      )}
       <VideoPlayerCaptions tracks={allSubtitleTracks}
         selectedTrackId={selectedSubtitleTrack} />
       <VideoPlayerControls

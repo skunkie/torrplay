@@ -149,6 +149,7 @@ export class MkvAudioSyncEngine {
   private nativeSourceNode: MediaElementAudioSourceNode | null = null;
   private nativeGainNode: GainNode | null = null;
   private boundElement: HTMLMediaElement | null = null;
+  private nativeIsolationFailed: boolean = false;
   private isWasmActive: boolean = true;
   private currentSink: AudioSampleSink | null = null;
   private currentGenerator: AsyncGenerator<AudioSample, void, unknown> | null = null;
@@ -221,7 +222,7 @@ export class MkvAudioSyncEngine {
         const at = (this.boundElement as unknown as { audioTracks?: { length: number, [index: number]: { enabled: boolean } } }).audioTracks;
         if (at) {
           for (let i = 0; i < at.length; i++) {
-            at[i].enabled = !this.isWasmActive;
+            at[i].enabled = !this.isWasmActive && i === this.selectedTrackIndex;
           }
         }
       } catch {
@@ -230,13 +231,26 @@ export class MkvAudioSyncEngine {
     }
   }
 
-  public setWasmActive(active: boolean) {
+  public setWasmActive(active: boolean): boolean {
+    if (active && this.boundElement && !this.nativeGainNode) {
+      this.isWasmActive = false;
+      this.updateGains();
+      this.syncAudioTracks();
+      return false;
+    }
     this.isWasmActive = active;
     if (!active) {
       this.stopAllSources();
     }
     this.updateGains();
     this.syncAudioTracks();
+    return true;
+  }
+
+  public setNativeTrackIndex(trackIndex: number) {
+    if (trackIndex < 0 || trackIndex >= this.rawTracks.length) return;
+    this.selectedTrackIndex = trackIndex;
+    if (!this.isWasmActive) this.syncAudioTracks();
   }
 
   /**
@@ -244,8 +258,8 @@ export class MkvAudioSyncEngine {
    * its native audio output when WASM audio decoding is active.
    * If the underlying element changes (e.g. provider re-mount), it cleans up and re-attaches.
    */
-  public attachMediaElement(videoEl: HTMLMediaElement) {
-    if (typeof window === 'undefined') return;
+  public attachMediaElement(videoEl: HTMLMediaElement): boolean {
+    if (typeof window === 'undefined') return false;
 
     if (this.boundElement !== videoEl) {
       // Disconnect previous element nodes if re-binding
@@ -267,6 +281,7 @@ export class MkvAudioSyncEngine {
       }
 
       this.boundElement = videoEl;
+      this.nativeIsolationFailed = false;
 
       try {
         const ctx = this.initAudioContext();
@@ -277,21 +292,27 @@ export class MkvAudioSyncEngine {
           this.nativeGainNode.connect(ctx.destination);
           this.updateGains();
         }
-      } catch {
-        // createMediaElementSource can throw if element is already connected elsewhere
+      } catch (err) {
+        // A media element can only be associated with one source node for its
+        // lifetime. Never run decoded audio when native audio cannot be muted.
+        this.nativeIsolationFailed = true;
+        this.isWasmActive = false;
+        this.updateGains();
+        this.onError?.(err);
       }
     }
 
     this.syncAudioTracks();
+    return !this.nativeIsolationFailed && this.nativeGainNode !== null;
   }
 
-  public selectTrack(trackIndex: number) {
-    if (trackIndex < 0 || trackIndex >= this.rawTracks.length) return;
+  public selectTrack(trackIndex: number): boolean {
+    if (trackIndex < 0 || trackIndex >= this.rawTracks.length) return false;
+    if (!this.setWasmActive(true)) return false;
     this.hasFatalError = false;
     this.selectedTrackIndex = trackIndex;
-    this.isWasmActive = true;
-    this.updateGains();
     this.restartPipeline(this.lastKnownVideoTime);
+    return true;
   }
 
   public setVolume(volume: number) {

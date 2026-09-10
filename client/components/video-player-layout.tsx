@@ -4,7 +4,7 @@
 
 'use client';
 
-import { type VideoSrc } from '@vidstack/react';
+import { type PlayerSrc } from '@vidstack/react';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { type SubtitleTrackInfo } from '@/lib/video-utils';
@@ -16,7 +16,7 @@ interface VideoPlayerLayoutProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
   options: {
-    src: VideoSrc,
+    src: PlayerSrc,
     title?: string,
     autoPlay?: boolean,
     tracks?: SubtitleTrackInfo[]
