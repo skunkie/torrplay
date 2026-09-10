@@ -49,17 +49,21 @@ const (
 )
 
 type (
+	// PlaybackTokenProvider returns a current token for authenticated media URLs.
+	PlaybackTokenProvider func() (string, error)
+
 	torrentReader interface {
 		GetTorrents() ([]*database.Torrent, error)
 		GetTorrent(ih metainfo.Hash) (*database.Torrent, error)
 	}
 
 	ContentDirectory struct {
-		baseURL        *url.URL
-		db             torrentReader
-		mu             sync.RWMutex
-		postersPath    string
-		systemUpdateID uint
+		baseURL               *url.URL
+		db                    torrentReader
+		mu                    sync.RWMutex
+		playbackTokenProvider PlaybackTokenProvider
+		postersPath           string
+		systemUpdateID        uint
 	}
 
 	Features struct {
@@ -94,12 +98,13 @@ func clampUint(value int64) uint {
 	return uint(value)
 }
 
-func NewContentDirectory(db torrentReader, baseURL *url.URL, postersPath string) *ContentDirectory {
+func NewContentDirectory(db torrentReader, baseURL *url.URL, postersPath string, playbackTokenProvider PlaybackTokenProvider) *ContentDirectory {
 	return &ContentDirectory{
-		baseURL:        baseURL,
-		db:             db,
-		postersPath:    postersPath,
-		systemUpdateID: clampUint(time.Now().Unix()),
+		baseURL:               baseURL,
+		db:                    db,
+		playbackTokenProvider: playbackTokenProvider,
+		postersPath:           postersPath,
+		systemUpdateID:        clampUint(time.Now().Unix()),
 	}
 }
 
@@ -854,16 +859,29 @@ func (cd *ContentDirectory) browseTorrent(_ context.Context, torrentHash upnpav.
 
 func (cd *ContentDirectory) fileURI(hash string, filepath string) string {
 	cd.mu.RLock()
-	defer cd.mu.RUnlock()
 	if cd.baseURL == nil {
+		cd.mu.RUnlock()
 		slog.Error("DLNA ContentDirectory has no base URL set, can't generate file URI")
 		return ""
 	}
 
 	fileURL := *cd.baseURL
+	playbackTokenProvider := cd.playbackTokenProvider
+	cd.mu.RUnlock()
+
 	fileURL.Path = path.Join("/api/v1/stream", hash)
 	q := url.Values{}
 	q.Set("path", filepath)
+	if playbackTokenProvider != nil {
+		token, err := playbackTokenProvider()
+		if err != nil {
+			slog.Error("failed to generate playback token for DLNA stream URL", "err", err)
+			return ""
+		}
+		if token != "" {
+			q.Set("token", token)
+		}
+	}
 	fileURL.RawQuery = q.Encode()
 
 	return fileURL.String()

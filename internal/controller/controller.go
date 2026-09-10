@@ -227,7 +227,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	c.pieceCompletion = pc
 
-	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger)
+	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger, c.dlnaPlaybackToken)
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.
@@ -446,18 +446,6 @@ func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 			return errors.New("authentication not configured correctly")
 		}
 
-		var jwtSecret string
-		if authType == api.Bearer {
-			var err error
-			jwtSecret, err = c.db.GetJWTSecret()
-			if err != nil {
-				return errors.New("authentication not configured correctly")
-			}
-			if jwtSecret == "" {
-				return errors.New("authentication not configured correctly")
-			}
-		}
-
 		switch input.SecuritySchemeName {
 		case "basicAuth":
 			if authType != api.Basic {
@@ -479,6 +467,10 @@ func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 			if authType != api.Bearer {
 				return errors.New("bearer authentication is not enabled")
 			}
+			jwtSecret, err := c.db.GetJWTSecret()
+			if err != nil || jwtSecret == "" {
+				return errors.New("authentication not configured correctly")
+			}
 			authHeader := input.RequestValidationInput.Request.Header.Get("Authorization")
 			if authHeader == "" {
 				return &api.AuthError{Message: "authorization header is missing", Type: "Bearer"}
@@ -494,25 +486,55 @@ func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 			}
 			return nil
 		case "queryTokenAuth":
-			if authType != api.Bearer {
+			return c.validatePlaybackQueryToken(input.RequestValidationInput.Request)
+		case "compatQueryTokenAuth":
+			if authType == api.Basic {
 				return nil
 			}
-			tokenString := input.RequestValidationInput.Request.URL.Query().Get("token")
-			if tokenString == "" {
-				return &api.AuthError{Message: "token query parameter is missing", Type: "query"}
-			}
-			claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
-			if err != nil {
-				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "query"}
-			}
-			if claims.Scope != auth.PlaybackTokenScope {
-				return &api.AuthError{Message: "only playback-scoped tokens are accepted in URLs", Type: "query"}
-			}
-			return nil
+			return c.validatePlaybackQueryToken(input.RequestValidationInput.Request)
 		}
 
 		return errors.New("authentication failed")
 	}
+}
+
+func (c *Controller) validatePlaybackQueryToken(r *http.Request) error {
+	jwtSecret, err := c.db.GetJWTSecret()
+	if err != nil || jwtSecret == "" {
+		return errors.New("authentication not configured correctly")
+	}
+
+	tokenString := r.URL.Query().Get("token")
+	if tokenString == "" {
+		return &api.AuthError{Message: "token query parameter is missing", Type: "query"}
+	}
+	claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+	if err != nil {
+		return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "query"}
+	}
+	if claims.Scope != auth.PlaybackTokenScope {
+		return &api.AuthError{Message: "only playback-scoped tokens are accepted in URLs", Type: "query"}
+	}
+	return nil
+}
+
+func (c *Controller) dlnaPlaybackToken() (string, error) {
+	c.mu.RLock()
+	authSettings := c.settings.Auth
+	enabled := authSettings != nil && utils.Val(authSettings.Enabled)
+	c.mu.RUnlock()
+
+	if !enabled {
+		return "", nil
+	}
+
+	secret, err := c.db.GetJWTSecret()
+	if err != nil || secret == "" {
+		return "", errors.New("authentication not configured correctly")
+	}
+
+	token, _, err := auth.GeneratePlaybackToken([]byte(secret))
+	return token, err
 }
 
 func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {

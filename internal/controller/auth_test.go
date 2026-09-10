@@ -17,6 +17,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -231,6 +232,45 @@ func TestNewAuthenticator(t *testing.T) {
 	}
 }
 
+func TestDLNAPlaybackToken(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, nil)
+	defer cleanup()
+
+	token, err := controller.dlnaPlaybackToken()
+	require.NoError(t, err)
+	assert.Empty(t, token)
+
+	for _, authType := range []api.AuthType{api.Bearer, api.Basic} {
+		t.Run(string(authType), func(t *testing.T) {
+			controller.mu.Lock()
+			controller.settings.Auth = &api.Auth{
+				Enabled:  new(true),
+				Type:     utils.Ptr(authType),
+				Username: new("admin"),
+				Password: new("password"),
+			}
+			controller.mu.Unlock()
+
+			token, err := controller.dlnaPlaybackToken()
+			require.NoError(t, err)
+			require.NotEmpty(t, token)
+
+			secret, err := controller.db.GetJWTSecret()
+			require.NoError(t, err)
+			claims, err := auth.ValidateToken(token, []byte(secret))
+			require.NoError(t, err)
+			assert.Equal(t, auth.PlaybackTokenScope, claims.Scope)
+		})
+	}
+
+	controller.mu.Lock()
+	controller.settings.Auth.Enabled = new(false)
+	controller.mu.Unlock()
+	token, err = controller.dlnaPlaybackToken()
+	require.NoError(t, err)
+	assert.Empty(t, token)
+}
+
 func TestQueryTokenAuthenticator(t *testing.T) {
 	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
 		s.Auth = &api.Auth{
@@ -248,6 +288,7 @@ func TestQueryTokenAuthenticator(t *testing.T) {
 	require.NoError(t, err)
 	playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
 	require.NoError(t, err)
+	expiredPlaybackToken := signedPlaybackToken(t, secret, time.Now().Add(-time.Hour))
 
 	authenticator := controller.NewAuthenticator()
 	for _, tc := range []struct {
@@ -259,6 +300,7 @@ func TestQueryTokenAuthenticator(t *testing.T) {
 		{name: "full JWT rejected", token: token, wantError: true},
 		{name: "missing", wantError: true},
 		{name: "invalid", token: "invalid", wantError: true},
+		{name: "expired", token: expiredPlaybackToken, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/hash", http.NoBody)
@@ -285,6 +327,21 @@ func TestQueryTokenAuthenticator(t *testing.T) {
 		})
 	}
 
+	t.Run("compatibility routes still require tokens with bearer auth", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/play/hash/0", http.NoBody)
+		input := &openapi3filter.AuthenticationInput{
+			RequestValidationInput: &openapi3filter.RequestValidationInput{Request: req},
+			SecuritySchemeName:     "compatQueryTokenAuth",
+			SecurityScheme:         &openapi3.SecurityScheme{},
+		}
+		require.Error(t, authenticator(context.Background(), input))
+
+		query := req.URL.Query()
+		query.Set("token", playbackToken)
+		req.URL.RawQuery = query.Encode()
+		require.NoError(t, authenticator(context.Background(), input))
+	})
+
 	t.Run("playback token cannot authenticate API requests", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody)
 		req.Header.Set("Authorization", "Bearer "+playbackToken)
@@ -306,7 +363,111 @@ func TestQueryTokenAuthenticator(t *testing.T) {
 
 		rr = doGet(t, controller.router, "/api/v1/playlist")
 		require.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+
+		for _, requestPath := range []string{
+			"/play/0000000000000000000000000000000000000000/0",
+			"/stream/video.mp4?link=invalid",
+		} {
+			rr = doGet(t, controller.router, requestPath)
+			require.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+		}
 	})
+}
+
+func TestQueryTokenAuthenticatorWithBasicAuth(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{
+			Enabled:  new(true),
+			Type:     utils.Ptr(api.Basic),
+			Username: new("admin"),
+			Password: new("password"),
+		}
+	})
+	defer cleanup()
+
+	secret, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	fullToken, err := auth.GenerateToken("testuser", []byte(secret))
+	require.NoError(t, err)
+	playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
+	require.NoError(t, err)
+	expiredPlaybackToken := signedPlaybackToken(t, secret, time.Now().Add(-time.Hour))
+
+	authenticator := controller.NewAuthenticator()
+	for _, tc := range []struct {
+		name      string
+		token     string
+		wantError bool
+	}{
+		{name: "playback token", token: playbackToken},
+		{name: "full JWT rejected", token: fullToken, wantError: true},
+		{name: "missing", wantError: true},
+		{name: "invalid", token: "invalid", wantError: true},
+		{name: "expired", token: expiredPlaybackToken, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/stream/hash", http.NoBody)
+			if tc.token != "" {
+				query := req.URL.Query()
+				query.Set("token", tc.token)
+				req.URL.RawQuery = query.Encode()
+			}
+			input := &openapi3filter.AuthenticationInput{
+				RequestValidationInput: &openapi3filter.RequestValidationInput{Request: req},
+				SecuritySchemeName:     "queryTokenAuth",
+				SecurityScheme:         &openapi3.SecurityScheme{},
+			}
+
+			err := authenticator(context.Background(), input)
+			if tc.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	t.Run("compatibility routes remain token-free", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/play/hash/0", http.NoBody)
+		input := &openapi3filter.AuthenticationInput{
+			RequestValidationInput: &openapi3filter.RequestValidationInput{Request: req},
+			SecuritySchemeName:     "compatQueryTokenAuth",
+			SecurityScheme:         &openapi3.SecurityScheme{},
+		}
+		require.NoError(t, authenticator(context.Background(), input))
+	})
+
+	t.Run("validates through HTTP middleware", func(t *testing.T) {
+		rr := doGet(t, controller.router, "/api/v1/playlist")
+		require.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+
+		rr = doGet(t, controller.router, "/api/v1/playlist?token="+playbackToken)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		for _, requestPath := range []string{
+			"/play/0000000000000000000000000000000000000000/0",
+			"/stream/video.mp4?link=invalid",
+		} {
+			rr = doGet(t, controller.router, requestPath)
+			require.NotEqual(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+		}
+	})
+}
+
+func signedPlaybackToken(t *testing.T, secret string, expiresAt time.Time) string {
+	t.Helper()
+	now := time.Now()
+	claims := &auth.Claims{
+		Scope: auth.PlaybackTokenScope,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expiresAt),
+			IssuedAt:  jwt.NewNumericDate(now.Add(-2 * time.Hour)),
+			NotBefore: jwt.NewNumericDate(now.Add(-2 * time.Hour)),
+		},
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
+	require.NoError(t, err)
+	return token
 }
 
 func TestStremioAuthenticationFollowsCurrentSettings(t *testing.T) {

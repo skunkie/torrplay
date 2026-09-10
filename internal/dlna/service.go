@@ -34,28 +34,30 @@ type serviceDatabase interface {
 }
 
 type Service struct {
-	basePath         string
-	broadcastDone    sync.WaitGroup
-	cancel           context.CancelFunc
-	contentDirectory *ContentDirectory
-	db               serviceDatabase
-	device           *upnp.Device
-	handler          http.Handler
-	logger           *slog.Logger
-	mu               sync.RWMutex
-	postersPath      string
+	basePath              string
+	broadcastDone         sync.WaitGroup
+	cancel                context.CancelFunc
+	contentDirectory      *ContentDirectory
+	db                    serviceDatabase
+	device                *upnp.Device
+	handler               http.Handler
+	logger                *slog.Logger
+	mu                    sync.RWMutex
+	playbackTokenProvider PlaybackTokenProvider
+	postersPath           string
 }
 
-func NewService(db serviceDatabase, basePath, postersPath string, logger *slog.Logger) *Service {
+func NewService(db serviceDatabase, basePath, postersPath string, logger *slog.Logger, playbackTokenProvider PlaybackTokenProvider) *Service {
 	// Configure the global logrus logger used by helix to use our slog hook.
 	logrus.SetOutput(io.Discard)
 	logrus.AddHook(logging.NewSlogHook(logger))
 
 	return &Service{
-		basePath:    basePath,
-		db:          db,
-		logger:      logger,
-		postersPath: postersPath,
+		basePath:              basePath,
+		db:                    db,
+		logger:                logger,
+		playbackTokenProvider: playbackTokenProvider,
+		postersPath:           postersPath,
 	}
 }
 
@@ -183,7 +185,7 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 		return fmt.Errorf("failed to get UDN, %w", err)
 	}
 
-	cd := NewContentDirectory(s.db, baseURL, s.postersPath)
+	cd := NewContentDirectory(s.db, baseURL, s.postersPath, s.playbackTokenProvider)
 
 	device := NewDevice(friendlyName, udn, icons, cd)
 
