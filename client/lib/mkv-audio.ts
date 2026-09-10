@@ -150,6 +150,9 @@ export class MkvAudioSyncEngine {
   private nativeGainNode: GainNode | null = null;
   private boundElement: HTMLMediaElement | null = null;
   private nativeIsolationFailed: boolean = false;
+  private videoFrameCallbackId: number | null = null;
+  private videoFrameElement: HTMLVideoElement | null = null;
+  private lastVideoFrameWallTime: number | null = null;
   private isWasmActive: boolean = true;
   private currentSink: AudioSampleSink | null = null;
   private currentGenerator: AsyncGenerator<AudioSample, void, unknown> | null = null;
@@ -169,14 +172,21 @@ export class MkvAudioSyncEngine {
   private audioEpochCtxTime: number = 0;
   private audioEpochVideoTime: number = 0;
   private nextScheduledTime: number = 0;
-  private consecutiveDriftCount: number = 0;
+  // Web Audio ctx-time at which the current run of soft drift was first observed, or
+  // null when the last observation was within tolerance. Using elapsed ctx-time rather
+  // than a tick counter keeps the debounce window meaningful regardless of how often
+  // observeVideoTime is sampled (per-video-frame via rVFC vs. per-timeupdate fallback).
+  private softDriftSinceCtxTime: number | null = null;
 
   // Sync parameters
-  private readonly LOOKAHEAD_SECONDS = 1.0;
+  private readonly LOOKAHEAD_SECONDS = 0.25;
   private readonly SCHEDULE_INTERVAL_MS = 100;
-  private readonly DRIFT_TOLERANCE_SECONDS = 0.15; // 150ms drift threshold for soft drift
-  private readonly CONSECUTIVE_DRIFT_TICKS = 3; // require 3 consecutive drifted ticks before resync
-  private readonly HARD_DRIFT_THRESHOLD = 1.0; // 1s drift threshold for immediate resync
+  private readonly DRIFT_TOLERANCE_SECONDS = 0.05; // sustained drift above 50ms is perceptible
+  private readonly SUSTAINED_DRIFT_SECONDS = 0.15; // soft drift must persist this long before resync
+  private readonly HARD_DRIFT_THRESHOLD = 0.25; // large drift needs an immediate resync
+  private readonly FRAME_CALLBACK_STALE_MS = 500;
+  private readonly MAX_OUTPUT_LATENCY_SECONDS = 0.25;
+  private readonly MAX_FRAME_DISPLAY_DELAY_SECONDS = 0.25;
 
   constructor(
     input: Input,
@@ -231,6 +241,39 @@ export class MkvAudioSyncEngine {
     }
   }
 
+  private stopVideoFrameSync() {
+    const video = this.videoFrameElement;
+    if (video && this.videoFrameCallbackId !== null &&
+      typeof video.cancelVideoFrameCallback === 'function') {
+      video.cancelVideoFrameCallback(this.videoFrameCallbackId);
+    }
+    this.videoFrameCallbackId = null;
+    this.videoFrameElement = null;
+    this.lastVideoFrameWallTime = null;
+  }
+
+  private startVideoFrameSync(videoEl: HTMLMediaElement) {
+    if (!(videoEl instanceof HTMLVideoElement) ||
+      typeof videoEl.requestVideoFrameCallback !== 'function') return;
+
+    this.videoFrameElement = videoEl;
+    const observeFrame = (now: number, metadata: VideoFrameCallbackMetadata) => {
+      this.videoFrameCallbackId = null;
+      if (this.videoFrameElement !== videoEl || this.boundElement !== videoEl) return;
+
+      this.lastVideoFrameWallTime = now;
+      const displayDelay = Math.max(0, Math.min(
+        (metadata.expectedDisplayTime - now) / 1000,
+        this.MAX_FRAME_DISPLAY_DELAY_SECONDS,
+      ));
+      const sampleCtxTime = (this.audioCtx?.currentTime ?? 0) + displayDelay;
+      this.observeVideoTime(metadata.mediaTime, sampleCtxTime);
+      this.videoFrameCallbackId = videoEl.requestVideoFrameCallback(observeFrame);
+    };
+
+    this.videoFrameCallbackId = videoEl.requestVideoFrameCallback(observeFrame);
+  }
+
   public setWasmActive(active: boolean): boolean {
     if (active && this.boundElement && !this.nativeGainNode) {
       this.isWasmActive = false;
@@ -262,6 +305,7 @@ export class MkvAudioSyncEngine {
     if (typeof window === 'undefined') return false;
 
     if (this.boundElement !== videoEl) {
+      this.stopVideoFrameSync();
       // Disconnect previous element nodes if re-binding
       if (this.nativeSourceNode) {
         try {
@@ -300,6 +344,8 @@ export class MkvAudioSyncEngine {
         this.updateGains();
         this.onError?.(err);
       }
+
+      this.startVideoFrameSync(videoEl);
     }
 
     this.syncAudioTracks();
@@ -384,24 +430,37 @@ export class MkvAudioSyncEngine {
     const ctx = this.audioCtx;
     if (ctx.state !== 'running') return;
 
+    const now = typeof performance === 'undefined' ? 0 : performance.now();
+    if (this.lastVideoFrameWallTime !== null &&
+      now - this.lastVideoFrameWallTime < this.FRAME_CALLBACK_STALE_MS) return;
+
+    this.observeVideoTime(videoTime, ctx.currentTime);
+  }
+
+  private observeVideoTime(videoTime: number, sampleCtxTime: number) {
+    if (this.isPaused || !this.audioCtx || this.audioCtx.state !== 'running' ||
+      this.hasFatalError || !this.isWasmActive) return;
+    this.lastKnownVideoTime = videoTime;
+
     // Expected video playback position based on Web Audio clock
     const expectedVideoTime =
       this.audioEpochVideoTime +
-      (ctx.currentTime - this.audioEpochCtxTime) * this.playbackRate;
+      (sampleCtxTime - this.audioEpochCtxTime) * this.playbackRate;
 
     const drift = Math.abs(videoTime - expectedVideoTime);
 
     if (drift > this.HARD_DRIFT_THRESHOLD) {
-      this.consecutiveDriftCount = 0;
-      this.restartPipeline(videoTime);
+      this.softDriftSinceCtxTime = null;
+      this.restartPipeline(videoTime, sampleCtxTime);
     } else if (drift > this.DRIFT_TOLERANCE_SECONDS) {
-      this.consecutiveDriftCount++;
-      if (this.consecutiveDriftCount >= this.CONSECUTIVE_DRIFT_TICKS) {
-        this.consecutiveDriftCount = 0;
-        this.restartPipeline(videoTime);
+      if (this.softDriftSinceCtxTime === null) {
+        this.softDriftSinceCtxTime = sampleCtxTime;
+      } else if (sampleCtxTime - this.softDriftSinceCtxTime >= this.SUSTAINED_DRIFT_SECONDS) {
+        this.softDriftSinceCtxTime = null;
+        this.restartPipeline(videoTime, sampleCtxTime);
       }
     } else {
-      this.consecutiveDriftCount = 0;
+      this.softDriftSinceCtxTime = null;
     }
   }
 
@@ -431,7 +490,7 @@ export class MkvAudioSyncEngine {
     }
   }
 
-  private restartPipeline(startTime: number) {
+  private restartPipeline(startTime: number, epochCtxTime?: number) {
     this.stopAllSources();
     if (this.isPaused || this.hasFatalError) return;
 
@@ -452,7 +511,7 @@ export class MkvAudioSyncEngine {
     const currentPipelineId = this.pipelineId;
 
     const ctx = this.initAudioContext();
-    this.audioEpochCtxTime = ctx.currentTime;
+    this.audioEpochCtxTime = epochCtxTime ?? ctx.currentTime;
     this.audioEpochVideoTime = startTime;
     this.lastKnownVideoTime = startTime;
     this.nextScheduledTime = ctx.currentTime;
@@ -493,9 +552,12 @@ export class MkvAudioSyncEngine {
 
         if (signal.aborted || this.isPaused || this.pipelineId !== currentPipelineId) break;
 
+        // Schedule early enough for the audio sample to reach the output device
+        // when the corresponding video timestamp is displayed.
         const targetCtxTime =
           this.audioEpochCtxTime +
-          (timestamp - this.audioEpochVideoTime) / this.playbackRate;
+          (timestamp - this.audioEpochVideoTime) / this.playbackRate -
+          this.getOutputLatencySeconds(ctx);
 
         // Skip if buffer is completely in the past
         const bufferDuration = duration / this.playbackRate;
@@ -549,8 +611,18 @@ export class MkvAudioSyncEngine {
     }
   }
 
+  private getOutputLatencySeconds(ctx: AudioContext): number {
+    const outputLatency = Number.isFinite(ctx.outputLatency) ? ctx.outputLatency : undefined;
+    const baseLatency = Number.isFinite(ctx.baseLatency) ? ctx.baseLatency : undefined;
+    return Math.max(0, Math.min(
+      outputLatency ?? baseLatency ?? 0,
+      this.MAX_OUTPUT_LATENCY_SECONDS,
+    ));
+  }
+
   public destroy() {
     this.stopAllSources();
+    this.stopVideoFrameSync();
     if (this.nativeSourceNode) {
       try {
         this.nativeSourceNode.disconnect();
