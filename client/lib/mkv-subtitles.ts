@@ -375,6 +375,17 @@ export function cleanAssDialogueText(rawText: string): string {
 }
 
 /**
+ * A blank (or whitespace-only) line inside cue text - e.g. from an ASS "\N\N" spacer,
+ * cleaned by cleanAssDialogueText() into a literal blank line - would end the WebVTT
+ * cue payload early, since the format's grammar treats an empty line as the boundary
+ * between cues. Replace such lines with a single non-breaking space so they still
+ * render as visual spacing without being structurally empty.
+ */
+function sanitizeVttCueText(text: string): string {
+  return text.split('\n').map(line => line.trim() === '' ? ' ' : line).join('\n');
+}
+
+/**
  * Converts a list of SubtitleCue objects to a standard WebVTT string.
  */
 export function cuesToWebVtt(cues: SubtitleCue[]): string {
@@ -385,7 +396,7 @@ export function cuesToWebVtt(cues: SubtitleCue[]): string {
     const cue = sorted[i];
     const start = formatVttTimestamp(cue.startTime);
     const end = formatVttTimestamp(cue.endTime);
-    vtt += `${i + 1}\n${start} --> ${end}\n${cue.text}\n\n`;
+    vtt += `${i + 1}\n${start} --> ${end}\n${sanitizeVttCueText(cue.text)}\n\n`;
   }
 
   return vtt;
@@ -587,6 +598,10 @@ interface RemoteElement {
 // Keep media reads bounded, including when a server ignores Range requests.
 const RANGE_BYTES = 64 * 1024;
 const MAX_SUBTITLE_ELEMENT_BYTES = 1024 * 1024;
+// Tracks and Cues can legitimately grow past the default cap (many tracks with
+// sizable CodecPrivate blobs; a large cue index) without anything being wrong with
+// the subtitles themselves, so both get a more generous override.
+const MAX_LARGE_SUBTITLE_ELEMENT_BYTES = 8 * 1024 * 1024;
 const PLAYBACK_RANGE_BYTES = 512 * 1024;
 export const SUBTITLE_LOOK_AHEAD_SECONDS = 30;
 export const SUBTITLE_SEEK_PREROLL_SECONDS = 30;
@@ -673,15 +688,22 @@ class SubtitleRangeReader {
       await response.body?.cancel();
       throw new Error(`Subtitle extraction requires byte ranges (HTTP ${response.status})`);
     }
+    // RFC 7233 requires Content-Range on a 206 response; without it we cannot verify
+    // the returned bytes actually start at the requested offset, and parsing
+    // misaligned bytes as EBML would silently misparse rather than fail loudly.
     const range = response.headers.get('Content-Range')?.match(/^bytes (\d+)-(\d+)\/(\d+|\*)$/);
-    if (range && Number(range[1]) !== offset) {
+    if (!range) {
+      await response.body?.cancel();
+      throw new Error('Partial content response is missing a valid Content-Range header');
+    }
+    if (Number(range[1]) !== offset) {
       await response.body?.cancel();
       throw new Error('Unexpected subtitle byte range');
     }
     this.buffer = new Uint8Array(await response.arrayBuffer());
     this.signal?.throwIfAborted();
     this.bufferOffset = offset;
-    if (range && range[3] !== '*') this.fileSize = Number(range[3]);
+    if (range[3] !== '*') this.fileSize = Number(range[3]);
     else if (this.buffer.length < requestedEnd - offset + 1) this.fileSize = offset + this.buffer.length;
     if (!this.buffer.length || this.buffer.length > requestedEnd - offset + 1) {
       throw new Error('Invalid subtitle byte range length');
@@ -774,7 +796,10 @@ async function readSubtitleMetadata(reader: SubtitleRangeReader): Promise<Subtit
     }
     if (element.id === ID_SEEK_HEAD) readSeekHead(await reader.payload(element), metadata);
     if (element.id === ID_CUES) metadata.cuesOffset = element.offset;
-    if (element.id === ID_TRACKS) metadata.tracks = parseMatroskaSubtitleTracks(await reader.payload(element, true));
+    if (element.id === ID_TRACKS) {
+      metadata.tracks = parseMatroskaSubtitleTracks(
+        await reader.payload(element, true, MAX_LARGE_SUBTITLE_ELEMENT_BYTES));
+    }
     if (element.id === ID_INFO) {
       for (const child of childElements(await reader.payload(element))) {
         if (child.id === ID_TIMESTAMP_SCALE) metadata.timecodeScaleNs = readUInt(child.data, 0, child.data.length);
@@ -799,8 +824,8 @@ async function readSubtitleIndex(reader: SubtitleRangeReader, metadata: Subtitle
   if (metadata.cuesOffset !== undefined) {
     const cues = await reader.element(metadata.cuesOffset);
     // An oversized or absent index falls back to skipping whole clusters.
-    if (cues?.id === ID_CUES && cues.end - cues.dataOffset <= 8 * 1024 * 1024) {
-      for (const point of childElements(await reader.payload(cues, false, 8 * 1024 * 1024))) {
+    if (cues?.id === ID_CUES && cues.end - cues.dataOffset <= MAX_LARGE_SUBTITLE_ELEMENT_BYTES) {
+      for (const point of childElements(await reader.payload(cues, false, MAX_LARGE_SUBTITLE_ELEMENT_BYTES))) {
         if (point.id !== ID_CUE_POINT) continue;
         let time: number | undefined;
         const offsets: number[] = [];
