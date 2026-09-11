@@ -67,14 +67,18 @@ export function useVideoPlayerControls({
   const toggleFullscreen = useCallback(() => {
     if (!player.current) return;
     try {
-      const operation = isFullscreen
+      // Decide from the player's own live state rather than the isFullscreen closure
+      // value: a source change can force the browser out of fullscreen (e.g. removing
+      // the fullscreen element from the DOM) without onFullscreenChange ever reaching
+      // this player instance, leaving the mirrored state stale.
+      const operation = player.current.state.fullscreen
         ? player.current.exitFullscreen()
         : player.current.enterFullscreen();
       void Promise.resolve(operation).catch(error => console.error('Fullscreen error:', error));
     } catch (error) {
       console.error('Fullscreen error:', error);
     }
-  }, [isFullscreen, player]);
+  }, [player]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -172,6 +176,15 @@ export function VideoPlayerControls({
   playlistNavigation,
   preloadBadge,
 }: VideoPlayerControlsProps) {
+  // At most one of the audio/subtitle track menus may be open at a time - opening one
+  // closes the other, instead of letting both (and their overlapping click-outside
+  // scrims) stack.
+  const [openTrackMenu, setOpenTrackMenu] = useState<'audio' | 'subtitle' | null>(null);
+  const handleAudioMenuOpenChange = useCallback(
+    (open: boolean) => setOpenTrackMenu(open ? 'audio' : null), []);
+  const handleSubtitleMenuOpenChange = useCallback(
+    (open: boolean) => setOpenTrackMenu(open ? 'subtitle' : null), []);
+
   return (
     <>
       {preloadBadge && (
@@ -312,11 +325,15 @@ export function VideoPlayerControls({
                 tracks={audioTracks}
                 selectedTrackIndex={selectedAudioTrack}
                 onSelectTrack={onSelectAudioTrack}
+                isOpen={openTrackMenu === 'audio'}
+                onOpenChange={handleAudioMenuOpenChange}
               />
               <SubtitleTrackSelector
                 tracks={subtitleTracks}
                 selectedTrackId={selectedSubtitleTrack}
                 onSelectTrack={onSelectSubtitleTrack}
+                isOpen={openTrackMenu === 'subtitle'}
+                onOpenChange={handleSubtitleMenuOpenChange}
               />
               <button
                 type='button'

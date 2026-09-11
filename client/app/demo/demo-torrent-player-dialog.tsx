@@ -145,7 +145,6 @@ export function DemoTorrentPlayerDialog({
       open={open}
       onOpenChange={onOpenChange}
       videoFiles={videoFiles}
-      selectedFile={selectedFile}
       setSelectedFile={file => {
         preloadedFileRef.current = null;
         setUserSelectedFile(file);

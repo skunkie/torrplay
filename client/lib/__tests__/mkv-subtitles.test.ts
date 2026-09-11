@@ -12,6 +12,8 @@ import {
   parseMatroskaSubtitleCues,
   parseMatroskaSubtitleTracks,
   probeEmbeddedSubtitleTracks,
+  type SubtitleCue,
+  SubtitleSourceCache,
 } from '../mkv-subtitles';
 import { concatBuffers, createEbmlElement, createStringElement, createUIntElement, rangeFetch, subtitleCluster } from './fixtures/matroska';
 
@@ -34,6 +36,11 @@ describe('mkv-subtitles', () => {
     it('returns raw text if not formatted as ASS line', () => {
       expect(cleanAssDialogueText('Simple subtitle text')).toBe('Simple subtitle text');
     });
+
+    it('turns a double \\N blank-line spacer into a literal blank line', () => {
+      const assLine = '0,0,Default,,0,0,0,,Hello world\\N\\NSecond line';
+      expect(cleanAssDialogueText(assLine)).toBe('Hello world\n\nSecond line');
+    });
   });
 
   describe('cuesToWebVtt', () => {
@@ -48,6 +55,23 @@ describe('mkv-subtitles', () => {
       expect(vtt).toContain('First line');
       expect(vtt).toContain('00:00:05.500 --> 00:00:09.000');
       expect(vtt).toContain('Second line');
+    });
+
+    it('does not let an embedded blank line (e.g. from an ASS \\N\\N spacer) split a cue into an orphaned block', () => {
+      const cues = [
+        { startTime: 1.0, endTime: 4.0, text: 'Hello world\n\nSecond line' },
+      ];
+      const vtt = cuesToWebVtt(cues);
+
+      // A compliant WebVTT parser treats a blank line as the boundary between cue
+      // blocks; splitting on it the same way must yield exactly the WEBVTT header
+      // plus one cue block - not the header plus two orphaned blocks, which would
+      // mean "Second line" has no timing line and gets silently dropped.
+      const blocks = vtt.trim().split(/\n\n+/);
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]).toBe('WEBVTT');
+      expect(blocks[1]).toContain('Hello world');
+      expect(blocks[1]).toContain('Second line');
     });
   });
 
@@ -403,6 +427,51 @@ describe('subtitle extraction regressions', () => {
     await expect(loadEmbeddedSubtitleTrackVtt('/movie.mkv', 1, vi.fn().mockResolvedValue(response))).rejects.toThrow('requires byte ranges');
     expect(cancel).toHaveBeenCalled();
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it('rejects a 206 response missing Content-Range instead of trusting the byte offset blindly', async () => {
+    const response = new Response(new Uint8Array(12), { status: 206 });
+    const cancel = vi.spyOn(response.body!, 'cancel');
+    await expect(loadEmbeddedSubtitleTrackVtt('/movie.mkv', 1, vi.fn().mockResolvedValue(response)))
+      .rejects.toThrow('Content-Range');
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it('reads Tracks metadata past the default 1 MiB element cap, matching the larger cap already used for Cues', async () => {
+    const subTrack = createEbmlElement(
+      0xae,
+      concatBuffers(
+        createUIntElement(0xd7, 1),
+        createUIntElement(0x83, 17),
+        createStringElement(0x86, 'S_TEXT/UTF8')
+      )
+    );
+    // A Void element pads Tracks well past 1 MiB (the default element-size cap) while
+    // staying under the 8 MiB override, simulating many tracks with sizable
+    // CodecPrivate blobs. Parsers must skip elements they don't recognize, so this
+    // padding is otherwise inert.
+    const padding = createEbmlElement(0xec, new Uint8Array(1_100_000));
+    const tracksElem = createEbmlElement(0x1654ae6b, concatBuffers(subTrack, padding));
+    // probeEmbeddedSubtitleTracks only reads the first 256 KiB and never hits the
+    // element-size cap, so this must go through the metadata path used when demuxing
+    // with playback/seek support (readSubtitleMetadata), which is where Tracks is
+    // actually capped.
+    const buffer = concatBuffers(
+      createEbmlElement(0x1a45dfa3, new Uint8Array([0])),
+      createEbmlElement(0x18538067, concatBuffers(tracksElem, subtitleCluster(0, 'Hello')))
+    );
+
+    const fetchFn = rangeFetch(buffer);
+    const cache = new SubtitleSourceCache('/movie.mkv');
+    const cues: SubtitleCue[] = [];
+    const result = await loadEmbeddedSubtitleTrackVtt('/movie.mkv', 1, fetchFn, undefined, batch => cues.push(...batch), {
+      cache,
+      currentTime: () => 0,
+      waitForTimeChange: () => new Promise(() => {}),
+    });
+
+    expect(cues.map(cue => cue.text)).toEqual(['Hello']);
+    expect(decodeURIComponent(result)).toContain('Hello');
   });
 
   it('does not report success after a later network failure', async () => {

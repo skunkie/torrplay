@@ -71,8 +71,11 @@ export function useSubtitleTracks({
     : allTracks.find(track => track.default && !track.unavailableReason)?.id ?? null;
 
   const selectTrack = useCallback((id: string | null) => {
+    // Recording a choice while disabled would let selectedTrackId/the UI show a
+    // selection that the (also enabled-gated) effects below never actually apply.
+    if (!enabled) return;
     setChoice({ source: sourceKey, id });
-  }, [sourceKey]);
+  }, [sourceKey, enabled]);
 
   // Clear all player-owned state on source changes, disabling, or unmount.
   useEffect(() => {
