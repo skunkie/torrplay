@@ -172,6 +172,15 @@ export function VideoPlayerControls({
   playlistNavigation,
   preloadBadge,
 }: VideoPlayerControlsProps) {
+  // At most one of the audio/subtitle track menus may be open at a time - opening one
+  // closes the other, instead of letting both (and their overlapping click-outside
+  // scrims) stack.
+  const [openTrackMenu, setOpenTrackMenu] = useState<'audio' | 'subtitle' | null>(null);
+  const handleAudioMenuOpenChange = useCallback(
+    (open: boolean) => setOpenTrackMenu(open ? 'audio' : null), []);
+  const handleSubtitleMenuOpenChange = useCallback(
+    (open: boolean) => setOpenTrackMenu(open ? 'subtitle' : null), []);
+
   return (
     <>
       {preloadBadge && (
@@ -312,11 +321,15 @@ export function VideoPlayerControls({
                 tracks={audioTracks}
                 selectedTrackIndex={selectedAudioTrack}
                 onSelectTrack={onSelectAudioTrack}
+                isOpen={openTrackMenu === 'audio'}
+                onOpenChange={handleAudioMenuOpenChange}
               />
               <SubtitleTrackSelector
                 tracks={subtitleTracks}
                 selectedTrackId={selectedSubtitleTrack}
                 onSelectTrack={onSelectSubtitleTrack}
+                isOpen={openTrackMenu === 'subtitle'}
+                onOpenChange={handleSubtitleMenuOpenChange}
               />
               <button
                 type='button'

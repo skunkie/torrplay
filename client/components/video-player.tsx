@@ -122,7 +122,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     subtitleTracks: allSubtitleTracks,
     selectedSubtitleTrack,
     onSelectSubtitleTrack: handleSelectSubtitleTrack,
-    enabled: preferenceLoaded && !useExternalPlayer,
+    // Keep in sync with useSubtitleTracks' `enabled` above: keyboard shortcuts
+    // (including subtitle cycling) shouldn't fire while the player has no source
+    // loaded during preloading.
+    enabled: preferenceLoaded && !useExternalPlayer && !isPreloading,
   });
 
   useEffect(() => {

@@ -5,22 +5,34 @@
 'use client';
 
 import { Check, Music } from 'lucide-react';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 
 import { type AudioTrackInfo } from '@/lib/mkv-audio';
 
 interface AudioTrackSelectorProps {
   tracks: AudioTrackInfo[],
   selectedTrackIndex: number,
-  onSelectTrack: (index: number) => void
+  onSelectTrack: (index: number) => void,
+  // Optional: lets a parent coordinate mutual exclusion with sibling menus (e.g. the
+  // subtitle selector). Falls back to fully self-managed open state when omitted.
+  isOpen?: boolean,
+  onOpenChange?: (open: boolean) => void
 }
 
 export const AudioTrackSelector: React.FC<AudioTrackSelectorProps> = ({
   tracks,
   selectedTrackIndex,
   onSelectTrack,
+  isOpen: controlledIsOpen,
+  onOpenChange,
 }) => {
-  const [isOpen, setIsOpen] = useState(false);
+  const [uncontrolledIsOpen, setUncontrolledIsOpen] = useState(false);
+  const isControlled = controlledIsOpen !== undefined;
+  const isOpen = isControlled ? controlledIsOpen : uncontrolledIsOpen;
+  const setIsOpen = useCallback((open: boolean) => {
+    if (!isControlled) setUncontrolledIsOpen(open);
+    onOpenChange?.(open);
+  }, [isControlled, onOpenChange]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -36,7 +48,7 @@ export const AudioTrackSelector: React.FC<AudioTrackSelectorProps> = ({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen]);
+  }, [isOpen, setIsOpen]);
 
   if (!tracks || tracks.length === 0) return null;
 
