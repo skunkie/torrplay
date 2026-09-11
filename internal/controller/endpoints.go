@@ -457,11 +457,11 @@ func (c *Controller) GetStream(w http.ResponseWriter, r *http.Request, ih metain
 		return
 	}
 	if params.Path != nil {
-		c.streamFile(w, r, ih, *params.Path)
+		c.streamFile(w, r, ih, *params.Path, params.Magnet)
 		return
 	}
 	if params.Index != nil {
-		c.streamFile(w, r, ih, *params.Index)
+		c.streamFile(w, r, ih, *params.Index, params.Magnet)
 		return
 	}
 	api.HTTPError(w, "one of 'path' or 'index' is required", http.StatusBadRequest)
@@ -670,11 +670,11 @@ func (c *Controller) HeadStream(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 	if params.Path != nil {
-		c.streamFile(w, r, ih, *params.Path)
+		c.streamFile(w, r, ih, *params.Path, params.Magnet)
 		return
 	}
 	if params.Index != nil {
-		c.streamFile(w, r, ih, *params.Index)
+		c.streamFile(w, r, ih, *params.Index, params.Magnet)
 		return
 	}
 	api.HTTPError(w, "one of 'path' or 'index' is required", http.StatusBadRequest)
@@ -1204,6 +1204,26 @@ func (c *Controller) addTorrentByMagnetWithStorage(uri string, defaultStorage ap
 	return c.loadTorrent(uri, utils.Val(t.Storage))
 }
 
+// torrentFromMagnetParam resolves a torrent from a user-supplied magnet URI
+// (e.g. the "magnet" query/body parameter on stream and preload requests),
+// validating that its info hash matches the requested hash and registering
+// its trackers with the torrent if they weren't already added.
+func (c *Controller) torrentFromMagnetParam(magnet string, ih metainfo.Hash) (*torrent.Torrent, error) {
+	magnetV2, err := utils.ParseAndValidateMagnet(magnet, ih)
+	if err != nil {
+		return nil, api.NewError(err.Error(), http.StatusBadRequest)
+	}
+
+	to, err := c.addTorrentByMagnetWithStorage(magnet, api.Memory)
+	if err != nil {
+		return nil, err
+	}
+	if len(magnetV2.Trackers) > 0 {
+		to.AddTrackers([][]string{magnetV2.Trackers})
+	}
+	return to, nil
+}
+
 func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	scheme := "http"
 	if r.TLS != nil {
@@ -1640,11 +1660,24 @@ func calcReadaheadPct(maxMemory int64) int {
 
 // streamFile is the internal implementation for streaming a torrent file.
 // It can identify the file to stream by either a file path (string) or a file index (int).
-func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdentifier any) {
-	to, err := c.addTorrentByHash(ih)
-	if err != nil {
-		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
-		return
+func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdentifier any, magnet *api.Magnet) {
+	var (
+		to  *torrent.Torrent
+		err error
+	)
+
+	if magnet != nil && *magnet != "" {
+		to, err = c.torrentFromMagnetParam(*magnet, ih)
+		if err != nil {
+			api.HandleError(w, err)
+			return
+		}
+	} else {
+		to, err = c.addTorrentByHash(ih)
+		if err != nil {
+			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	// Ensure data downloading is permitted for this torrent (e.g. if it was previously

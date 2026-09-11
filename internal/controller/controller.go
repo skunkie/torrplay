@@ -280,7 +280,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		c.postersPath,
 		c.logger,
 		func(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdx int) {
-			c.streamFile(w, r, ih, fileIdx)
+			c.streamFile(w, r, ih, fileIdx, nil)
 		},
 		c.validateStremioToken,
 	)

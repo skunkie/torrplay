@@ -10,6 +10,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAddTrackersToSpec(t *testing.T) {
@@ -106,4 +107,39 @@ func TestMagnetURIFromHash(t *testing.T) {
 	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 	expected := "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10"
 	assert.Equal(t, expected, MagnetURIFromHash(ih))
+}
+
+func TestParseAndValidateMagnet(t *testing.T) {
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+	t.Run("valid magnet matching the expected hash", func(t *testing.T) {
+		magnetV2, err := ParseAndValidateMagnet(
+			"magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=http%3A%2F%2Ftracker.example.com%2Fannounce",
+			ih,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, ih, magnetV2.InfoHash.Value)
+		assert.Equal(t, []string{"http://tracker.example.com/announce"}, magnetV2.Trackers)
+	})
+
+	t.Run("not a magnet URI", func(t *testing.T) {
+		_, err := ParseAndValidateMagnet("not-a-magnet", ih)
+		assert.Error(t, err)
+	})
+
+	t.Run("malformed magnet URI", func(t *testing.T) {
+		_, err := ParseAndValidateMagnet("magnet:?dn=Sintel", ih)
+		assert.Error(t, err)
+	})
+
+	t.Run("zero info hash", func(t *testing.T) {
+		_, err := ParseAndValidateMagnet("magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih)
+		assert.Error(t, err)
+	})
+
+	t.Run("info hash does not match expected hash", func(t *testing.T) {
+		other := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+		_, err := ParseAndValidateMagnet("magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10", other)
+		assert.Error(t, err)
+	})
 }

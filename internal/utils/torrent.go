@@ -6,6 +6,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -84,4 +85,17 @@ func FetchTrackers(ctx context.Context, client *httpclient.Client) ([][]string, 
 // MagnetURIFromHash returns a magnet URI string for the specified info hash.
 func MagnetURIFromHash(ih metainfo.Hash) string {
 	return "magnet:?xt=urn:btih:" + ih.HexString()
+}
+
+// ParseAndValidateMagnet parses a magnet URI and validates that its info hash
+// matches the expected info hash.
+func ParseAndValidateMagnet(magnet string, ih metainfo.Hash) (metainfo.MagnetV2, error) {
+	magnetV2, err := metainfo.ParseMagnetV2Uri(magnet)
+	if err != nil || magnetV2.InfoHash.Value.IsZero() {
+		return metainfo.MagnetV2{}, errors.New("invalid magnet URI")
+	}
+	if magnetV2.InfoHash.Value != ih {
+		return metainfo.MagnetV2{}, errors.New("magnet info hash does not match path hash")
+	}
+	return magnetV2, nil
 }

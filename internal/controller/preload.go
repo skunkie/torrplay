@@ -65,26 +65,40 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 		}
 	}
 
-	to, ok := c.client.Torrent(ih)
-	if !ok {
-		t, err := c.db.GetTorrent(ih)
-		if err != nil {
-			api.HTTPError(w, "torrent not found", http.StatusNotFound)
-			return
-		}
-		storageMode := utils.Val(t.Storage)
-		if storageMode == "" {
-			storageMode = api.Memory
-		}
-		to, err = c.loadTorrentSpec(&torrent.TorrentSpec{
-			AddTorrentOpts: torrent.AddTorrentOpts{
-				InfoHash:  ih,
-				InfoBytes: t.InfoBytes,
-			},
-		}, storageMode)
+	var (
+		to  *torrent.Torrent
+		err error
+	)
+
+	if req.Magnet != nil && *req.Magnet != "" {
+		to, err = c.torrentFromMagnetParam(*req.Magnet, ih)
 		if err != nil {
 			api.HandleError(w, err)
 			return
+		}
+	} else {
+		var ok bool
+		to, ok = c.client.Torrent(ih)
+		if !ok {
+			t, getErr := c.db.GetTorrent(ih)
+			if getErr != nil {
+				api.HTTPError(w, "torrent not found", http.StatusNotFound)
+				return
+			}
+			storageMode := utils.Val(t.Storage)
+			if storageMode == "" {
+				storageMode = api.Memory
+			}
+			to, err = c.loadTorrentSpec(&torrent.TorrentSpec{
+				AddTorrentOpts: torrent.AddTorrentOpts{
+					InfoHash:  ih,
+					InfoBytes: t.InfoBytes,
+				},
+			}, storageMode)
+			if err != nil {
+				api.HandleError(w, err)
+				return
+			}
 		}
 	}
 

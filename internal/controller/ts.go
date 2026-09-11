@@ -236,7 +236,7 @@ func (c *Controller) TSPlay(w http.ResponseWriter, r *http.Request, ih metainfo.
 		index = 0
 	}
 
-	c.streamFile(w, r, ih, index)
+	c.streamFile(w, r, ih, index, nil)
 }
 
 func (c *Controller) TSSettings(w http.ResponseWriter, _ *http.Request) {

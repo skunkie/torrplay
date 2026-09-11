@@ -412,6 +412,41 @@ func TestStreamFileWithNoIdentifier(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+func TestStreamWithMagnetValidation(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+	t.Run("invalid magnet URI on GET", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=not-a-magnet", ih)
+		rr := testutil.NewRequest().Get(url).GoWithHTTPHandler(t, ctrl.router).Recorder
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("mismatched magnet hash on GET", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih)
+		rr := testutil.NewRequest().Get(url).GoWithHTTPHandler(t, ctrl.router).Recorder
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("invalid magnet URI on HEAD", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=not-a-magnet", ih)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodHead, url, http.NoBody)
+		ctrl.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("mismatched magnet hash on HEAD", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodHead, url, http.NoBody)
+		ctrl.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+}
+
 func TestGetPlaylist(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
