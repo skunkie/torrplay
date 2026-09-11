@@ -284,7 +284,6 @@ export const TorrentPlayerDialog = ({
       open={open}
       onOpenChange={onOpenChange}
       videoFiles={videoFiles}
-      selectedFile={selectedFile}
       setSelectedFile={file => {
         cancelActivePreload();
         preloadedFileRef.current = null;
