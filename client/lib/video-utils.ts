@@ -21,6 +21,15 @@ export interface SubtitleTrackInfo {
   default?: boolean
 }
 
+export interface PreloadBadgeInfo {
+  progress: number,
+  completedBytes?: number,
+  targetBytes?: number,
+  downloadRate?: number,
+  activePeers?: number,
+  totalPeers?: number
+}
+
 export const getVideoFiles = (files: TorrentFile[]): TorrentFile[] => {
   return files.filter(f => VIDEO_EXTENSIONS.some(ext => f.name.toLowerCase().endsWith(ext)));
 };

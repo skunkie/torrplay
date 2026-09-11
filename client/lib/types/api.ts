@@ -199,13 +199,16 @@ interface PreloadRequest {
 }
 
 interface PreloadResponse {
+  activePeers: number,
+  completedBytes: number,
+  downloadRate: number,
   // -1 means idle or readiness applies to the fully downloaded torrent.
   fileIndex: number,
   filePath?: string,
-  targetBytes: number,
-  completedBytes: number,
   progress: number,
-  status: 'idle' | 'preloading' | 'ready'
+  status: 'idle' | 'preloading' | 'ready',
+  targetBytes: number,
+  totalPeers: number
 }
 
 export type {
