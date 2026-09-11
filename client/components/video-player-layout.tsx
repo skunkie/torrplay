@@ -7,7 +7,7 @@
 import { type PlayerSrc } from '@vidstack/react';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
-import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import DemoVideoPlayer from './demo-video-player';
 import VideoPlayer from './video-player';
@@ -26,11 +26,7 @@ interface VideoPlayerLayoutProps {
     onPrevious?: () => void,
     onNext?: () => void
   },
-  preloadBadge?: {
-    progress: number,
-    completedBytes?: number,
-    targetBytes?: number
-  } | null,
+  preloadBadge?: PreloadBadgeInfo | null,
   isDemo?: boolean
 }
 

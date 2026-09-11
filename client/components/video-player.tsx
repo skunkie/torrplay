@@ -26,7 +26,7 @@ import {
   probeAudioTracks,
 } from '@/lib/mkv-audio';
 import { isMkvOrWebmStream } from '@/lib/mkv-subtitles';
-import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 import { getVidstackVideoElement } from '@/lib/vidstack-media';
 
 import { useVideoPlayerControls, VideoPlayerCaptions, VideoPlayerControls } from './video-player-controls';
@@ -60,11 +60,7 @@ export interface VideoPlayerProps {
     onNext?: () => void
   },
   internalOnly?: boolean,
-  preloadBadge?: {
-    progress: number,
-    completedBytes?: number,
-    targetBytes?: number
-  } | null
+  preloadBadge?: PreloadBadgeInfo | null
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();

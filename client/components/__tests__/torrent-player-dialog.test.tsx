@@ -655,7 +655,11 @@ describe('TorrentPlayerDialog', () => {
       expect(preloadSpy).toHaveBeenCalledWith('1234567890', { filePath: '/video.mp4' });
       expect(screen.queryByText('Buffering Stream...')).not.toBeInTheDocument();
       expect(screen.getAllByText('video.mp4').length).toBeGreaterThan(0);
-      expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 0%');
+      const badge = screen.getByTestId('player-preload-badge');
+      expect(badge).toHaveTextContent('Buffering 0%');
+      // No rate/peer data yet, so those segments must not render.
+      expect(badge).not.toHaveTextContent('/s');
+      expect(badge).not.toHaveTextContent('peers');
     });
 
     it('shows in-player preloading badge with progress and hides when preload is ready', async () => {
@@ -665,6 +669,9 @@ describe('TorrentPlayerDialog', () => {
         completedBytes: 400,
         progress: 0.4,
         status: 'preloading',
+        activePeers: 3,
+        downloadRate: 2048,
+        totalPeers: 8,
       });
 
       const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload').mockResolvedValueOnce({
@@ -673,6 +680,9 @@ describe('TorrentPlayerDialog', () => {
         completedBytes: 1000,
         progress: 1.0,
         status: 'ready',
+        activePeers: 0,
+        downloadRate: 0,
+        totalPeers: 8,
       });
 
       render(
@@ -686,7 +696,10 @@ describe('TorrentPlayerDialog', () => {
 
       // Video player is shown directly with the in-player preloading badge
       await waitFor(() => {
-        expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 40%');
+        const badge = screen.getByTestId('player-preload-badge');
+        expect(badge).toHaveTextContent('Buffering 40%');
+        expect(badge).toHaveTextContent('2 KB/s');
+        expect(badge).toHaveTextContent('3/8 peers');
       });
 
       // Once background poller gets status ready, badge disappears
@@ -707,6 +720,9 @@ describe('TorrentPlayerDialog', () => {
         completedBytes: 700,
         progress: 0.7,
         status: 'preloading',
+        activePeers: 2,
+        downloadRate: 1024,
+        totalPeers: 5,
       });
       const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload')
         .mockReturnValueOnce(pollResponse);
@@ -734,6 +750,9 @@ describe('TorrentPlayerDialog', () => {
           completedBytes: 400,
           progress: 0.4,
           status: 'preloading',
+          activePeers: 1,
+          downloadRate: 512,
+          totalPeers: 5,
         });
       });
       expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
@@ -746,6 +765,9 @@ describe('TorrentPlayerDialog', () => {
         completedBytes: 200,
         progress: 0.2,
         status: 'preloading',
+        activePeers: 1,
+        downloadRate: 256,
+        totalPeers: 3,
       });
       vi.spyOn(torrentsApi, 'getPreload').mockResolvedValueOnce({
         fileIndex: -1,
@@ -753,6 +775,9 @@ describe('TorrentPlayerDialog', () => {
         completedBytes: 0,
         progress: 0,
         status: 'idle',
+        activePeers: 0,
+        downloadRate: 0,
+        totalPeers: 0,
       });
       const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
 

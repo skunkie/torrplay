@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"path/filepath"
 	"sync/atomic"
@@ -191,17 +192,31 @@ func (c *Controller) DeleteTorrentPreload(w http.ResponseWriter, _ *http.Request
 func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 	to, hasTorrent := c.client.Torrent(ih)
 
+	base := api.PreloadResponse{
+		FileIndex: preloadNoFileIndex,
+		Status:    api.Idle,
+	}
+	if hasTorrent && to != nil {
+		rate, _ := peerTransferRates(to)
+		if !math.IsNaN(rate) && !math.IsInf(rate, 0) {
+			base.DownloadRate = int64(rate)
+		}
+		stats := to.Stats()
+		base.ActivePeers = stats.ActivePeers
+		base.TotalPeers = stats.TotalPeers
+	}
+
 	if val, preloading := c.preloads.Load(ih); preloading {
 		if p, ok := val.(*preloadTask); ok && p != nil {
 			if p.ready.Load() {
-				return api.PreloadResponse{
-					FileIndex:      p.fileIndex,
-					FilePath:       &p.filePath,
-					TargetBytes:    p.targetBytes,
-					CompletedBytes: p.targetBytes,
-					Progress:       1.0,
-					Status:         api.Ready,
-				}
+				resp := base
+				resp.CompletedBytes = p.targetBytes
+				resp.FileIndex = p.fileIndex
+				resp.FilePath = &p.filePath
+				resp.Progress = 1.0
+				resp.Status = api.Ready
+				resp.TargetBytes = p.targetBytes
+				return resp
 			}
 
 			currentBytes := p.progressBytes()
@@ -210,34 +225,27 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 			if p.targetBytes > 0 {
 				progress = min(1.0, float32(currentBytes)/float32(p.targetBytes))
 			}
-			return api.PreloadResponse{
-				FileIndex:      p.fileIndex,
-				FilePath:       &p.filePath,
-				TargetBytes:    p.targetBytes,
-				CompletedBytes: currentBytes,
-				Progress:       progress,
-				Status:         api.Preloading,
-			}
+			resp := base
+			resp.CompletedBytes = currentBytes
+			resp.FileIndex = p.fileIndex
+			resp.FilePath = &p.filePath
+			resp.Progress = progress
+			resp.Status = api.Preloading
+			resp.TargetBytes = p.targetBytes
+			return resp
 		}
 	}
 
 	if hasTorrent && to.Info() != nil && to.BytesCompleted() == to.Length() {
-		return api.PreloadResponse{
-			FileIndex:      preloadNoFileIndex,
-			TargetBytes:    to.Length(),
-			CompletedBytes: to.Length(),
-			Progress:       1.0,
-			Status:         api.Ready,
-		}
+		resp := base
+		resp.CompletedBytes = to.Length()
+		resp.Progress = 1.0
+		resp.Status = api.Ready
+		resp.TargetBytes = to.Length()
+		return resp
 	}
 
-	return api.PreloadResponse{
-		FileIndex:      preloadNoFileIndex,
-		TargetBytes:    0,
-		CompletedBytes: 0,
-		Progress:       0.0,
-		Status:         api.Idle,
-	}
+	return base
 }
 
 func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileIndex int) *preloadTask {
