@@ -22,8 +22,13 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/metrics"
+	tputil "github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
 )
+
+func TestMain(m *testing.M) {
+	tputil.VerifyTestMain(m)
+}
 
 // MockDB is a mock implementation of the DatabaseInterface for testing.
 type MockDB struct {
@@ -293,4 +298,27 @@ func TestDownloader_ProcessTorrents_WithStreaming(t *testing.T) {
 	}
 	assert.Empty(t, downloader.downloading)
 	assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
+}
+
+func TestDownloader_StartStop_CleanExit(t *testing.T) {
+	td := t.TempDir()
+	pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+	require.NoError(t, err)
+	defer pc.Close()
+
+	db := &MockDB{
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: utils.Ptr(false)}},
+	}
+	m := metrics.New()
+	logger := slog.New(slog.DiscardHandler)
+
+	client := newTestTorrentClient(t, td)
+
+	downloader := New(client, db, logger, m, pc, td, nil)
+
+	// Start and stop multiple times in quick succession
+	for range 5 {
+		downloader.Start()
+		downloader.Stop()
+	}
 }
