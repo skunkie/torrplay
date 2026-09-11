@@ -22,7 +22,6 @@ interface TorrentPlayerDialogLayoutProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
   videoFiles: TorrentFile[],
-  selectedFile: TorrentFile | null,
   setSelectedFile: (file: TorrentFile) => void,
   isPlayerVisible: boolean,
   videoPlayerOptions: {
