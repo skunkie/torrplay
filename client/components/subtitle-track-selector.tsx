@@ -5,22 +5,34 @@
 'use client';
 
 import { Check, Subtitles } from 'lucide-react';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 
 import { type SubtitleTrackInfo } from '@/lib/video-utils';
 
 interface SubtitleTrackSelectorProps {
   tracks: SubtitleTrackInfo[],
   selectedTrackId: string | null,
-  onSelectTrack: (trackId: string | null) => void
+  onSelectTrack: (trackId: string | null) => void,
+  // Optional: lets a parent coordinate mutual exclusion with sibling menus (e.g. the
+  // audio selector). Falls back to fully self-managed open state when omitted.
+  isOpen?: boolean,
+  onOpenChange?: (open: boolean) => void
 }
 
 export const SubtitleTrackSelector: React.FC<SubtitleTrackSelectorProps> = ({
   tracks,
   selectedTrackId,
   onSelectTrack,
+  isOpen: controlledIsOpen,
+  onOpenChange,
 }) => {
-  const [isOpen, setIsOpen] = useState(false);
+  const [uncontrolledIsOpen, setUncontrolledIsOpen] = useState(false);
+  const isControlled = controlledIsOpen !== undefined;
+  const isOpen = isControlled ? controlledIsOpen : uncontrolledIsOpen;
+  const setIsOpen = useCallback((open: boolean) => {
+    if (!isControlled) setUncontrolledIsOpen(open);
+    onOpenChange?.(open);
+  }, [isControlled, onOpenChange]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -36,7 +48,7 @@ export const SubtitleTrackSelector: React.FC<SubtitleTrackSelectorProps> = ({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen]);
+  }, [isOpen, setIsOpen]);
 
   if (!tracks || tracks.length === 0) return null;
 
