@@ -376,13 +376,15 @@ describe('VideoPlayer MKV Audio Integration', () => {
     expect(mockEngine.destroy).toHaveBeenCalled();
   });
 
-  it('remounts the media element when the source changes', async () => {
+  it('remounts the media element when the source changes, without remounting the player itself', async () => {
     const { container, rerender } = render(<VideoPlayer options={{
       src: 'http://test-server/first.mp4',
       title: 'First',
     }} />);
-    const firstPlayer = container.querySelector('.group.bg-black');
-    expect(firstPlayer).not.toBeNull();
+    const playerRoot = container.querySelector('.group.bg-black');
+    const firstVideo = container.querySelector('video');
+    expect(playerRoot).not.toBeNull();
+    expect(firstVideo).not.toBeNull();
 
     rerender(<VideoPlayer options={{
       src: 'http://test-server/second.mp4',
@@ -390,7 +392,10 @@ describe('VideoPlayer MKV Audio Integration', () => {
     }} />);
 
     await waitFor(() => {
-      expect(container.querySelector('.group.bg-black')).not.toBe(firstPlayer);
+      expect(container.querySelector('video')).not.toBe(firstVideo);
     });
+    // The player root is what the browser actually fullscreens - it must stay mounted
+    // across source changes, or playlist navigation while fullscreen would force an exit.
+    expect(container.querySelector('.group.bg-black')).toBe(playerRoot);
   });
 });

@@ -67,14 +67,18 @@ export function useVideoPlayerControls({
   const toggleFullscreen = useCallback(() => {
     if (!player.current) return;
     try {
-      const operation = isFullscreen
+      // Decide from the player's own live state rather than the isFullscreen closure
+      // value: a source change can force the browser out of fullscreen (e.g. removing
+      // the fullscreen element from the DOM) without onFullscreenChange ever reaching
+      // this player instance, leaving the mirrored state stale.
+      const operation = player.current.state.fullscreen
         ? player.current.exitFullscreen()
         : player.current.enterFullscreen();
       void Promise.resolve(operation).catch(error => console.error('Fullscreen error:', error));
     } catch (error) {
       console.error('Fullscreen error:', error);
     }
-  }, [isFullscreen, player]);
+  }, [player]);
 
   useEffect(() => {
     if (!enabled) return;

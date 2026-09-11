@@ -421,7 +421,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   return (
     <MediaPlayer
-      key={streamUrl ?? 'video-player'}
       ref={player}
       className='group bg-black text-white font-sans rounded-lg aspect-video w-full'
       title={options.title}
@@ -444,7 +443,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       })}
       playsInline
     >
-      <MediaProvider />
+      {/* Keyed on streamUrl (not <MediaPlayer> itself) so switching sources forces a fresh
+          native media element - preventing stale/overlapping WASM audio across sources -
+          without removing the fullscreen element from the DOM. <MediaPlayer> is the element
+          the browser actually fullscreens, so keeping it mounted across playlist navigation
+          is what lets fullscreen survive next/previous. */}
+      <MediaProvider key={streamUrl ?? 'video-player'} />
       {playbackErrorMessage && !isPreloading && (
         <div
           role='alert'
