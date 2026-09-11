@@ -388,6 +388,75 @@ func TestGetTorrent(t *testing.T) {
 	assert.NotNil(t, result.Active)
 }
 
+func TestGetTorrentWithMagnetBootstrapsWithoutPersisting(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := bunnyHash
+	primeSampleMetadata(t, ctrl, ih)
+	magnet := samples[ih]
+
+	requestURL := fmt.Sprintf("/api/v1/torrents/%s?magnet=%s", ih, magnet)
+	rr := doGet(t, ctrl.router, requestURL)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var result api.Torrent
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
+	assert.Equal(t, ih, result.Hash)
+	assert.NotNil(t, result.Files)
+
+	_, err := ctrl.db.GetTorrent(ih)
+	assert.ErrorIs(t, err, database.ErrTorrentNotFound, "GET with magnet must not persist the torrent to the database")
+}
+
+func TestGetTorrentWithMagnetValidation(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+	t.Run("invalid magnet URI", func(t *testing.T) {
+		requestURL := fmt.Sprintf("/api/v1/torrents/%s?magnet=not-a-magnet", ih)
+		rr := doGet(t, ctrl.router, requestURL)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("mismatched magnet hash", func(t *testing.T) {
+		requestURL := fmt.Sprintf(
+			"/api/v1/torrents/%s?magnet=magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih,
+		)
+		rr := doGet(t, ctrl.router, requestURL)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+}
+
+func TestGetTorrentWithMagnetForAlreadyPersistedTorrent(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	addAllSampleTorrents(t, ctrl)
+	ih := sintelHash
+	magnet := samples[ih]
+
+	t.Run("matching magnet still returns the persisted torrent", func(t *testing.T) {
+		requestURL := fmt.Sprintf("/api/v1/torrents/%s?magnet=%s", ih, magnet)
+		rr := doGet(t, ctrl.router, requestURL)
+		require.Equal(t, http.StatusOK, rr.Code)
+
+		var result api.Torrent
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
+		assert.Equal(t, ih, result.Hash)
+	})
+
+	t.Run("mismatched magnet hash is rejected even for a known torrent", func(t *testing.T) {
+		requestURL := fmt.Sprintf(
+			"/api/v1/torrents/%s?magnet=magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih,
+		)
+		rr := doGet(t, ctrl.router, requestURL)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+}
+
 func TestStreamFileWithBothIdentifiers(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
@@ -410,6 +479,41 @@ func TestStreamFileWithNoIdentifier(t *testing.T) {
 	rr := testutil.NewRequest().Get(streamURL).GoWithHTTPHandler(t, ctrl.router).Recorder
 
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestStreamWithMagnetValidation(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+
+	t.Run("invalid magnet URI on GET", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=not-a-magnet", ih)
+		rr := testutil.NewRequest().Get(url).GoWithHTTPHandler(t, ctrl.router).Recorder
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("mismatched magnet hash on GET", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih)
+		rr := testutil.NewRequest().Get(url).GoWithHTTPHandler(t, ctrl.router).Recorder
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+
+	t.Run("invalid magnet URI on HEAD", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=not-a-magnet", ih)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodHead, url, http.NoBody)
+		ctrl.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+
+	t.Run("mismatched magnet hash on HEAD", func(t *testing.T) {
+		url := fmt.Sprintf("/api/v1/stream/%s?index=0&magnet=magnet:?xt=urn:btih:0000000000000000000000000000000000000000", ih)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodHead, url, http.NoBody)
+		ctrl.router.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
 }
 
 func TestGetPlaylist(t *testing.T) {
