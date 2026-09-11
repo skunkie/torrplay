@@ -2148,12 +2148,32 @@ components:
       type: object
       description: Torrent file preload status and progress.
       required:
-        - file_index
-        - target_bytes
+        - active_peers
         - completed_bytes
+        - download_rate
+        - file_index
         - progress
         - status
+        - target_bytes
+        - total_peers
       properties:
+        active_peers:
+          type: integer
+          minimum: 0
+          description: Number of peers currently connected for this torrent.
+          example: 5
+        completed_bytes:
+          type: integer
+          format: int64
+          description: Number of bytes completed toward the target. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
+          minimum: 0
+          example: 10485760
+        download_rate:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Real-time payload transfer rate in bytes per second.
+          example: 1048576
         file_index:
           type: integer
           minimum: -1
@@ -2163,18 +2183,6 @@ components:
           type: string
           description: Path of the file currently preloaded.
           example: "Sintel.mp4"
-        target_bytes:
-          type: integer
-          format: int64
-          description: Target buffer size in bytes for head and tail preloading.
-          minimum: 0
-          example: 31457280
-        completed_bytes:
-          type: integer
-          format: int64
-          description: Number of bytes completed toward the target. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
-          minimum: 0
-          example: 10485760
         progress:
           type: number
           format: float
@@ -2188,6 +2196,17 @@ components:
             - "preloading"
             - "ready"
           example: "preloading"
+        target_bytes:
+          type: integer
+          format: int64
+          description: Target buffer size in bytes for head and tail preloading.
+          minimum: 0
+          example: 31457280
+        total_peers:
+          type: integer
+          minimum: 0
+          description: Total known swarm peers for this torrent.
+          example: 15
 
     SystemMetrics:
       type: object

@@ -35,8 +35,9 @@ import {
 import { X } from 'lucide-react';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 
+import { formatBytes } from '@/lib/format-utils';
 import { type AudioTrackInfo } from '@/lib/mkv-audio';
-import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import { AudioTrackSelector } from './audio-track-selector';
 import { SubtitleTrackSelector } from './subtitle-track-selector';
@@ -154,11 +155,7 @@ interface VideoPlayerControlsProps {
     onPrevious?: () => void,
     onNext?: () => void
   },
-  preloadBadge?: {
-    progress: number,
-    completedBytes?: number,
-    targetBytes?: number
-  } | null
+  preloadBadge?: PreloadBadgeInfo | null
 }
 
 export function VideoPlayerControls({
@@ -197,6 +194,14 @@ export function VideoPlayerControls({
             <span className='relative inline-flex rounded-full h-2 w-2 bg-sky-500' />
           </span>
           <span>Buffering {Math.min(100, Math.max(0, Math.round(preloadBadge.progress * 100)))}%</span>
+          {/* Gate both on totalPeers so a momentary 0 B/s rate stays visible once we have
+              real swarm data, instead of flickering in and out with the instantaneous rate. */}
+          {!!preloadBadge.totalPeers && (
+            <>
+              <span>· {formatBytes(preloadBadge.downloadRate ?? 0)}/s</span>
+              <span>· {preloadBadge.activePeers ?? 0}/{preloadBadge.totalPeers} peers</span>
+            </>
+          )}
         </div>
       )}
       <div className='pointer-events-none absolute inset-0 z-50 flex h-full w-full items-center justify-center'>

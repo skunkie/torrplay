@@ -58,6 +58,9 @@ it('blocks the media source on the initial render while preload is pending', () 
     progress: 0,
     completedBytes: 0,
     targetBytes: 0,
+    downloadRate: 0,
+    activePeers: 0,
+    totalPeers: 0,
   });
 });
 

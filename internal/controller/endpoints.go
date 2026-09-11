@@ -1250,6 +1250,19 @@ func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	return &s
 }
 
+// peerTransferRates sums the live per-peer transfer rates for a torrent's current connections.
+func peerTransferRates(to *torrent.Torrent) (downloadRate, uploadRate float64) {
+	if to == nil {
+		return 0, 0
+	}
+	for _, peer := range to.PeerConns() {
+		stats := peer.Stats()
+		downloadRate += stats.DownloadRate
+		uploadRate += stats.LastWriteUploadRate
+	}
+	return downloadRate, uploadRate
+}
+
 func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, error) {
 	if to == nil {
 		return nil, errors.New("cannot build stats from a nil torrent")

@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { type TorrentFile } from '@/lib/types/api';
-import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import { Button } from './ui/button';
 import { VideoPlayerLayout } from './video-player-layout';
@@ -35,11 +35,7 @@ interface TorrentPlayerDialogLayoutProps {
     onPrevious?: () => void,
     onNext?: () => void
   },
-  preloadBadge?: {
-    progress: number,
-    completedBytes?: number,
-    targetBytes?: number
-  } | null,
+  preloadBadge?: PreloadBadgeInfo | null,
   isDemo?: boolean
 }
 

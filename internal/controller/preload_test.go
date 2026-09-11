@@ -67,6 +67,9 @@ func TestTorrentPreloadEndpoints(t *testing.T) {
 	assert.Equal(t, preloadNoFileIndex, idleStatus.FileIndex)
 	assert.Zero(t, idleStatus.TargetBytes)
 	assert.Zero(t, idleStatus.Progress)
+	assert.Zero(t, idleStatus.ActivePeers)
+	assert.Zero(t, idleStatus.DownloadRate)
+	assert.Zero(t, idleStatus.TotalPeers)
 
 	unknownURL := "/api/v1/torrents/" + (metainfo.Hash{1, 2, 3}).HexString() + "/preload"
 	assert.Equal(t, http.StatusNotFound, doRequest(http.MethodGet, unknownURL, "").Code)

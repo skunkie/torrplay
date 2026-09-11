@@ -12,6 +12,8 @@ import { getDemoSubtitleTracks } from '@/lib/demo-subtitles';
 import type { Torrent, TorrentFile } from '@/lib/types/api';
 import { getInitialVideoFile, getVideoFiles } from '@/lib/video-utils';
 
+const DEMO_TARGET_BYTES = 30 * 1024 * 1024; // 30 MB simulated buffer
+
 interface DemoTorrentPlayerDialogProps {
   torrent: Torrent | null,
   open: boolean,
@@ -28,6 +30,9 @@ export function DemoTorrentPlayerDialog({
   const [userSelectedFile, setUserSelectedFile] = useState<TorrentFile | null>(null);
   const [isPreloading, setIsPreloading] = useState(false);
   const [preloadProgress, setPreloadProgress] = useState(0);
+  const [downloadRate, setDownloadRate] = useState(0);
+  const [activePeers, setActivePeers] = useState(0);
+  const [totalPeers, setTotalPeers] = useState(0);
 
   const prevOpenRef = useRef(open);
   const preloadedFileRef = useRef<string | null>(null);
@@ -45,6 +50,9 @@ export function DemoTorrentPlayerDialog({
     preloadedFileRef.current = null;
     setIsPreloading(false);
     setPreloadProgress(0);
+    setDownloadRate(0);
+    setActivePeers(0);
+    setTotalPeers(0);
   }
   prevOpenRef.current = open;
 
@@ -77,6 +85,10 @@ export function DemoTorrentPlayerDialog({
 
     setIsPreloading(true);
     setPreloadProgress(0.15);
+    // Simulated swarm: a handful of connected peers, a subset of them actively sending data.
+    setActivePeers(4);
+    setTotalPeers(9);
+    setDownloadRate(Math.round(0.35 * DEMO_TARGET_BYTES / 0.2));
 
     let current = 0.15;
     timerRef.current = setInterval(() => {
@@ -84,12 +96,16 @@ export function DemoTorrentPlayerDialog({
       if (current >= 1.0) {
         stopSimulation();
         setPreloadProgress(1.0);
+        setDownloadRate(0);
         setTimeout(() => {
           preloadedFileRef.current = selectedFile.path;
           setIsPreloading(false);
         }, 300);
       } else {
         setPreloadProgress(current);
+        // Vary the simulated rate and peer count slightly each tick so the badge feels live.
+        setActivePeers(3 + Math.round(Math.random() * 3));
+        setDownloadRate(Math.round((0.3 + Math.random() * 0.1) * DEMO_TARGET_BYTES / 0.2));
       }
     }, 200);
 
@@ -131,12 +147,14 @@ export function DemoTorrentPlayerDialog({
     }
     : undefined;
 
-  const targetBytes = 30 * 1024 * 1024; // 30 MB simulated buffer
   const preloadBadge = isPreloading
     ? {
       progress: preloadProgress,
-      completedBytes: Math.round(preloadProgress * targetBytes),
-      targetBytes,
+      completedBytes: Math.round(preloadProgress * DEMO_TARGET_BYTES),
+      targetBytes: DEMO_TARGET_BYTES,
+      downloadRate,
+      activePeers,
+      totalPeers,
     }
     : null;
 

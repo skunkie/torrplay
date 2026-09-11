@@ -36,11 +36,14 @@ export const TorrentPlayerDialog = ({
   const [preloadProgress, setPreloadProgress] = useState(0);
   const [completedBytes, setCompletedBytes] = useState(0);
   const [targetBytes, setTargetBytes] = useState(0);
+  const [downloadRate, setDownloadRate] = useState(0);
+  const [activePeers, setActivePeers] = useState(0);
+  const [totalPeers, setTotalPeers] = useState(0);
 
   const prevOpenRef = useRef(open);
   const preloadedFileRef = useRef<string | null>(null);
   const activePreloadHashRef = useRef<string | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timeoutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The torrent/file the caller hands us gets a brand-new object identity on every
   // poll refresh upstream (e.g. SWR revalidation), even when nothing relevant changed.
@@ -53,7 +56,7 @@ export const TorrentPlayerDialog = ({
 
   const stopPreloadPolling = useCallback(() => {
     if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current);
+      clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
     }
     if (timeoutTimerRef.current) {
@@ -78,6 +81,9 @@ export const TorrentPlayerDialog = ({
     setPreloadProgress(0);
     setCompletedBytes(0);
     setTargetBytes(0);
+    setDownloadRate(0);
+    setActivePeers(0);
+    setTotalPeers(0);
   }
   prevOpenRef.current = open;
 
@@ -133,6 +139,9 @@ export const TorrentPlayerDialog = ({
     setPreloadProgress(0);
     setCompletedBytes(0);
     setTargetBytes(0);
+    setDownloadRate(0);
+    setActivePeers(0);
+    setTotalPeers(0);
 
     startPreload(currentTorrent.hash, { filePath: currentSelectedFile.path })
       .then(resp => {
@@ -140,6 +149,9 @@ export const TorrentPlayerDialog = ({
         setPreloadProgress(current => Math.max(current, resp.progress || 0));
         setCompletedBytes(current => Math.max(current, resp.completedBytes || 0));
         setTargetBytes(current => Math.max(current, resp.targetBytes || 0));
+        setDownloadRate(resp.downloadRate || 0);
+        setActivePeers(resp.activePeers || 0);
+        setTotalPeers(resp.totalPeers || 0);
 
         if (resp.status === 'idle') {
           cancelActivePreload();
@@ -160,8 +172,11 @@ export const TorrentPlayerDialog = ({
           return;
         }
 
-        // Start polling for preload progress
-        pollTimerRef.current = setInterval(async () => {
+        // Start polling for preload progress. Each poll is scheduled only after the
+        // previous one settles (rather than a fixed-cadence setInterval), so at most one
+        // getPreload request is ever in flight - a slow response can't land after and
+        // overwrite a newer, faster one.
+        const poll = async () => {
           try {
             const statusResp = await getPreload(currentTorrent.hash);
             if (!isMounted) return;
@@ -169,6 +184,9 @@ export const TorrentPlayerDialog = ({
             setPreloadProgress(current => Math.max(current, progress));
             setCompletedBytes(current => Math.max(current, statusResp.completedBytes || 0));
             setTargetBytes(current => Math.max(current, statusResp.targetBytes || 0));
+            setDownloadRate(statusResp.downloadRate || 0);
+            setActivePeers(statusResp.activePeers || 0);
+            setTotalPeers(statusResp.totalPeers || 0);
 
             if (statusResp.status === 'idle') {
               cancelActivePreload();
@@ -185,14 +203,19 @@ export const TorrentPlayerDialog = ({
                 preloadedFileRef.current = currentSelectedFile.path;
                 setIsPreloading(false);
               }, 300);
+              return;
             }
+
+            if (!isMounted) return;
+            pollTimerRef.current = setTimeout(poll, 400);
           } catch {
             // Polling error: stop preloading indicator
             cancelActivePreload();
             preloadedFileRef.current = currentSelectedFile.path;
             setIsPreloading(false);
           }
-        }, 400);
+        };
+        pollTimerRef.current = setTimeout(poll, 400);
 
         // Stop badge after timeout if still active
         timeoutTimerRef.current = setTimeout(() => {
@@ -276,6 +299,9 @@ export const TorrentPlayerDialog = ({
       progress: preloadProgress,
       completedBytes,
       targetBytes,
+      downloadRate,
+      activePeers,
+      totalPeers,
     }
     : null;
 
