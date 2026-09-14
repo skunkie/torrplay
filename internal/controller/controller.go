@@ -345,6 +345,7 @@ func (c *Controller) buildRouter() *chi.Mux {
 	router.Use(middleware.Recoverer)
 
 	// Middlewares.
+	router.Use(methodOverrideMiddleware)
 	router.Use(c.corsMiddleware)
 	router.Use(tSCorrectionMiddleware)
 	router.Use(tSUploadTorrentMiddleware)
@@ -545,7 +546,6 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 			c.mu.RUnlock()
 
 			logAttrs := []any{
-				slog.String("method", r.Method),
 				slog.String("path", stremio.RedactPathToken(r.URL.Path)),
 			}
 			if r.URL.RawQuery != "" {
@@ -563,7 +563,11 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 			t1 := time.Now()
 
 			defer func() {
+				// r.Method is read here, after the handler chain has run, so
+				// that a method rewritten by methodOverrideMiddleware is
+				// logged as the method that was actually dispatched.
 				logger.Debug("request completed",
+					"method", r.Method,
 					"status", ww.Status(),
 					"duration", time.Since(t1),
 				)
