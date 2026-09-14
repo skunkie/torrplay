@@ -18,9 +18,26 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/testutil"
 )
 
-func TestServer_Lifecycle(t *testing.T) {
+func TestMain(m *testing.M) {
+	testutil.VerifyTestMain(m)
+}
+
+func TestNewServer(t *testing.T) {
+	s := NewServer(http.NotFoundHandler(), "127.0.0.1:0", slog.New(slog.DiscardHandler))
+
+	assert.Equal(t, defaultTimeout, s.server.ReadHeaderTimeout)
+	assert.Equal(t, s.addr, s.server.Addr)
+	assert.NotNil(t, s.server.Handler)
+	assert.NotNil(t, s.server.ConnState)
+
+	replacement := s.newHTTPServer()
+	assert.Equal(t, defaultTimeout, replacement.ReadHeaderTimeout)
+}
+
+func TestServerLifecycle(t *testing.T) {
 	// Setup a simple router for testing.
 	router := chi.NewRouter()
 	router.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -96,33 +113,52 @@ func TestServer_Lifecycle(t *testing.T) {
 	assert.Error(t, err, "request to shutdown server should fail")
 }
 
-func TestServer_ImmediateShutdown(t *testing.T) {
-	logger := slog.New(slog.DiscardHandler)
-	s := NewServer(nil, "127.0.0.1:8083", logger)
+func TestServer_Shutdown(t *testing.T) {
+	t.Run("immediately after start", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		s := NewServer(nil, "127.0.0.1:8083", logger)
 
-	// Start and immediately shut down.
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		// A clean shutdown is expected to return a nil error.
-		assert.NoError(t, s.Run(), "server.Run() should return nil on immediate shutdown")
+		// Start and immediately shut down.
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			// A clean shutdown is expected to return a nil error.
+			assert.NoError(t, s.Run(), "server.Run() should return nil on immediate shutdown")
+		})
+
+		// Immediately shut down the server.
+		err := s.Shutdown()
+		require.NoError(t, err)
+		wg.Wait()
 	})
 
-	// Immediately shut down the server.
-	err := s.Shutdown()
-	require.NoError(t, err)
-	wg.Wait()
+	t.Run("without start", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		s := NewServer(nil, "127.0.0.1:8084", logger)
+
+		// Shutdown should be a no-op if the server hasn't started.
+		err := s.Shutdown()
+		assert.NoError(t, err)
+	})
+
+	// Test that calling Shutdown() multiple times is a no-op.
+	t.Run("is idempotent", func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		s := NewServer(nil, "127.0.0.1:8088", logger)
+
+		err := s.Start()
+		require.NoError(t, err)
+
+		err = s.Shutdown()
+		require.NoError(t, err)
+
+		// Calling Shutdown() again should be a no-op.
+		err = s.Shutdown()
+		assert.NoError(t, err, "calling Shutdown() multiple times should be a no-op")
+	})
 }
 
-func TestServer_ShutdownWithoutStart(t *testing.T) {
-	logger := slog.New(slog.DiscardHandler)
-	s := NewServer(nil, "127.0.0.1:8084", logger)
-
-	// Shutdown should be a no-op if the server hasn't started.
-	err := s.Shutdown()
-	assert.NoError(t, err)
-}
-
-func TestServer_RestartFailedShutdown(t *testing.T) {
+// TestServer_Restart verifies that Restart reports a failed shutdown.
+func TestServer_Restart(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping test that requires a timeout")
 	}
@@ -131,30 +167,37 @@ func TestServer_RestartFailedShutdown(t *testing.T) {
 	addr := "127.0.0.1:8085"
 	s := NewServer(chi.NewRouter(), addr, logger)
 
-	// Manually create a server instance that will fail to shut down gracefully.
+	blockCh := make(chan struct{})
 	mockServer := &http.Server{
 		Addr: s.addr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// This handler will block, preventing a graceful shutdown.
-			<-time.After(10 * time.Second)
+			select {
+			case <-blockCh:
+			case <-r.Context().Done():
+			}
 		}),
 	}
+	defer func() {
+		close(blockCh)
+		_ = mockServer.Close()
+	}()
 
 	s.mu.Lock()
 	s.server = mockServer
 	s.mu.Unlock()
 
 	go func() {
-		// This can return an error "address already in use" if the OS hasn't
-		// freed the port from a previous test. That's fine.
-		// The main thing is that it's listening.
 		_ = s.server.ListenAndServe()
 	}()
 	<-time.After(50 * time.Millisecond)
 
 	// Make a request that will hang.
+	ctx := t.Context()
 	go func() {
-		resp, _ := http.Get("http://" + addr)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr, http.NoBody)
+		tr := &http.Transport{DisableKeepAlives: true}
+		client := &http.Client{Transport: tr}
+		resp, _ := client.Do(req)
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
@@ -168,7 +211,7 @@ func TestServer_RestartFailedShutdown(t *testing.T) {
 }
 
 // Test that Run() returns an error for an invalid address.
-func TestServer_RunFails(t *testing.T) {
+func TestServer_Run(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8086"
 
@@ -194,7 +237,7 @@ func TestServer_RunFails(t *testing.T) {
 }
 
 // Test that calling Start() on an already running server is a no-op.
-func TestServer_DoubleStart(t *testing.T) {
+func TestServer_Start(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	s := NewServer(nil, "127.0.0.1:8087", logger)
 
@@ -209,24 +252,8 @@ func TestServer_DoubleStart(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Test that calling Shutdown() multiple times is a no-op.
-func TestServer_DoubleShutdown(t *testing.T) {
-	logger := slog.New(slog.DiscardHandler)
-	s := NewServer(nil, "127.0.0.1:8088", logger)
-
-	err := s.Start()
-	require.NoError(t, err)
-
-	err = s.Shutdown()
-	require.NoError(t, err)
-
-	// Calling Shutdown() again should be a no-op.
-	err = s.Shutdown()
-	assert.NoError(t, err, "calling Shutdown() multiple times should be a no-op")
-}
-
 // Test that SetRouter updates the handler on a running server without a restart.
-func TestServer_SetRouterOnRunningServer(t *testing.T) {
+func TestServer_SetRouter(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8089"
 
@@ -273,9 +300,9 @@ func TestServer_SetRouterOnRunningServer(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// TestConnStateHandling verifies that active connections are correctly tracked
+// TestServer_ConnStateHandler verifies that active connections are correctly tracked
 // and closed upon shutdown.
-func TestConnStateHandling(t *testing.T) {
+func TestServer_ConnStateHandler(t *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	addr := "127.0.0.1:8090"
 

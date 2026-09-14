@@ -20,6 +20,7 @@ const defaultTimeout = 5 * time.Second
 type Server struct {
 	activeConns map[net.Conn]struct{}
 	addr        string
+	closed      bool
 	connMu      sync.RWMutex
 	handler     http.Handler
 	logger      *slog.Logger
@@ -131,6 +132,10 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		return errors.New("server is closed")
+	}
+
 	if s.server != nil {
 		return nil // Already running.
 	}
@@ -149,14 +154,26 @@ func (s *Server) Start() error {
 // Restart gracefully restarts the server.
 func (s *Server) Restart() error {
 	s.logger.Info("restarting HTTP server")
-	shutdownErr := s.Shutdown()
-	startErr := s.Start()
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("server is closed")
+	}
+	s.mu.Unlock()
 
-	if shutdownErr != nil {
+	if shutdownErr := s.Shutdown(); shutdownErr != nil {
 		return shutdownErr
 	}
+	return s.Start()
+}
 
-	return startErr
+// Close permanently shuts down the server, preventing further restarts.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+
+	return s.Shutdown()
 }
 
 // Shutdown gracefully shuts down the server.
