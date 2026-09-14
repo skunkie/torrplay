@@ -340,9 +340,12 @@ func (c *Controller) buildRouter() *chi.Mux {
 	swagger.Servers = nil
 
 	router := chi.NewRouter()
+	// TorrPlay is self-hosted with no fixed deployment topology, so no
+	// proxy header (X-Forwarded-For, X-Real-IP, etc.) can be trusted by
+	// default; use the raw TCP peer address as the client IP.
+	router.Use(middleware.ClientIPFromRemoteAddr)
 	router.Use(c.SlogMiddleware())
 	router.Use(c.MetricsMiddleware())
-	router.Use(middleware.RealIP)
 	router.Use(middleware.RequestID)
 	router.Use(middleware.Recoverer)
 
