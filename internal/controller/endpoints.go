@@ -639,7 +639,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var reconfigureDLNA, reconfigureLogger, reconfigureTorrentClient, restartHTTPServer, saveSettings bool
+	var reconfigureDLNA, reconfigureLogger, reconfigureProfiler, reconfigureTorrentClient, restartHTTPServer, saveSettings bool
 
 	c.mu.Lock()
 	dbOldSettings, err := c.db.GetSettings()
@@ -799,6 +799,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Determine which components need reconfiguration.
 	if utils.Differ(oldSettings.LogLevel, newSettings.LogLevel) {
 		reconfigureLogger = true
+		reconfigureProfiler = true
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.LogFormat, newSettings.LogFormat) {
@@ -898,13 +899,16 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Reconfigure components.
 	if reconfigureLogger {
 		reconfigureTorrentClient = true
-		restartHTTPServer = true
 		c.mu.RLock()
 		newLogger := c.configureLogger(*c.settings.LogLevel, c.settings)
 		c.mu.RUnlock()
 		c.mu.Lock()
 		c.logger = newLogger
+		httpServer := c.httpServer
 		c.mu.Unlock()
+		if httpServer != nil {
+			httpServer.SetLogger(newLogger)
+		}
 		c.dlna.SetLogger(newLogger)
 	}
 
@@ -934,6 +938,10 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+
+	if reconfigureProfiler {
+		c.reconcileProfiler()
 	}
 
 	if restartHTTPServer {

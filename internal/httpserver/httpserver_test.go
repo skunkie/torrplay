@@ -5,6 +5,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -35,6 +36,23 @@ func TestNewServer(t *testing.T) {
 
 	replacement := s.newHTTPServer()
 	assert.Equal(t, defaultTimeout, replacement.ReadHeaderTimeout)
+}
+
+func TestServer_SetLogger(t *testing.T) {
+	var oldOutput, newOutput bytes.Buffer
+	oldLogger := slog.New(slog.NewTextHandler(&oldOutput, nil))
+	newLogger := slog.New(slog.NewJSONHandler(&newOutput, nil))
+	s := NewServer(nil, "invalid-address", oldLogger)
+
+	s.Addrs()
+	require.Contains(t, oldOutput.String(), "could not parse server address")
+	oldOutput.Reset()
+
+	s.SetLogger(newLogger)
+	s.Addrs()
+
+	assert.Empty(t, oldOutput.String())
+	assert.Contains(t, newOutput.String(), `"msg":"could not parse server address"`)
 }
 
 func TestServerLifecycle(t *testing.T) {
