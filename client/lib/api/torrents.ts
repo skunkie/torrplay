@@ -69,6 +69,9 @@ export async function addTorrent(data: TorrentAdd | TorrentAddWithFile): Promise
     if (data.poster) {
       formData.append('poster', data.poster);
     }
+    if (data.storage) {
+      formData.append('storage', data.storage);
+    }
     // Assuming `api.post` can handle FormData and will set the Content-Type to multipart/form-data
     return api.post<Torrent>('/api/v1/torrents', formData);
   } else {
