@@ -236,7 +236,7 @@ func (c *Controller) TSPlay(w http.ResponseWriter, r *http.Request, ih metainfo.
 		index = 0
 	}
 
-	c.streamFile(w, r, ih, index)
+	c.streamFile(w, r, ih, index, nil)
 }
 
 func (c *Controller) TSSettings(w http.ResponseWriter, _ *http.Request) {
@@ -698,14 +698,7 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 		resp.TotalPeers = stats.TotalPeers
 		resp.WrittenBytes = stats.WrittenBytes
 
-		peers := to.PeerConns()
-		var totalDownloadRate float64
-		var totalUploadRate float64
-		for _, peer := range peers {
-			pStats := peer.Stats()
-			totalDownloadRate += pStats.DownloadRate
-			totalUploadRate += pStats.LastWriteUploadRate
-		}
+		totalDownloadRate, totalUploadRate := peerTransferRates(to)
 		resp.DownloadSpeed = totalDownloadRate
 		resp.UploadSpeed = totalUploadRate
 		resp.LoadedSize = stats.CompletedSize

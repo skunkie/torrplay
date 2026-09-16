@@ -67,12 +67,32 @@ func TestTorrentPreloadEndpoints(t *testing.T) {
 	assert.Equal(t, preloadNoFileIndex, idleStatus.FileIndex)
 	assert.Zero(t, idleStatus.TargetBytes)
 	assert.Zero(t, idleStatus.Progress)
+	assert.Zero(t, idleStatus.ActivePeers)
+	assert.Zero(t, idleStatus.DownloadRate)
+	assert.Zero(t, idleStatus.TotalPeers)
 
 	unknownURL := "/api/v1/torrents/" + (metainfo.Hash{1, 2, 3}).HexString() + "/preload"
 	assert.Equal(t, http.StatusNotFound, doRequest(http.MethodGet, unknownURL, "").Code)
 	assert.Equal(t, http.StatusNotFound, doRequest(http.MethodDelete, unknownURL, "").Code)
 	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"file_index":9999}`).Code)
 	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"file_path":"missing.mkv"}`).Code)
+	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"magnet":"invalid-magnet"}`).Code)
+	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"magnet":"magnet:?xt=urn:btih:0000000000000000000000000000000000000000"}`).Code)
+
+	validMagnetBody := fmt.Sprintf(`{"file_index":0,"magnet":"magnet:?xt=urn:btih:%s&dn=Sintel&tr=http%%3A%%2F%%2Ftracker.example.com%%2Fannounce&tr=http%%3A%%2F%%2Ftracker2.example.com%%2Fannounce"}`, ih.HexString())
+	magnetPreload := doRequest(http.MethodPut, preloadURL, validMagnetBody)
+	require.Equal(t, http.StatusOK, magnetPreload.Code)
+	assert.Equal(t, api.Preloading, decodeStatus(magnetPreload).Status)
+
+	announceList := to.Metainfo().AnnounceList
+	distinctTrackers := announceList.DistinctValues()
+	assert.Contains(t, distinctTrackers, "http://tracker.example.com/announce")
+	assert.Contains(t, distinctTrackers, "http://tracker2.example.com/announce")
+	totalTrackerEntries := 0
+	for _, tier := range announceList {
+		totalTrackerEntries += len(tier)
+	}
+	assert.Equal(t, len(distinctTrackers), totalTrackerEntries, "magnet trackers must not be duplicated across announce tiers")
 
 	started := doRequest(http.MethodPut, preloadURL, `{"file_index":0,"file_path":"missing.mkv"}`)
 	require.Equal(t, http.StatusOK, started.Code)

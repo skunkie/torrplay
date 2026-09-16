@@ -9,10 +9,12 @@ package controller
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -226,9 +228,11 @@ func TestIntegrationStreamingFromLocalWebseed(t *testing.T) {
 	server := httptest.NewServer(ctrl.router)
 	defer server.Close()
 
+	magnetParam := url.QueryEscape(utils.MagnetURIFromHash(ih))
 	for _, endpoint := range []string{
 		fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4", ih),
 		fmt.Sprintf("/api/v1/stream/%s?index=0", ih),
+		fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4&magnet=%s", ih, magnetParam),
 		fmt.Sprintf("/stream/Sintel.mp4?link=%s&play&index=0", ih),
 		fmt.Sprintf("/stream/Sintel.mp4?link=%s&play", ih),
 	} {
@@ -243,6 +247,71 @@ func TestIntegrationStreamingFromLocalWebseed(t *testing.T) {
 		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
 		assert.Equal(t, fixture.payload[:1024], body)
 	}
+
+	headReq, err := http.NewRequest(http.MethodHead, fmt.Sprintf("%s/api/v1/stream/%s?index=0&magnet=%s", server.URL, ih, magnetParam), http.NoBody)
+	require.NoError(t, err)
+	headResp, err := http.DefaultClient.Do(headReq)
+	require.NoError(t, err)
+	defer headResp.Body.Close()
+	assert.Equal(t, http.StatusOK, headResp.StatusCode)
+}
+
+// TestIntegrationStreamMagnetBootstrapsUnregisteredTorrent verifies that the
+// stream endpoint can serve a torrent purely from its magnet parameter,
+// without ever having a database record for it (the scenario the "magnet"
+// parameter was added for: bootstrapping torrents without requiring prior
+// database insertion). It also checks that the trackers embedded in the
+// magnet URI are registered with the torrent exactly once.
+func TestIntegrationStreamMagnetBootstrapsUnregisteredTorrent(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, false)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+
+	// The torrent is known to the underlying torrent client (as if its info
+	// had already been fetched from peers in a prior session), but the
+	// server has no database record for it.
+	_, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(fixture.meta))
+	require.NoError(t, err)
+	ih := fixture.meta.HashInfoBytes()
+
+	_, err = ctrl.db.GetTorrent(ih)
+	require.ErrorIs(t, err, database.ErrTorrentNotFound)
+
+	const (
+		tracker1 = "http://tracker.example.com/announce"
+		tracker2 = "http://tracker2.example.com/announce"
+	)
+	magnet := fmt.Sprintf("%s&tr=%s&tr=%s", utils.MagnetURIFromHash(ih), url.QueryEscape(tracker1), url.QueryEscape(tracker2))
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+
+	streamURL := fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4&magnet=%s", server.URL, ih, url.QueryEscape(magnet))
+	req, err := http.NewRequest(http.MethodGet, streamURL, http.NoBody)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=0-1023")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, readErr := io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.NoError(t, readErr)
+	assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	assert.Equal(t, fixture.payload[:1024], body)
+
+	to, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok)
+	announceList := to.Metainfo().AnnounceList
+	distinctTrackers := announceList.DistinctValues()
+	assert.Contains(t, distinctTrackers, tracker1)
+	assert.Contains(t, distinctTrackers, tracker2)
+	totalTrackerEntries := 0
+	for _, tier := range announceList {
+		totalTrackerEntries += len(tier)
+	}
+	assert.Equal(t, len(distinctTrackers), totalTrackerEntries, "magnet trackers must not be duplicated across announce tiers")
+
+	_, err = ctrl.db.GetTorrent(ih)
+	assert.ErrorIs(t, err, database.ErrTorrentNotFound, "streaming via magnet must not require a database record")
 }
 
 func TestIntegrationDeleteWhileStreamingUsesStateSynchronization(t *testing.T) {
@@ -312,4 +381,99 @@ func TestIntegrationDeleteWhileStreamingUsesStateSynchronization(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream did not exit after torrent deletion")
 	}
+}
+func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, false)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, fixture)
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	tsPreloadResponse, err := http.Get(fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&preload&stat&index=0", server.URL, ih))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, tsPreloadResponse.StatusCode)
+	var tsStatus api.TSTorrentResponse
+	require.NoError(t, json.NewDecoder(tsPreloadResponse.Body).Decode(&tsStatus))
+	require.NoError(t, tsPreloadResponse.Body.Close())
+	assert.Equal(t, tsStatPreload, tsStatus.Stat)
+	assert.Equal(t, "Torrent preload", tsStatus.StatString)
+	assert.Positive(t, tsStatus.PreloadSize)
+
+	invalidPlayback := httptest.NewRecorder()
+	ctrl.streamFile(invalidPlayback, httptest.NewRequest(http.MethodGet, "/stream/invalid", http.NoBody), ih, 99, nil)
+	assert.Equal(t, http.StatusBadRequest, invalidPlayback.Code)
+	_, stillPreloading := ctrl.preloads.Load(ih)
+	assert.True(t, stillPreloading, "invalid playback should not cancel the active preload")
+	ctrl.cancelPreload(ih)
+
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(`{"file_index":0}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var readyState api.PreloadResponse
+	require.Eventually(t, func() bool {
+		getResp, getErr := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
+		if getErr != nil {
+			return false
+		}
+		defer getResp.Body.Close()
+		var state api.PreloadResponse
+		if json.NewDecoder(getResp.Body).Decode(&state) != nil || state.Status != api.Ready {
+			return false
+		}
+		readyState = state
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, float32(1), readyState.Progress)
+	assert.Equal(t, int64(len(fixture.payload)), readyState.TargetBytes)
+	assert.Equal(t, readyState.TargetBytes, readyState.CompletedBytes)
+
+	done := make(chan struct{})
+	close(done)
+	activePreload := &preloadTask{
+		cancel:      func() {},
+		done:        done,
+		targetBytes: int64(len(fixture.payload)),
+		fileIndex:   0,
+		filePath:    "Sintel/Sintel.mp4",
+	}
+	ctrl.preloads.Store(ih, activePreload)
+	streamRequest, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, ih), http.NoBody)
+	require.NoError(t, err)
+	streamRequest.Header.Set("Range", "bytes=0-1023")
+	streamResponse, err := http.DefaultClient.Do(streamRequest)
+	require.NoError(t, err)
+	require.NoError(t, streamResponse.Body.Close())
+	assert.Equal(t, http.StatusPartialContent, streamResponse.StatusCode)
+	_, stillPreloading = ctrl.preloads.Load(ih)
+	assert.False(t, stillPreloading, "playback should retire the active preload")
+}
+
+func TestIntegrationControllerLifecycle(t *testing.T) {
+	ctrl := newIntegrationTestController(t)
+	client := &http.Client{Transport: &http.Transport{Proxy: nil}}
+	settingsURL := fmt.Sprintf("http://127.0.0.1:%d/api/v1/settings", ctrl.port)
+
+	require.Eventually(t, func() bool {
+		resp, err := client.Get(settingsURL)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, time.Second, 10*time.Millisecond, "controller listener did not become ready")
+
+	ctrl.Shutdown()
+	require.Eventually(t, func() bool {
+		resp, err := client.Get(settingsURL)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return err != nil
+	}, time.Second, 10*time.Millisecond, "controller listener remained reachable after shutdown")
 }

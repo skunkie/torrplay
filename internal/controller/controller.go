@@ -281,7 +281,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		c.postersPath,
 		c.logger,
 		func(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdx int) {
-			c.streamFile(w, r, ih, fileIdx)
+			c.streamFile(w, r, ih, fileIdx, nil)
 		},
 		c.validateStremioToken,
 	)
@@ -339,13 +339,17 @@ func (c *Controller) buildRouter() *chi.Mux {
 	swagger.Servers = nil
 
 	router := chi.NewRouter()
+	// TorrPlay is self-hosted with no fixed deployment topology, so no
+	// proxy header (X-Forwarded-For, X-Real-IP, etc.) can be trusted by
+	// default; use the raw TCP peer address as the client IP.
+	router.Use(middleware.ClientIPFromRemoteAddr)
 	router.Use(c.SlogMiddleware())
 	router.Use(c.MetricsMiddleware())
-	router.Use(middleware.RealIP)
 	router.Use(middleware.RequestID)
 	router.Use(middleware.Recoverer)
 
 	// Middlewares.
+	router.Use(methodOverrideMiddleware)
 	router.Use(c.corsMiddleware)
 	router.Use(tSCorrectionMiddleware)
 	router.Use(tSUploadTorrentMiddleware)
@@ -546,7 +550,6 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 			c.mu.RUnlock()
 
 			logAttrs := []any{
-				slog.String("method", r.Method),
 				slog.String("path", stremio.RedactPathToken(r.URL.Path)),
 			}
 			if r.URL.RawQuery != "" {
@@ -564,7 +567,11 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 			t1 := time.Now()
 
 			defer func() {
+				// r.Method is read here, after the handler chain has run, so
+				// that a method rewritten by methodOverrideMiddleware is
+				// logged as the method that was actually dispatched.
 				logger.Debug("request completed",
+					"method", r.Method,
 					"status", ww.Status(),
 					"duration", time.Since(t1),
 				)

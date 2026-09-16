@@ -354,6 +354,7 @@ paths:
       operationId: getTorrent
       parameters:
         - $ref: "#/components/parameters/Hash"
+        - $ref: "#/components/parameters/Magnet"
       responses:
         "200":
           description: Torrent retrieved successfully.
@@ -510,6 +511,7 @@ paths:
         - $ref: "#/components/parameters/Hash"
         - $ref: "#/components/parameters/Path"
         - $ref: "#/components/parameters/Index"
+        - $ref: "#/components/parameters/Magnet"
         - $ref: "#/components/parameters/Range"
         - $ref: "#/components/parameters/StreamToken"
       responses:
@@ -544,6 +546,7 @@ paths:
         - $ref: "#/components/parameters/Hash"
         - $ref: "#/components/parameters/Path"
         - $ref: "#/components/parameters/Index"
+        - $ref: "#/components/parameters/Magnet"
         - $ref: "#/components/parameters/StreamToken"
       responses:
         "200":
@@ -1038,6 +1041,15 @@ components:
         type: integer
         minimum: 0
         example: 50
+    Magnet:
+      name: magnet
+      in: query
+      description: Optional magnet URI to bootstrap torrent discovery with trackers.
+      required: false
+      schema:
+        type: string
+        pattern: "^magnet:\\?xt=urn:btih:([0-9a-fA-F]{40}|[a-zA-Z2-7]{32})"
+        example: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
     Offset:
       name: offset
       in: query
@@ -2127,17 +2139,42 @@ components:
           type: string
           description: Relative path of the file to preload within the torrent.
           example: "Sintel.mp4"
+        magnet:
+          type: string
+          description: Optional magnet URI to bootstrap torrent discovery with trackers.
+          pattern: "^magnet:\\?xt=urn:btih:([0-9a-fA-F]{40}|[a-zA-Z2-7]{32})"
+          example: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
 
     PreloadResponse:
       type: object
       description: Torrent file preload status and progress.
       required:
-        - file_index
-        - target_bytes
+        - active_peers
         - completed_bytes
+        - download_rate
+        - file_index
         - progress
         - status
+        - target_bytes
+        - total_peers
       properties:
+        active_peers:
+          type: integer
+          minimum: 0
+          description: Number of peers currently connected for this torrent.
+          example: 5
+        completed_bytes:
+          type: integer
+          format: int64
+          description: Number of bytes completed toward the target. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
+          minimum: 0
+          example: 10485760
+        download_rate:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Real-time payload transfer rate in bytes per second.
+          example: 1048576
         file_index:
           type: integer
           minimum: -1
@@ -2147,18 +2184,6 @@ components:
           type: string
           description: Path of the file currently preloaded.
           example: "Sintel.mp4"
-        target_bytes:
-          type: integer
-          format: int64
-          description: Target buffer size in bytes for head and tail preloading.
-          minimum: 0
-          example: 31457280
-        completed_bytes:
-          type: integer
-          format: int64
-          description: Number of bytes completed toward the target. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
-          minimum: 0
-          example: 10485760
         progress:
           type: number
           format: float
@@ -2172,6 +2197,17 @@ components:
             - "preloading"
             - "ready"
           example: "preloading"
+        target_bytes:
+          type: integer
+          format: int64
+          description: Target buffer size in bytes for head and tail preloading.
+          minimum: 0
+          example: 31457280
+        total_peers:
+          type: integer
+          minimum: 0
+          description: Total known swarm peers for this torrent.
+          example: 15
 
     SystemMetrics:
       type: object
