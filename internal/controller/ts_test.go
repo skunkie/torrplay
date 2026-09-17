@@ -260,24 +260,24 @@ func TestTSUploadTorrentMiddleware(t *testing.T) {
 			assert.True(t, called)
 		})
 	}
-}
 
-func TestTSUploadTorrentMiddleware_ParseError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/torrent/upload", strings.NewReader("bad data"))
-	req.Header.Set("Content-Type", "multipart/form-data; boundary=bad")
+	t.Run("rejects unparsable form", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/torrent/upload", strings.NewReader("bad data"))
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=bad")
 
-	rr := httptest.NewRecorder()
+		rr := httptest.NewRecorder()
 
-	called := false
-	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
+		called := false
+		mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})
+
+		middleware := tSUploadTorrentMiddleware(mockHandler)
+		middleware.ServeHTTP(rr, req)
+
+		assert.False(t, called, "next handler should not be called on parse error")
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
 	})
-
-	middleware := tSUploadTorrentMiddleware(mockHandler)
-	middleware.ServeHTTP(rr, req)
-
-	assert.False(t, called, "next handler should not be called on parse error")
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestTSViewedDoesNotDeadlock(t *testing.T) {

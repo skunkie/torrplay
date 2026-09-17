@@ -51,7 +51,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := c.storageClient.GetTorrentMemoryStats(ih)
+	info, err := c.storageClient.Load().GetTorrentMemoryStats(ih)
 	if err != nil {
 		api.HTTPError(w, "torrent memory stats unavailable", http.StatusBadRequest)
 		return
@@ -103,10 +103,7 @@ func (c *Controller) TSPlay(w http.ResponseWriter, r *http.Request, ih metainfo.
 }
 
 func (c *Controller) TSSettings(w http.ResponseWriter, _ *http.Request) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	resp := api.TSSettings{CacheSize: c.settings.MaxMemory}
+	resp := api.TSSettings{CacheSize: c.settings.Load().MaxMemory}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -307,7 +304,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 		if needsDrop {
 			to.Drop()
 			<-to.Closed()
-			c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+			c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
 		}
 
 		w.Header().Set("Content-Type", "application/json")

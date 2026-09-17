@@ -34,7 +34,7 @@ func (c *Controller) BackupTorrents(w http.ResponseWriter, r *http.Request) {
 		if t.Poster != nil {
 			p, err := c.images.Get(*t.Poster)
 			if err != nil {
-				c.logger.Error("failed to get poster for backup", "err", err, "posterID", *t.Poster)
+				c.logger.Load().Error("failed to get poster for backup", "err", err, "posterID", *t.Poster)
 				continue
 			}
 			postersData[*t.Poster] = p
@@ -86,7 +86,7 @@ func (c *Controller) RestoreTorrents(w http.ResponseWriter, r *http.Request) {
 
 	for _, posterBytes := range backupData.Posters {
 		if _, err := c.images.SaveData(posterBytes); err != nil {
-			c.logger.Error("failed to restore poster", "err", err)
+			c.logger.Load().Error("failed to restore poster", "err", err)
 		}
 	}
 
@@ -94,10 +94,10 @@ func (c *Controller) RestoreTorrents(w http.ResponseWriter, r *http.Request) {
 		if err := c.db.CreateTorrent(database.FromAPITorrent(t)); err != nil {
 			if errors.Is(err, database.ErrTorrentExists) {
 				if err := c.db.UpdateTorrent(database.FromAPITorrent(t)); err != nil {
-					c.logger.Error("failed to update torrent on restore", "err", err, "hash", t.Hash.HexString())
+					c.logger.Load().Error("failed to update torrent on restore", "err", err, "hash", t.Hash.HexString())
 				}
 			} else {
-				c.logger.Error("failed to restore torrent", "err", err, "hash", t.Hash.HexString())
+				c.logger.Load().Error("failed to restore torrent", "err", err, "hash", t.Hash.HexString())
 			}
 		}
 	}

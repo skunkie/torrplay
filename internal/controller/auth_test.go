@@ -35,8 +35,8 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 	require.NoError(t, err)
 
 	if updateSettings != nil {
-		updateSettings(c.settings)
-		err = dbClient.UpdateSettings(database.FromAPISettings(c.settings))
+		updateSettings(c.settings.Load())
+		err = dbClient.UpdateSettings(database.FromAPISettings(c.settings.Load()))
 		require.NoError(t, err)
 	}
 
