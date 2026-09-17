@@ -1763,11 +1763,11 @@ func TestSlogMiddlewareRedactsTokens(t *testing.T) {
 	}
 }
 
-func TestMetricsMiddlewareRedactsTokens(t *testing.T) {
+func TestMetricsMiddlewareNormalizesStremioPaths(t *testing.T) {
 	metricsSvc := metrics.New()
 	c := &Controller{metrics: metricsSvc}
 
-	t.Run("unrouted request with stremio token is redacted in metrics label", func(t *testing.T) {
+	t.Run("unrouted stremio request is collapsed in metrics label", func(t *testing.T) {
 		mw := c.MetricsMiddleware()
 		testHandler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -1777,7 +1777,7 @@ func TestMetricsMiddlewareRedactsTokens(t *testing.T) {
 		rr := httptest.NewRecorder()
 		testHandler.ServeHTTP(rr, req)
 
-		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/[REDACTED]/manifest.json")
+		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/manifest.json")
 		require.NoError(t, err)
 		assert.Equal(t, float64(1), promtestutil.ToFloat64(redactedCounter))
 
@@ -1786,7 +1786,7 @@ func TestMetricsMiddlewareRedactsTokens(t *testing.T) {
 		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
 	})
 
-	t.Run("mounted stremio handler fallback redacts path token", func(t *testing.T) {
+	t.Run("mounted stremio handler fallback collapses variable segments", func(t *testing.T) {
 		r := chi.NewRouter()
 		r.Use(c.MetricsMiddleware())
 		r.Mount("/stremio", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1797,7 +1797,7 @@ func TestMetricsMiddlewareRedactsTokens(t *testing.T) {
 		rr := httptest.NewRecorder()
 		r.ServeHTTP(rr, req)
 
-		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/[REDACTED]/catalog/movie/all.json")
+		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/catalog")
 		require.NoError(t, err)
 		assert.Equal(t, float64(1), promtestutil.ToFloat64(redactedCounter))
 
