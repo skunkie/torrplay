@@ -12,9 +12,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/mcp"
 	"github.com/torrplay/torrplay/internal/metadata"
 	"github.com/torrplay/torrplay/pkg/torrplay"
 )
@@ -133,4 +137,40 @@ func runMetadataTool() error {
 
 	log.Printf("successfully processed backup, new backup file created at: %s", outputFilename)
 	return nil
+}
+
+func runMCPTool() error {
+	return runMCP(os.Args[2:])
+}
+
+func runMCP(args []string) error {
+	mcpCmd := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	defaultURL := os.Getenv("TORRPLAY_URL")
+	if defaultURL == "" {
+		defaultURL = "http://127.0.0.1:8090"
+	}
+	defaultToken := os.Getenv("TORRPLAY_TOKEN")
+
+	appURL := mcpCmd.String("url", defaultURL, "TorrPlay application base URL (or TORRPLAY_URL env)")
+	token := mcpCmd.String("token", defaultToken, "TorrPlay authentication token (or TORRPLAY_TOKEN env)")
+	transport := mcpCmd.String("transport", "stdio", "MCP transport protocol: stdio or sse")
+	sseAddr := mcpCmd.String("addr", "127.0.0.1:8091", "Loopback listen address for SSE transport")
+
+	if err := mcpCmd.Parse(args); err != nil {
+		return err
+	}
+
+	client := mcp.NewClient(*appURL, *token, nil)
+	s := mcp.NewServer(client)
+
+	switch strings.ToLower(*transport) {
+	case "stdio":
+		return mcp.ServeStdio(s)
+	case "sse":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return mcp.ServeSSE(ctx, s, *sseAddr)
+	default:
+		return fmt.Errorf("unsupported transport: %s (must be 'stdio' or 'sse')", *transport)
+	}
 }

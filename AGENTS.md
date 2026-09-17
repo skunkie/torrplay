@@ -117,6 +117,20 @@ fix(controller): move debug profiler to loopback-only listener
 - **Authentication & Isolation**:
   - Support optional token validation via both URL path prefixes (`/stremio/{token}/manifest.json`) and query parameters (`/stremio/manifest.json?token=...`) so Stremio can install and authenticate private instances securely.
 
+## Model Context Protocol (MCP) Standards
+
+- **Stdio Stream Isolation**:
+  - In stdio transport mode (`torrplay mcp`), reserve `stdout` exclusively for JSON-RPC protocol framing.
+  - Route all application diagnostics, informational logs, and errors strictly to `os.Stderr` to prevent corrupting MCP client message parsing.
+- **Client-Application Decoupling**:
+  - The built-in MCP server must interface with the active TorrPlay application instance over HTTP/REST rather than directly opening internal databases.
+  - Never open `config.db` or initialize BitTorrent engines directly inside `torrplay mcp` to prevent BBolt file lock (`flock`) conflicts and port collisions with the running application.
+- **API & Tool Synchronization**:
+  - Keep the MCP HTTP client, tools, resources, and tests synchronized with the API operations they expose. Evaluate new `/api/v1` operations for useful MCP exposure, but do not assume every HTTP endpoint requires a one-to-one MCP tool or resource.
+- **Transport Security & Listener Isolation**:
+  - SSE transport (`ServeSSE`) must bind strictly to a loopback address to prevent accidental remote network exposure.
+  - Remote access requires an authenticated reverse proxy or mutual TLS tunnel in front of the loopback listener, as MCP sessions share application credentials configured at startup.
+
 ## Downloader & Torrent Metadata Invariants
 
 - **Streaming Bandwidth Prioritization**:

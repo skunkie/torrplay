@@ -597,7 +597,9 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 				if routePath == "" || strings.HasSuffix(routePath, "/*") {
 					routePath = r.URL.Path
 				}
-				routePath = stremio.RedactPathToken(routePath)
+				// Stremio paths carry tokens, hashes and file names; collapse
+				// them to a bounded label instead of one series per file.
+				routePath = stremio.MetricsPath(routePath)
 
 				duration := time.Since(start)
 				statusCode := strconv.Itoa(ww.Status())

@@ -20,6 +20,7 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/buildinfo"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
 )
@@ -59,6 +60,15 @@ var (
 const (
 	defaultCatalogLimit = 100
 	idPrefix            = "torrplay:"
+	// fallbackManifestVersion is used when the build was not stamped with a
+	// semver version; Stremio rejects manifests whose version is not semver.
+	fallbackManifestVersion = "1.0.0"
+)
+
+var semverRegex = regexp.MustCompile(
+	`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)` +
+		`(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?` +
+		`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`,
 )
 
 // StreamHandlerFunc defines the signature for streaming a torrent file.
@@ -100,6 +110,20 @@ func NewService(
 
 // ServeHTTP routes Stremio protocol requests.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The addon protocol is read-only: reject anything but safe methods.
+	// Preflight requests are answered by the CORS middleware before reaching here.
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+	case http.MethodOptions:
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		w.WriteHeader(http.StatusNoContent)
+		return
+	default:
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		s.writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+
 	// Support both mounted router (prefix stripped) and direct dispatch.
 	reqPath := strings.TrimPrefix(r.URL.Path, "/stremio")
 	cleanPath := strings.Trim(reqPath, "/")
@@ -124,7 +148,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Validate authentication if an auth validator is provided.
 	if s.authValidator != nil && !s.authValidator(token) {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		s.writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
 
@@ -191,7 +215,7 @@ func (s *Service) handleManifest(w http.ResponseWriter, r *http.Request) {
 	manifest := Manifest{
 		ID:          "org.torrplay.stremio",
 		Name:        "TorrPlay",
-		Version:     "1.0.0",
+		Version:     manifestVersion(),
 		Description: "Stream torrents from your TorrPlay library",
 		Logo:        logoURL,
 		Resources:   []string{"catalog", "meta", "stream"},
@@ -232,14 +256,14 @@ func (s *Service) handleManifest(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	writeJSON(w, http.StatusOK, manifest)
+	s.writeJSON(w, http.StatusOK, manifest)
 }
 
 func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, catalogType, catalogID, extra string) {
 	torrents, err := s.db.GetTorrents()
 	if err != nil {
 		s.logger.Error("failed to get torrents for Stremio catalog", "error", err)
-		writeJSON(w, http.StatusOK, CatalogResponse{Metas: []MetaPreview{}})
+		s.writeJSON(w, http.StatusOK, CatalogResponse{Metas: []MetaPreview{}})
 		return
 	}
 
@@ -286,8 +310,13 @@ func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, catalogT
 	}
 
 	// Sort newest first.
-	sort.Slice(filtered, func(i, j int) bool {
-		return utils.Val(filtered[i].CreatedAt).After(utils.Val(filtered[j].CreatedAt))
+	sort.SliceStable(filtered, func(i, j int) bool {
+		iAt, jAt := utils.Val(filtered[i].CreatedAt), utils.Val(filtered[j].CreatedAt)
+		if iAt.Equal(jAt) {
+			// Tie-break on the infohash so pagination stays deterministic.
+			return filtered[i].Hash.HexString() < filtered[j].Hash.HexString()
+		}
+		return iAt.After(jAt)
 	})
 
 	// Apply skip pagination.
@@ -330,27 +359,26 @@ func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, catalogT
 		})
 	}
 
-	writeJSON(w, http.StatusOK, CatalogResponse{Metas: metas})
+	s.writeJSON(w, http.StatusOK, CatalogResponse{Metas: metas})
 }
 
-func (s *Service) handleMeta(w http.ResponseWriter, r *http.Request, mediaType, metaID string) {
+func (s *Service) handleMeta(w http.ResponseWriter, r *http.Request, _, metaID string) {
 	hashHex := strings.TrimPrefix(metaID, idPrefix)
 	ih, err := utils.HashFromHexString(hashHex)
 	if err != nil {
-		writeJSON(w, http.StatusOK, MetaResponse{Meta: nil})
+		s.writeJSON(w, http.StatusOK, MetaResponse{Meta: nil})
 		return
 	}
 
 	t, err := s.db.GetTorrent(ih)
 	if err != nil {
-		writeJSON(w, http.StatusOK, MetaResponse{Meta: nil})
+		s.writeJSON(w, http.StatusOK, MetaResponse{Meta: nil})
 		return
 	}
 
+	// The item type always comes from classification: catalogs advertise that
+	// same type, so trusting the request path would just let a client relabel.
 	itemType := classifyTorrent(t)
-	if mediaType != "" && mediaType != "other" {
-		itemType = mediaType
-	}
 
 	name := t.Name
 	if t.Title != nil && *t.Title != "" {
@@ -380,7 +408,13 @@ func (s *Service) handleMeta(w http.ResponseWriter, r *http.Request, mediaType, 
 			title = path.Base(f.Path)
 		}
 
-		season, episode, _ := parseSeasonEpisode(f.Path, f.Name, mediaIndex)
+		// Season/episode numbering is only meaningful for series; filling it in
+		// for a movie would turn extras into fabricated episodes.
+		var season, episode int
+		if itemType == "series" {
+			season, episode, _ = parseSeasonEpisode(f.Path, f.Name, mediaIndex)
+		}
+
 		var released string
 		if t.CreatedAt != nil {
 			released = t.CreatedAt.UTC().Format(time.RFC3339)
@@ -412,7 +446,7 @@ func (s *Service) handleMeta(w http.ResponseWriter, r *http.Request, mediaType, 
 		}
 	}
 
-	writeJSON(w, http.StatusOK, MetaResponse{Meta: meta})
+	s.writeJSON(w, http.StatusOK, MetaResponse{Meta: meta})
 }
 
 func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, _ string, streamID, token string) {
@@ -420,19 +454,19 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, _ string,
 	parts := strings.Split(cleanID, ":")
 
 	if len(parts) == 0 || parts[0] == "" {
-		writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
+		s.writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
 		return
 	}
 
 	ih, err := utils.HashFromHexString(parts[0])
 	if err != nil {
-		writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
+		s.writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
 		return
 	}
 
 	t, err := s.db.GetTorrent(ih)
 	if err != nil {
-		writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
+		s.writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
 		return
 	}
 
@@ -445,7 +479,14 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, _ string,
 
 	var streams []Stream
 
-	if fileIdx >= 0 && fileIdx < len(t.Files) {
+	if fileIdx >= 0 {
+		// The ID names a specific file: it must exist and be playable, since
+		// every ID we hand out points at a media file.
+		if fileIdx >= len(t.Files) || !isMediaFile(t.Files[fileIdx].Path) {
+			s.writeJSON(w, http.StatusOK, StreamResponse{Streams: []Stream{}})
+			return
+		}
+
 		f := t.Files[fileIdx]
 		streamURL := s.buildStreamURL(r, token, ih, fileIdx, f.Name)
 		title := f.Name
@@ -480,7 +521,7 @@ func (s *Service) handleStream(w http.ResponseWriter, r *http.Request, _ string,
 		}
 	}
 
-	writeJSON(w, http.StatusOK, StreamResponse{Streams: streams})
+	s.writeJSON(w, http.StatusOK, StreamResponse{Streams: streams})
 }
 
 func (s *Service) handlePlay(w http.ResponseWriter, r *http.Request, hashStr, fileIdxStr string) {
@@ -655,15 +696,25 @@ func areSequentialFiles(files []api.TorrentFile) bool {
 	if len(files) < 2 {
 		return false
 	}
+
+	seen := make(map[int]bool, len(files))
 	for _, f := range files {
 		name := f.Name
 		if name == "" {
 			name = path.Base(f.Path)
 		}
-		if !standaloneNumRegex.MatchString(name) {
+		match := standaloneNumRegex.FindStringSubmatch(name)
+		if len(match) != 2 {
 			return false
 		}
+		n, err := strconv.Atoi(match[1])
+		if err != nil || seen[n] {
+			// Repeated numbers mean the prefix is not an episode counter.
+			return false
+		}
+		seen[n] = true
 	}
+
 	return true
 }
 
@@ -755,23 +806,32 @@ func isStremioResource(part string) bool {
 	}
 }
 
+// MetricsPath collapses a Stremio URL into a bounded metrics label. Stremio
+// paths embed tokens, infohashes, file indexes and file names, so using them
+// verbatim as a Prometheus label would create one series per streamed file.
+func MetricsPath(p string) string {
+	parts, ok := stremioPathParts(p)
+	if !ok {
+		return p
+	}
+
+	if len(parts) > 0 && !isStremioResource(parts[0]) {
+		parts = parts[1:]
+	}
+	if len(parts) == 0 || !isStremioResource(parts[0]) {
+		return "/stremio"
+	}
+
+	return "/stremio/" + parts[0]
+}
+
 // RedactPathToken redacts sensitive authentication path tokens from Stremio URLs.
 func RedactPathToken(p string) string {
-	if !strings.HasPrefix(p, "/stremio") {
+	parts, ok := stremioPathParts(p)
+	if !ok {
 		return p
 	}
 
-	reqPath := strings.TrimPrefix(p, "/stremio")
-	if reqPath != "" && !strings.HasPrefix(reqPath, "/") {
-		return p
-	}
-
-	cleanPath := strings.Trim(reqPath, "/")
-	if cleanPath == "" {
-		return p
-	}
-
-	parts := strings.Split(cleanPath, "/")
 	if len(parts) > 0 && !isStremioResource(parts[0]) {
 		parts[0] = "[REDACTED]"
 		return "/stremio/" + strings.Join(parts, "/")
@@ -780,14 +840,59 @@ func RedactPathToken(p string) string {
 	return p
 }
 
+// stremioPathParts splits a Stremio request path into its segments, reporting
+// false for paths that are not served by this addon.
+func stremioPathParts(p string) ([]string, bool) {
+	if !strings.HasPrefix(p, "/stremio") {
+		return nil, false
+	}
+
+	reqPath := strings.TrimPrefix(p, "/stremio")
+	if reqPath != "" && !strings.HasPrefix(reqPath, "/") {
+		return nil, false
+	}
+
+	cleanPath := strings.Trim(reqPath, "/")
+	if cleanPath == "" {
+		return nil, false
+	}
+
+	return strings.Split(cleanPath, "/"), true
+}
+
+// firstForwardedValue returns the first entry of a comma-separated forwarded
+// header, which proxies append to on each hop.
+func firstForwardedValue(value string) string {
+	first, _, _ := strings.Cut(value, ",")
+	return strings.TrimSpace(first)
+}
+
+// isValidHost reports whether a forwarded host is usable in a generated URL.
+// The value is client-controlled, so anything that could smuggle a path, query
+// or header break is rejected in favour of the request host.
+func isValidHost(host string) bool {
+	if host == "" || len(host) > 255 {
+		return false
+	}
+	if strings.ContainsAny(host, " \t\r\n/\\?#@\"<>") {
+		return false
+	}
+	for _, c := range host {
+		if c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func getBaseURL(r *http.Request) *url.URL {
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r.TLS != nil || firstForwardedValue(r.Header.Get("X-Forwarded-Proto")) == "https" {
 		scheme = "https"
 	}
 
 	host := r.Host
-	if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
+	if fwdHost := firstForwardedValue(r.Header.Get("X-Forwarded-Host")); isValidHost(fwdHost) {
 		host = fwdHost
 	}
 
@@ -799,6 +904,12 @@ func getBaseURL(r *http.Request) *url.URL {
 
 func buildPosterURL(r *http.Request, postersPath, posterID string) string {
 	baseURL := getBaseURL(r)
+	// Poster IDs are plain file names; strip any directory components so a
+	// stored value can never escape the posters directory.
+	posterID = path.Base(strings.ReplaceAll(posterID, "\\", "/"))
+	if posterID == "." || posterID == "/" || posterID == ".." {
+		return ""
+	}
 	p := path.Join(postersPath, posterID)
 	if !strings.HasSuffix(strings.ToLower(p), ".jpg") && !strings.HasSuffix(strings.ToLower(p), ".png") {
 		p += ".jpg"
@@ -806,12 +917,31 @@ func buildPosterURL(r *http.Request, postersPath, posterID string) string {
 	return baseURL.ResolveReference(&url.URL{Path: p}).String()
 }
 
-func writeJSON(w http.ResponseWriter, status int, data any) {
+func (s *Service) writeJSON(w http.ResponseWriter, status int, data any) {
+	// Encode before writing the header so an encoding failure can still be
+	// reported with a clean status instead of a truncated body.
+	body, err := json.Marshal(data)
+	if err != nil {
+		s.logger.Error("failed to encode Stremio response", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if _, err := w.Write(body); err != nil {
+		s.logger.Debug("failed to write Stremio response", "error", err)
 	}
+}
+
+// manifestVersion reports the addon version advertised to Stremio, which
+// caches manifests per version. Unstamped dev builds fall back to a valid
+// semver so the manifest stays parseable.
+func manifestVersion() string {
+	if semverRegex.MatchString(buildinfo.Version) {
+		return buildinfo.Version
+	}
+	return fallbackManifestVersion
 }

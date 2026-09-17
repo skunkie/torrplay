@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/buildinfo"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
@@ -344,8 +345,9 @@ func TestMeta(t *testing.T) {
 		assert.Equal(t, "movie", metaResp.Meta.Type)
 		require.Len(t, metaResp.Meta.Videos, 1)
 		assert.Equal(t, "torrplay:1111111111111111111111111111111111111111:0", metaResp.Meta.Videos[0].ID)
-		assert.Equal(t, 1, metaResp.Meta.Videos[0].Season)
-		assert.Equal(t, 1, metaResp.Meta.Videos[0].Episode)
+		// Movies carry no season/episode numbering.
+		assert.Zero(t, metaResp.Meta.Videos[0].Season)
+		assert.Zero(t, metaResp.Meta.Videos[0].Episode)
 		require.NotNil(t, metaResp.Meta.BehaviorHints)
 		assert.Equal(t, metaResp.Meta.Videos[0].ID, metaResp.Meta.BehaviorHints.DefaultVideoID)
 	})
@@ -778,4 +780,151 @@ func TestClassifyTorrent(t *testing.T) {
 		}
 		assert.Equal(t, "series", classifyTorrent(torSeries))
 	})
+}
+
+func TestMetricsPath(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", ""},
+		{"/api/v1/torrents", "/api/v1/torrents"},
+		{"/stremio", "/stremio"},
+		{"/stremio/manifest.json", "/stremio/manifest.json"},
+		{"/stremio/secretToken123/manifest.json", "/stremio/manifest.json"},
+		{"/stremio/catalog/movie/torrplay_movies.json", "/stremio/catalog"},
+		{"/stremio/secretToken123/catalog/movie/torrplay_movies/search=x.json", "/stremio/catalog"},
+		{"/stremio/meta/series/torrplay:1111111111111111111111111111111111111111.json", "/stremio/meta"},
+		{"/stremio/stream/movie/torrplay:1111111111111111111111111111111111111111:0.json", "/stremio/stream"},
+		{"/stremio/play/1111111111111111111111111111111111111111/0/video.mp4", "/stremio/play"},
+		{"/stremio/secretToken123/play/1111111111111111111111111111111111111111/3/other.mkv", "/stremio/play"},
+		{"/stremio/secretToken123", "/stremio"},
+		{"/stremiofoo/bar", "/stremiofoo/bar"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			assert.Equal(t, tc.expected, MetricsPath(tc.input))
+		})
+	}
+}
+
+func TestManifestVersion(t *testing.T) {
+	originalVersion := buildinfo.Version
+	t.Cleanup(func() {
+		buildinfo.Version = originalVersion
+	})
+
+	tests := []struct {
+		name     string
+		version  string
+		expected string
+	}{
+		{name: "release", version: "1.2.3", expected: "1.2.3"},
+		{name: "prerelease", version: "1.2.3-beta.1", expected: "1.2.3-beta.1"},
+		{name: "build metadata", version: "1.2.3+build.5", expected: "1.2.3+build.5"},
+		{name: "unstamped", version: "unknown", expected: fallbackManifestVersion},
+		{name: "trailing text", version: "1.2.3garbage", expected: fallbackManifestVersion},
+		{name: "four components", version: "1.2.3.4", expected: fallbackManifestVersion},
+		{name: "leading zero", version: "01.2.3", expected: fallbackManifestVersion},
+		{name: "prerelease leading zero", version: "1.2.3-01", expected: fallbackManifestVersion},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buildinfo.Version = tc.version
+			assert.Equal(t, tc.expected, manifestVersion())
+		})
+	}
+}
+
+func TestUnsafeMethodsAreRejected(t *testing.T) {
+	service := setupTestService(t, nil, nil)
+
+	t.Run("post is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/stremio/play/1111111111111111111111111111111111111111/0", http.NoBody)
+		w := httptest.NewRecorder()
+
+		service.ServeHTTP(w, req)
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+		assert.Equal(t, "GET, HEAD, OPTIONS", resp.Header.Get("Allow"))
+	})
+
+	t.Run("options is answered without a body", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/stremio/manifest.json", http.NoBody)
+		w := httptest.NewRecorder()
+
+		service.ServeHTTP(w, req)
+		resp := w.Result()
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusNoContent, resp.StatusCode)
+	})
+}
+
+func TestStreamIgnoresNonMediaFileIndex(t *testing.T) {
+	service := setupTestService(t, nil, nil)
+
+	// Index 1 of the first torrent is readme.txt.
+	req := httptest.NewRequest(http.MethodGet, "/stremio/stream/movie/torrplay:1111111111111111111111111111111111111111:1.json", http.NoBody)
+	w := httptest.NewRecorder()
+
+	service.ServeHTTP(w, req)
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	var streamResp StreamResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&streamResp))
+	assert.Empty(t, streamResp.Streams)
+}
+
+// TestGetBaseURL verifies how getBaseURL handles forwarded hosts.
+func TestGetBaseURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		expected string
+	}{
+		{name: "valid forwarded host is used", host: "proxy.example.com:8443", expected: "https://proxy.example.com:8443"},
+		{name: "forwarded chain uses first hop", host: "proxy.example.com, inner.example.com", expected: "https://proxy.example.com"},
+		{name: "host with path is rejected", host: "evil.example.com/path", expected: "https://origin.example.com"},
+		{name: "host with credentials is rejected", host: "user@evil.example.com", expected: "https://origin.example.com"},
+		{name: "empty host falls back", host: "", expected: "https://origin.example.com"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://origin.example.com/stremio/manifest.json", http.NoBody)
+			req.Header.Set("X-Forwarded-Proto", "https, http")
+			if tc.host != "" {
+				req.Header.Set("X-Forwarded-Host", tc.host)
+			}
+
+			assert.Equal(t, tc.expected, getBaseURL(req).String())
+		})
+	}
+}
+
+// TestBuildPosterURL verifies that buildPosterURL strips directories from poster names.
+func TestBuildPosterURL(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/stremio/manifest.json", http.NoBody)
+
+	assert.Equal(t, "http://example.com/posters/poster1.jpg", buildPosterURL(req, "/posters/", "poster1"))
+	assert.Equal(t, "http://example.com/posters/secret.png", buildPosterURL(req, "/posters/", "../../etc/secret.png"))
+	assert.Empty(t, buildPosterURL(req, "/posters/", ".."))
+}
+
+// TestAreSequentialFiles verifies that areSequentialFiles rejects repeated numbers.
+func TestAreSequentialFiles(t *testing.T) {
+	assert.True(t, areSequentialFiles([]api.TorrentFile{
+		{Name: "01 - First.mkv"},
+		{Name: "02 - Second.mkv"},
+	}))
+	assert.False(t, areSequentialFiles([]api.TorrentFile{
+		{Name: "01 - First.mkv"},
+		{Name: "01 - First again.mkv"},
+	}))
 }
