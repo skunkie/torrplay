@@ -220,7 +220,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	c.pieceCompletion = pc
 
-	c.dlna = dlna.NewService(dbClient, imgService, c.dlnaPath, c.postersPath, c.logger.Load())
+	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger.Load())
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.

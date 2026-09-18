@@ -21,28 +21,30 @@ import (
 
 	"github.com/ethulhu/helix/upnp"
 	"github.com/sirupsen/logrus"
-	"github.com/torrplay/torrplay/internal/database"
-	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
 const notifyInterval = 30 * time.Second
 
+type serviceDatabase interface {
+	torrentReader
+	GetDLNAUDN() (string, error)
+}
+
 type Service struct {
 	basePath         string
 	cancel           context.CancelFunc
 	contentDirectory *ContentDirectory
-	db               database.DatabaseInterface
+	db               serviceDatabase
 	device           *upnp.Device
 	handler          http.Handler
-	images           images.ServiceInterface
 	logger           *slog.Logger
 	mu               sync.RWMutex
 	postersPath      string
 }
 
-func NewService(db database.DatabaseInterface, imgService images.ServiceInterface, basePath, postersPath string, logger *slog.Logger) *Service {
+func NewService(db serviceDatabase, basePath, postersPath string, logger *slog.Logger) *Service {
 	// Configure the global logrus logger used by helix to use our slog hook.
 	logrus.SetOutput(io.Discard)
 	logrus.AddHook(logging.NewSlogHook(logger))
@@ -50,7 +52,6 @@ func NewService(db database.DatabaseInterface, imgService images.ServiceInterfac
 	return &Service{
 		basePath:    basePath,
 		db:          db,
-		images:      imgService,
 		logger:      logger,
 		postersPath: postersPath,
 	}
@@ -173,7 +174,7 @@ func (s *Service) Start(friendlyName string, httpAddr string, port int) error {
 		return fmt.Errorf("failed to get UDN, %w", err)
 	}
 
-	cd := NewContentDirectory(s.db, s.images, baseURL, s.postersPath)
+	cd := NewContentDirectory(s.db, baseURL, s.postersPath)
 
 	device := NewDevice(friendlyName, udn, icons, cd)
 

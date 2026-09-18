@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
 	"testing"
@@ -17,24 +16,12 @@ import (
 	"github.com/ethulhu/helix/upnpav/contentdirectory/search"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/torrplay/torrplay/internal/images"
 )
-
-type mockImages struct {
-	images.Unimplemented
-}
-
-func (m *mockImages) SaveData(data []byte) (*string, error) {
-	s := "test"
-	return &s, nil
-}
-
-func (m *mockImages) ServeHTTP(w http.ResponseWriter, r *http.Request) {}
 
 func TestContentDirectory_BrowseMetadata(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
@@ -61,7 +48,7 @@ func TestContentDirectory_BrowseMetadata(t *testing.T) {
 func TestContentDirectory_BrowseChildren(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
@@ -88,7 +75,7 @@ func TestContentDirectory_BrowseChildren(t *testing.T) {
 func TestContentDirectory_Search(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
@@ -116,7 +103,7 @@ func TestContentDirectory_Search(t *testing.T) {
 func TestContentDirectory_fileURI(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, &mockImages{}, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger)
 
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
@@ -152,7 +139,7 @@ func TestBrowseTorrentWithIcon(t *testing.T) {
 	db := &mockDB{}
 	baseURL, err := url.Parse("http://127.0.0.1:8080")
 	require.NoError(t, err)
-	cd := NewContentDirectory(db, &mockImages{}, baseURL, "/posters/")
+	cd := NewContentDirectory(db, baseURL, "/posters/")
 
 	didl, err := cd.browseTorrent(context.Background(), upnpav.ObjectID(testTorrentHash.HexString()))
 	require.NoError(t, err)
