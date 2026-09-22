@@ -234,8 +234,24 @@ func (c *Client) GetSystemInfo(ctx context.Context) (*api.SystemInfo, error) {
 
 // GetSystemLogs returns the most recent application log entries.
 func (c *Client) GetSystemLogs(ctx context.Context) ([]api.LogEntry, error) {
+	return c.SearchSystemLogs(ctx, "", "")
+}
+
+// SearchSystemLogs filters the application's retained log entries.
+func (c *Client) SearchSystemLogs(ctx context.Context, query, level string) ([]api.LogEntry, error) {
+	params := url.Values{}
+	if query != "" {
+		params.Set("q", query)
+	}
+	if level != "" {
+		params.Set("level", level)
+	}
+	endpoint := "/api/system/logs"
+	if len(params) > 0 {
+		endpoint += "?" + params.Encode()
+	}
 	var res []api.LogEntry
-	if err := c.doRequest(ctx, http.MethodGet, "/api/system/logs", nil, &res); err != nil {
+	if err := c.doRequest(ctx, http.MethodGet, endpoint, nil, &res); err != nil {
 		return nil, err
 	}
 	return res, nil

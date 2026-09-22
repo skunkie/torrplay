@@ -509,10 +509,18 @@ func registerTools(s *server.MCPServer, client *Client) {
 	// 13. get_system_logs
 	s.AddTool(
 		mcp.NewTool("get_system_logs",
-			mcp.WithDescription("Get the most recent TorrPlay application log entries for troubleshooting."),
+			mcp.WithDescription("Get retained TorrPlay application log entries, newest first, with optional search and level filtering."),
+			mcp.WithString("q", mcp.Description("Case-insensitive text to find in log messages or structured fields.")),
+			mcp.WithString("level", mcp.Description("Exact log level: DEBUG, INFO, WARN, or ERROR.")),
 		),
-		func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			logs, err := client.GetSystemLogs(ctx)
+		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			level := strings.ToUpper(strings.TrimSpace(req.GetString("level", "")))
+			switch level {
+			case "", "DEBUG", "INFO", "WARN", "ERROR":
+			default:
+				return nil, fmt.Errorf("invalid log level %q", level)
+			}
+			logs, err := client.SearchSystemLogs(ctx, strings.TrimSpace(req.GetString("q", "")), level)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to get system logs: %v", err)), nil
 			}
