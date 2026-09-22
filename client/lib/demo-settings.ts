@@ -17,6 +17,7 @@ export const demoDefaultSettings: Settings = {
   friendlyName: 'TorrPlay',
   logLevel: 'INFO',
   logFormat: 'text' as const,
+  logStoreSize: 100,
   maxMemory: 536870912,
   torrentClient: {
     disableDht: false,

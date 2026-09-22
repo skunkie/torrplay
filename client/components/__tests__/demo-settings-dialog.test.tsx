@@ -443,4 +443,29 @@ describe('DemoSettingsDialog', () => {
       expect(logLevelSelect).toHaveTextContent('INFO');
     });
   });
+
+  it('opens demo logs and returns without losing unsaved settings', async () => {
+    setupMocks();
+    render(
+      <DemoAuthWrapper settings={currentSettings}>
+        <DemoSettingsDialog open={true}
+          onOpenChange={vi.fn()} />
+      </DemoAuthWrapper>,
+    );
+
+    const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+    selectCombobox(logLevelSelect, 'ERROR');
+    const viewLogsButton = screen.getByRole('button', { name: 'View logs' });
+    viewLogsButton.focus();
+    fireEvent.click(viewLogsButton);
+    expect(screen.getByRole('button', { name: 'Back to Settings' })).toHaveFocus();
+    expect(screen.getByText('Application logs')).toBeInTheDocument();
+    expect(screen.getByText('failed to load torrent metadata')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.getByText('demo log view refreshed')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));
+    expect(viewLogsButton).toHaveFocus();
+    expect(screen.getByRole('combobox', { name: /log level/i })).toHaveTextContent('ERROR');
+    expect(hoisted.updateSettings).not.toHaveBeenCalled();
+  });
 });
