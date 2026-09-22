@@ -33,6 +33,7 @@ import (
 	"github.com/torrplay/torrplay/internal/buildinfo"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/dlna"
+	"github.com/torrplay/torrplay/internal/httpclient"
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/piececompletion"
@@ -41,6 +42,8 @@ import (
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
 )
+
+const maxTorrentResolveBytes = 10 << 20
 
 func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	var (
@@ -753,6 +756,69 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 		Torrents: out,
 		Total:    total,
 	}); err != nil {
+		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func (c *Controller) ResolveTorrent(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	var req api.TorrentResolutionRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		api.HTTPError(w, "invalid resolve request", http.StatusBadRequest)
+		return
+	}
+	if err := httpclient.ValidateURL(req.URL); err != nil {
+		api.HTTPError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body, err := c.httpClient.GetLimited(r.Context(), req.URL, maxTorrentResolveBytes)
+	if err != nil {
+		status := http.StatusBadGateway
+		var timeout net.Error
+		if errors.As(err, &timeout) && timeout.Timeout() {
+			status = http.StatusGatewayTimeout
+		}
+		api.HTTPError(w, "failed to fetch torrent file", status)
+		return
+	}
+	meta, err := metainfo.Load(bytes.NewReader(body))
+	if err != nil {
+		api.HTTPError(w, "invalid torrent file", http.StatusBadRequest)
+		return
+	}
+	spec, err := torrent.TorrentSpecFromMetaInfoErr(meta)
+	if err != nil {
+		api.HTTPError(w, "invalid torrent metainfo", http.StatusBadRequest)
+		return
+	}
+	if spec.InfoHash.IsZero() {
+		api.HTTPError(w, "torrent metainfo must include a v1 info hash", http.StatusBadRequest)
+		return
+	}
+	stored, err := c.db.GetTorrent(spec.InfoHash)
+	var result *api.Torrent
+	switch {
+	case err == nil:
+		result = database.ToAPITorrent(stored)
+		if result.Poster != nil {
+			result.Poster = c.buildPosterUrl(r, *result.Poster)
+		}
+	case !errors.Is(err, database.ErrTorrentNotFound):
+		api.HandleError(w, err)
+		return
+	default:
+		to, err := c.loadTorrentSpec(spec, api.Memory)
+		if err != nil {
+			api.HTTPError(w, "failed to load torrent metainfo", http.StatusBadRequest)
+			return
+		}
+		result = torrentToMetadata(to)
+		result.Storage = new(api.Memory)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(result); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -1606,6 +1672,11 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 
 	if ok && info.storageType == storageType {
 		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+			if len(spec.InfoBytes) > 0 {
+				if err := to.MergeSpec(spec); err != nil {
+					return nil, err
+				}
+			}
 			c.torrentTracker.mu.Lock()
 			info.lastUsedAt = time.Now()
 			c.torrentTracker.torrents[spec.InfoHash] = info

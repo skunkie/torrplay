@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -554,4 +555,40 @@ func TestIntegrationControllerLifecycle(t *testing.T) {
 		}
 		return err != nil
 	}, time.Second, 10*time.Millisecond, "controller listener remained reachable after shutdown")
+}
+
+func TestIntegrationResolveURLThenStreamUsesMemory(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, false)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	storageDir := t.TempDir()
+	ctrl.settings.FileStoragePath = &storageDir
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = fixture.meta.Write(w) }))
+	defer source.Close()
+	rr := testutil.NewRequest().Post("/api/v1/torrent-resolutions").WithJsonBody(api.TorrentResolutionRequest{URL: source.URL}).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resolved api.Torrent
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resolved))
+	entries, err := os.ReadDir(storageDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "resolution must not create torrent files")
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0&magnet=%s", server.URL, resolved.Hash, url.QueryEscape(resolved.Magnet)), http.NoBody)
+	require.NoError(t, err)
+	req.Header.Set("Range", "bytes=0-1023")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, resp.Body.Close())
+	require.NoError(t, err)
+	require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+	assert.Equal(t, fixture.payload[:1024], body)
+	assert.Equal(t, api.Memory, utils.Val(resolved.Storage))
+	_, err = ctrl.db.GetTorrent(resolved.Hash)
+	require.ErrorIs(t, err, database.ErrTorrentNotFound)
+	entries, err = os.ReadDir(storageDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "temporary streaming must not create torrent files")
 }

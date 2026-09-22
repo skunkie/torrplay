@@ -319,6 +319,39 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /api/v1/torrent-resolutions:
+    post:
+      tags:
+        - v1
+      summary: Resolve a torrent from a URL without storing it.
+      description: >
+        Fetch a .torrent file from the supplied URL, load its metadata into the
+        torrent client and return the resulting torrent. The torrent is not
+        written to the database. Use POST /api/v1/torrents to persist it. If the
+        torrent is already stored, return its stored metadata unchanged.
+      operationId: resolveTorrent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TorrentResolutionRequest"
+      responses:
+        "200":
+          description: The resolved torrent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Torrent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
   /api/v1/torrents/restore:
     post:
       tags:
@@ -1229,6 +1262,17 @@ components:
             code: 501
             details: "This feature is not available on the server."
 
+    BadGateway:
+      description: The upstream server returned an error while fetching the torrent file.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "Bad gateway."
+            code: 502
+            details: "The upstream torrent file could not be fetched."
+
     GatewayTimeout:
       description: The server did not receive a timely response from an upstream server.
       content:
@@ -1912,6 +1956,19 @@ components:
               format: date-time
               description: Last time the torrent was modified.
               example: "2024-01-15T11:45:00Z"
+
+    TorrentResolutionRequest:
+      type: object
+      description: Input for resolving a torrent without storing it.
+      required:
+        - url
+      properties:
+        url:
+          type: string
+          format: uri
+          description: HTTP or HTTPS URL of a .torrent file.
+          pattern: "^https?://"
+          example: "http://indexer.local:9117/api/v2.0/indexers/x/download/28?apikey=…"
 
     TorrentAdd:
       type: object
