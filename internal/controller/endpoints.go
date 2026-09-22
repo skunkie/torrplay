@@ -37,6 +37,7 @@ import (
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/piececompletion"
+	appsettings "github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
@@ -988,6 +989,10 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if reqSettings.LogLevel != nil {
+		if !appsettings.ValidLogLevel(*reqSettings.LogLevel) {
+			api.HTTPError(w, "log level must be DEBUG, INFO, WARN, or ERROR", http.StatusBadRequest)
+			return
+		}
 		newSettings.LogLevel = reqSettings.LogLevel
 	}
 	if reqSettings.CorsAllowedOrigins != nil {

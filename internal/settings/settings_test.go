@@ -114,6 +114,13 @@ func TestMerge(t *testing.T) {
 		assert.False(t, changed)
 	})
 
+	t.Run("unsupported persisted log level is repaired", func(t *testing.T) {
+		target := Default()
+		target.LogLevel = new(slog.LevelInfo + 1)
+		assert.True(t, Merge(&target, Default()))
+		assert.Equal(t, slog.LevelInfo, *target.LogLevel)
+	})
+
 	t.Run("target with non-nil empty sub-structs", func(t *testing.T) {
 		target := &api.Settings{
 			Auth:          &api.Auth{},
@@ -139,4 +146,11 @@ func TestMerge(t *testing.T) {
 		assert.Equal(t, 100, *target.TorrentClient.TotalHalfOpenConns)
 		assert.Equal(t, 0, *target.TorrentClient.UploadRateLimit)
 	})
+}
+
+func TestValidLogLevel(t *testing.T) {
+	for _, level := range []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError} {
+		assert.True(t, ValidLogLevel(level))
+	}
+	assert.False(t, ValidLogLevel(slog.LevelInfo+1))
 }

@@ -1011,6 +1011,24 @@ func TestUpdateSettings(t *testing.T) {
 	assert.True(t, *updatedSettings.EnableStremio)
 }
 
+func TestUpdateSettingsRejectsUnsupportedLogLevel(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	for _, level := range []string{"INFO+1", "ERROR+4"} {
+		t.Run(level, func(t *testing.T) {
+			rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]string{"log_level": level}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+			assert.Equal(t, http.StatusBadRequest, rr.Code)
+			assert.Contains(t, rr.Body.String(), "log level must be DEBUG, INFO, WARN, or ERROR")
+
+			stored, err := ctrl.db.GetSettings()
+			require.NoError(t, err)
+			require.NotNil(t, stored.LogLevel)
+			assert.Equal(t, slog.LevelInfo, *stored.LogLevel)
+		})
+	}
+}
+
 func TestUpdateSettingsWithTrackers(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

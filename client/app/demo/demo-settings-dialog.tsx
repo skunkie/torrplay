@@ -13,6 +13,7 @@ import { useAuth } from '@/lib/auth-context';
 import { copyLogEntries } from '@/lib/copy-logs';
 import { demoLogs } from '@/lib/demo-logs';
 import { demoDefaultSettings } from '@/lib/demo-settings';
+import { LogLevel, normalizeLogLevel } from '@/lib/log-level';
 import { Auth, LogEntry, TorrentClient } from '@/lib/types/api';
 
 interface DemoSettingsDialogProps {
@@ -44,7 +45,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   const [corsAllowedOrigins, setCorsAllowedOrigins] = useState<string[]>([]);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
-  const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
+  const [logLevel, setLogLevel] = useState<LogLevel>('INFO');
   const [logFormat, setLogFormat] = useState<'json' | 'text'>('text');
 
   // Initialize defaults on first open if no settings exist yet.
@@ -75,7 +76,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
-      setLogLevel(settings.logLevel || 'INFO');
+      setLogLevel(normalizeLogLevel(settings.logLevel));
       setLogFormat(settings.logFormat || 'text');
       setInitialized(true);
     }
@@ -112,7 +113,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
     setTorrentClientSettings(settings.torrentClient || defaultSettings.torrentClient);
     setTorrentTrackers(settings.torrentTrackers || defaultSettings.torrentTrackers);
-    setLogLevel(settings.logLevel || defaultSettings.logLevel || 'INFO');
+    setLogLevel(normalizeLogLevel(settings.logLevel ?? defaultSettings.logLevel));
     setLogFormat(settings.logFormat || defaultSettings.logFormat || 'text');
     toast.success('Settings reset', { description: 'Demo mode - settings not actually saved' });
   };
