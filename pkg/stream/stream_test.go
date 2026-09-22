@@ -1622,6 +1622,34 @@ func TestPool_CloseResetsPrioritiesForActiveReaders(t *testing.T) {
 	}
 }
 
+func TestPool_CloseWaitsForPriorityWorkerWithNoClaims(t *testing.T) {
+	p := newTestPool(t, Config{Logger: testLogger()})
+	key := readerKey{infoHash: metainfo.Hash{51}, filePath: "f", readerID: 1}
+	sr := &streamReader{active: true}
+	p.readers[key] = sr
+
+	// A worker may hold priorityMu after its sequence check but before it
+	// records its first claim. Close must still wait for that worker.
+	sr.priorityMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		p.Close()
+		close(done)
+	}()
+	<-p.closeCh
+	closedBeforeWorker := false
+	select {
+	case <-done:
+		closedBeforeWorker = true
+	case <-time.After(20 * time.Millisecond):
+	}
+	sr.priorityMu.Unlock()
+	<-done
+	if closedBeforeWorker {
+		t.Fatal("Close returned while a priority worker still held its lock")
+	}
+}
+
 func TestPool_PrioritizeNextPieces_NearFractionClampedToMax(t *testing.T) {
 	// nearFraction > 1 should clamp to 1.0 in priorityPlan so all n pieces get Now.
 	// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, n=int(16*0.5)=8.

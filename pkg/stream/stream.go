@@ -1406,12 +1406,12 @@ func (p *Pool) Close() {
 	for key, sr := range p.readers {
 		// Invalidate any in-flight prioritizeAsync goroutines.
 		sr.prioritySeq.Add(1)
+		sr.priorityMu.Lock()
 		if len(sr.prioritizedPieces) > 0 {
-			sr.priorityMu.Lock()
 			p.clearReaderPrioritiesLocked(sr)
-			sr.prioritizedPieces = nil
-			sr.priorityMu.Unlock()
 		}
+		sr.prioritizedPieces = nil
+		sr.priorityMu.Unlock()
 		if sr.cancel != nil {
 			sr.cancel()
 		}
