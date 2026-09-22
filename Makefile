@@ -6,6 +6,7 @@ NAME = torrplay
 BUILD_DIR = build
 VERSION ?= 1.0.0
 MODULE = github.com/torrplay/torrplay
+YAMLFMT = go tool yamlfmt
 
 COMMIT = $(shell git rev-parse --short=7 HEAD)
 BUILD_DATE = $(shell date +%F)
@@ -62,7 +63,13 @@ docker: application
 generate:
 	go generate ./...
 
-lint:
+format-api:
+	$(YAMLFMT) api/api.yaml
+
+lint-api:
+	$(YAMLFMT) -lint api/api.yaml
+
+lint: lint-api
 	@if ! command -v golangci-lint >/dev/null 2>&1 && ! [ -x "$$(go env GOPATH)/bin/golangci-lint" ]; then \
 		echo "golangci-lint not found. Installing..."; \
 		curl -sSfL https://golangci-lint.run/install.sh | sh -s -- -b "$$(go env GOPATH)/bin" v2.13.2; \
@@ -90,7 +97,9 @@ help:
 	@echo "  android          - Build the Android APK files"
 	@echo "  docker           - Build the multi-platform Docker image"
 	@echo "  generate         - Run go generate to generate code"
-	@echo "  lint             - Run golangci-lint static analysis"
+	@echo "  format-api       - Format the OpenAPI schema"
+	@echo "  lint-api         - Check OpenAPI schema formatting"
+	@echo "  lint             - Check OpenAPI formatting and run golangci-lint"
 	@echo "  test             - Run the fast offline test suite"
 	@echo "  test-integration - Run local controller integration tests"
 	@echo "  help             - Show this help message"
@@ -104,6 +113,7 @@ help:
 	@echo "  make android                       # Build the Android APK"
 	@echo "  make docker                        # Build the Docker image"
 	@echo "  make lint                          # Run linter"
+	@echo "  make format-api                    # Format the OpenAPI schema"
 	@echo ""
 
-.PHONY: all android application client docker generate help lint test test-integration
+.PHONY: all android application client docker format-api generate help lint lint-api test test-integration
