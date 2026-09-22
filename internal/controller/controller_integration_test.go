@@ -512,16 +512,24 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	assert.Equal(t, int64(len(fixture.payload)), readyState.TargetBytes)
 	assert.Equal(t, readyState.TargetBytes, readyState.CompletedBytes)
 
-	done := make(chan struct{})
-	close(done)
-	activePreload := &preloadTask{
-		cancel:      func() {},
-		done:        done,
-		targetBytes: int64(len(fixture.payload)),
-		fileIndex:   0,
-		filePath:    "Sintel/Sintel.mp4",
+	unrelatedHash := metainfo.Hash{0xff}
+	unrelatedBudgetReleases := 0
+	unrelatedProtectionClears := 0
+	unrelatedPreload := &preloadTask{
+		infoHash:  unrelatedHash,
+		cancel:    func() {},
+		done:      make(chan struct{}),
+		protected: true,
+		releaseBudget: func() {
+			unrelatedBudgetReleases++
+		},
+		clearProtection: func() {
+			unrelatedProtectionClears++
+		},
 	}
-	ctrl.preloads.Store(ih, activePreload)
+	unrelatedPreload.ready.Store(true)
+	unrelatedPreload.doneOnce.Do(func() { close(unrelatedPreload.done) })
+	ctrl.preloads.Store(unrelatedHash, unrelatedPreload)
 	streamRequest, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, ih), http.NoBody)
 	require.NoError(t, err)
 	streamRequest.Header.Set("Range", "bytes=0-1023")
@@ -530,7 +538,11 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	require.NoError(t, streamResponse.Body.Close())
 	assert.Equal(t, http.StatusPartialContent, streamResponse.StatusCode)
 	_, stillPreloading = ctrl.preloads.Load(ih)
-	assert.False(t, stillPreloading, "playback should retire the active preload")
+	assert.False(t, stillPreloading, "playback should retire its ready preload")
+	_, unrelatedStillPreloading := ctrl.preloads.Load(unrelatedHash)
+	assert.False(t, unrelatedStillPreloading, "playback should release unrelated ready memory preloads")
+	assert.Equal(t, 1, unrelatedBudgetReleases)
+	assert.Equal(t, 1, unrelatedProtectionClears)
 }
 
 func TestIntegrationControllerLifecycle(t *testing.T) {

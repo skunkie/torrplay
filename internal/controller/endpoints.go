@@ -1884,13 +1884,20 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	if isFileStorage {
 		mode = stream.FileStorage
 	}
-	// Actual playback supersedes any speculative preload for this torrent.
-	// Cancel it before acquiring the playback reader so its workers and cache
-	// leases cannot compete with the stream under memory pressure.
-	if _, ok := c.preloads.Load(ih); ok {
-		c.cancelPreload(ih)
-	}
+	// Live playback pauses active preload workers because both claim pieces at
+	// the highest priority. Ready memory preloads also release their speculative
+	// cache leases so every active reader can use the full streaming budget. New
+	// requests stay queued until playback ends. Hold preloadsMu through acquisition
+	// so dispatch cannot race reader registration.
+	c.preloadsMu.Lock()
+	c.preloadPlaybackCount++
+	c.preparePreloadsForPlaybackLocked(ih, file.Path())
 	reader, release, err := pool.Acquire(file, mode)
+	if err != nil {
+		c.preloadPlaybackCount--
+		c.dispatchPreloadsLocked()
+	}
+	c.preloadsMu.Unlock()
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, stream.ErrPoolClosed) {
@@ -1899,7 +1906,13 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), status)
 		return
 	}
-	defer release()
+	defer func() {
+		release()
+		c.preloadsMu.Lock()
+		c.preloadPlaybackCount--
+		c.dispatchPreloadsLocked()
+		c.preloadsMu.Unlock()
+	}()
 
 	dlna.AddHeader(w, r)
 

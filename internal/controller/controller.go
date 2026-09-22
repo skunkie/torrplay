@@ -133,6 +133,7 @@ type Controller struct {
 	profilerServer       *http.Server
 	preloadReadyTTL      time.Duration
 	preloadActiveTasks   int
+	preloadPlaybackCount int
 	preloadQueue         []*preloadTask
 	router               *chi.Mux
 	settings             *api.Settings

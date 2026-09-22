@@ -309,6 +309,153 @@ func TestPreloadSchedulerLimitsConcurrencyAndReleasesCapacity(t *testing.T) {
 	ctrl.preloadsMu.Unlock()
 }
 
+func TestPreloadSchedulerResumesAfterPlayback(t *testing.T) {
+	ctrl := &Controller{preloadPlaybackCount: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	preload := &preloadTask{
+		ctx:           ctx,
+		infoHash:      metainfo.Hash{1},
+		cancel:        cancel,
+		done:          make(chan struct{}),
+		queued:        true,
+		reserveBudget: func() bool { return true },
+	}
+	preload.start = func() {
+		close(started)
+		preload.doneOnce.Do(func() { close(preload.done) })
+		ctrl.finishPreload(preload, false)
+	}
+	ctrl.preloads.Store(preload.infoHash, preload)
+	ctrl.preloadQueue = append(ctrl.preloadQueue, preload)
+
+	ctrl.preloadsMu.Lock()
+	ctrl.dispatchPreloadsLocked()
+	assert.True(t, preload.queued)
+	assert.False(t, preload.active)
+	ctrl.preloadPlaybackCount--
+	ctrl.dispatchPreloadsLocked()
+	ctrl.preloadsMu.Unlock()
+
+	require.Eventually(t, func() bool {
+		select {
+		case <-started:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, time.Millisecond)
+}
+
+func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing.T) {
+	ctrl := &Controller{preloadPlaybackCount: 1}
+
+	readyCtx, readyCancel := context.WithCancel(context.Background())
+	defer readyCancel()
+	var readyBudgetReleases, readyProtectionClears atomic.Int32
+	ready := &preloadTask{
+		ctx:       readyCtx,
+		infoHash:  metainfo.Hash{1},
+		cancel:    readyCancel,
+		done:      make(chan struct{}),
+		protected: true,
+		releaseBudget: func() {
+			readyBudgetReleases.Add(1)
+		},
+		clearProtection: func() {
+			readyProtectionClears.Add(1)
+		},
+	}
+	ready.ready.Store(true)
+	ready.doneOnce.Do(func() { close(ready.done) })
+	ctrl.preloads.Store(ready.infoHash, ready)
+
+	activeCtx, activeCancel := context.WithCancel(context.Background())
+	active := &preloadTask{
+		ctx:       activeCtx,
+		infoHash:  metainfo.Hash{2},
+		cancel:    activeCancel,
+		done:      make(chan struct{}),
+		active:    true,
+		protected: true,
+	}
+	ctrl.preloadActiveTasks = 1
+	ctrl.preloads.Store(active.infoHash, active)
+	go func() {
+		<-activeCtx.Done()
+		active.doneOnce.Do(func() { close(active.done) })
+	}()
+
+	ctrl.preloadsMu.Lock()
+	ctrl.preparePreloadsForPlaybackLocked(metainfo.Hash{3}, "playing.mkv")
+	ctrl.preloadsMu.Unlock()
+
+	_, ok := ctrl.preloads.Load(ready.infoHash)
+	assert.False(t, ok)
+	_, ok = ctrl.preloads.Load(active.infoHash)
+	assert.False(t, ok)
+	assert.Zero(t, ctrl.preloadActiveTasks)
+	assert.Error(t, activeCtx.Err())
+	assert.Equal(t, int32(1), readyBudgetReleases.Load())
+	assert.Equal(t, int32(1), readyProtectionClears.Load())
+}
+
+func TestPreparePreloadsForPlaybackReleasesReadyMemoryWithinTorrent(t *testing.T) {
+	ctrl := &Controller{preloadPlaybackCount: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var budgetReleases, protectionClears atomic.Int32
+	preload := &preloadTask{
+		ctx:       ctx,
+		infoHash:  metainfo.Hash{1},
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		filePath:  "next-episode.mkv",
+		protected: true,
+		releaseBudget: func() {
+			budgetReleases.Add(1)
+		},
+		clearProtection: func() {
+			protectionClears.Add(1)
+		},
+	}
+	preload.ready.Store(true)
+	preload.doneOnce.Do(func() { close(preload.done) })
+	ctrl.preloads.Store(preload.infoHash, preload)
+
+	ctrl.preloadsMu.Lock()
+	ctrl.preparePreloadsForPlaybackLocked(preload.infoHash, "current-episode.mkv")
+	ctrl.preloadsMu.Unlock()
+
+	_, ok := ctrl.preloads.Load(preload.infoHash)
+	assert.False(t, ok, "playback of another file must release the memory preload lease")
+	assert.Equal(t, int32(1), budgetReleases.Load())
+	assert.Equal(t, int32(1), protectionClears.Load())
+}
+
+func TestPreparePreloadsForPlaybackPreservesReadyFileStorage(t *testing.T) {
+	ctrl := &Controller{preloadPlaybackCount: 1}
+	preload := &preloadTask{
+		infoHash:  metainfo.Hash{1},
+		cancel:    func() {},
+		done:      make(chan struct{}),
+		filePath:  "cached.mkv",
+		protected: true,
+	}
+	preload.ready.Store(true)
+	preload.doneOnce.Do(func() { close(preload.done) })
+	ctrl.preloads.Store(preload.infoHash, preload)
+
+	ctrl.preloadsMu.Lock()
+	ctrl.preparePreloadsForPlaybackLocked(metainfo.Hash{2}, "playing.mkv")
+	ctrl.preloadsMu.Unlock()
+
+	current, ok := ctrl.preloads.Load(preload.infoHash)
+	require.True(t, ok)
+	assert.Same(t, preload, current)
+}
+
 func TestPreloadSchedulerSkipsCancelledQueuedTask(t *testing.T) {
 	ctrl := &Controller{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -560,6 +707,39 @@ func TestStartPreloadConcurrentSameFileIsIdempotent(t *testing.T) {
 		assert.Same(t, first, task)
 	}
 	ctrl.cancelPreload(to.InfoHash())
+}
+
+func TestStartPreloadQueuesWhilePlaybackIsActive(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	sintelFile, err := os.Open(sintelTorrentFile)
+	require.NoError(t, err)
+	metaInfo, err := metainfo.Load(sintelFile)
+	require.NoError(t, sintelFile.Close())
+	require.NoError(t, err)
+
+	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(metaInfo))
+	require.NoError(t, err)
+	<-to.GotInfo()
+	file := to.Files()[0]
+
+	ctrl.preloadsMu.Lock()
+	ctrl.preloadPlaybackCount = 1
+	ctrl.preloadsMu.Unlock()
+
+	preload := ctrl.startPreload(to, file, 0)
+	require.NotNil(t, preload)
+	assert.True(t, preload.queued)
+	assert.False(t, preload.active)
+	current, exists := ctrl.preloads.Load(to.InfoHash())
+	require.True(t, exists)
+	assert.Same(t, preload, current)
+
+	ctrl.cancelPreload(to.InfoHash())
+	ctrl.preloadsMu.Lock()
+	ctrl.preloadPlaybackCount = 0
+	ctrl.preloadsMu.Unlock()
 }
 
 func TestDeleteTorrentClearsCompletedPreload(t *testing.T) {

@@ -401,6 +401,12 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 // preloads still hold a reservation for the cache they pin, so admission may
 // have to evict one of them first.
 func (c *Controller) dispatchPreloadsLocked() {
+	// Preload range readers claim their complete range at PiecePriorityNow, so
+	// keep queued work registered but do not let it compete with live playback.
+	// The final playback release resumes this queue.
+	if c.preloadPlaybackCount > 0 {
+		return
+	}
 	for c.preloadActiveTasks < maxConcurrentPreloads && len(c.preloadQueue) > 0 {
 		preload := c.preloadQueue[0]
 		current, ok := c.preloads.Load(preload.infoHash)
@@ -729,9 +735,48 @@ func (c *Controller) evictReadyPreloadLocked(except *preloadTask) bool {
 	return true
 }
 
+// preparePreloadsForPlaybackLocked retires the preload for the file that is
+// about to play and stops unrelated workers that are still downloading. Ready
+// memory preloads also yield their speculative cache leases so concurrent live
+// readers retain the full readahead budget. Ready file-storage preloads do not
+// reserve memory and may remain cached; queued requests remain registered until
+// playback ends. The caller must hold preloadsMu and increment
+// preloadPlaybackCount before calling this method.
+func (c *Controller) preparePreloadsForPlaybackLocked(infoHash metainfo.Hash, filePath string) {
+	if current, ok := c.preloads.Load(infoHash); ok {
+		preload, isPreload := current.(*preloadTask)
+		if isPreload && preload != nil && preload.filePath == filePath &&
+			c.preloads.CompareAndDelete(infoHash, preload) {
+			c.releasePreloadLocked(preload, false)
+		}
+	}
+
+	c.preloads.Range(func(key, value any) bool {
+		preload, ok := value.(*preloadTask)
+		if !ok || preload == nil || preload.queued {
+			return true
+		}
+		// Active workers always yield bandwidth. A non-active task with a
+		// releaseBudget hook is a completed memory preload that still reserves
+		// and protects cache capacity, so it must yield that capacity as well.
+		if !preload.active && preload.releaseBudget == nil {
+			return true
+		}
+		c.preloads.Delete(key)
+		c.releasePreloadLocked(preload, false)
+		return true
+	})
+}
+
 func (c *Controller) cancelAllPreloads() {
 	c.preloadsMu.Lock()
 	defer c.preloadsMu.Unlock()
+	c.cancelAllPreloadsLocked()
+}
+
+// cancelAllPreloadsLocked releases every speculative cache lease and priority
+// claim. The caller must hold preloadsMu.
+func (c *Controller) cancelAllPreloadsLocked() {
 	c.preloadQueue = nil
 	c.preloads.Range(func(key, val any) bool {
 		c.preloads.Delete(key)

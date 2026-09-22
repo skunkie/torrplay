@@ -572,6 +572,40 @@ func TestPool_ReservePreloadBudgetCapsAggregateReservations(t *testing.T) {
 	}
 }
 
+func TestPool_ReleasePreloadBudgetRestoresConcurrentReaders(t *testing.T) {
+	p := newTestPool(t, Config{Logger: testLogger()})
+	const totalBudget = int64(1200)
+	if !p.SetReadaheadBudget(totalBudget) {
+		t.Fatal("expected initial readahead budget to be accepted")
+	}
+
+	for i := uint64(1); i <= 3; i++ {
+		p.readers[readerKey{infoHash: metainfo.Hash{byte(i)}, filePath: "f", readerID: i}] = &streamReader{
+			active:   true,
+			infoHash: metainfo.Hash{byte(i)},
+			readerID: i,
+			reader:   &mockReader{},
+		}
+	}
+
+	preloadHash := metainfo.Hash{9}
+	if got := p.ReservePreloadBudget(preloadHash, 600); got != 600 {
+		t.Fatalf("expected 600-byte preload reservation, got %d", got)
+	}
+	for _, sr := range p.readers {
+		if sr.readahead != 160 {
+			t.Fatalf("expected preload-reduced readahead 160, got %d", sr.readahead)
+		}
+	}
+
+	p.ReleasePreloadBudget(preloadHash)
+	for _, sr := range p.readers {
+		if sr.readahead != 320 {
+			t.Fatalf("expected restored readahead 320, got %d", sr.readahead)
+		}
+	}
+}
+
 func TestPool_SetReadaheadBudgetRejectsPreloadOvercommit(t *testing.T) {
 	p := newTestPool(t, Config{Logger: testLogger()})
 	if !p.SetReadaheadBudget(1000) {
