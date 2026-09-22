@@ -528,6 +528,18 @@ func TestTools(t *testing.T) {
 		assert.Contains(t, textContent.Text, "torrplay started")
 	})
 
+	t.Run("get_system_logs rejects invalid level", func(t *testing.T) {
+		tool := s.GetTool("get_system_logs")
+		require.NotNil(t, tool)
+		_, err := tool.Handler(ctx, mcp.CallToolRequest{
+			Params: mcp.CallToolParams{
+				Name:      "get_system_logs",
+				Arguments: map[string]any{"level": "TRACE"},
+			},
+		})
+		require.ErrorContains(t, err, "invalid log level")
+	})
+
 	t.Run("get_system_metrics", func(t *testing.T) {
 		tool := s.GetTool("get_system_metrics")
 		require.NotNil(t, tool)
@@ -743,6 +755,22 @@ func TestClientRequestParameters(t *testing.T) {
 	assert.Equal(t, magnet, (<-requests).URL.Query().Get("magnet"))
 }
 
+func TestSearchSystemLogsForwardsFilters(t *testing.T) {
+	var query url.Values
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query()
+		_ = json.NewEncoder(w).Encode([]api.LogEntry{{Level: "ERROR", Message: "metadata failed"}})
+	}))
+	t.Cleanup(ts.Close)
+
+	client := NewClient(ts.URL, "", ts.Client())
+	entries, err := client.SearchSystemLogs(context.Background(), "hash ABC", "ERROR")
+	require.NoError(t, err)
+	assert.Equal(t, "hash ABC", query.Get("q"))
+	assert.Equal(t, "ERROR", query.Get("level"))
+	assert.Equal(t, "metadata failed", entries[0].Message)
+}
+
 func TestClient_PreloadTorrent(t *testing.T) {
 	hash := "08ada5a7a6183aae1e09d831df6748d566095a10"
 	magnet := "magnet:?xt=urn:btih:" + hash
@@ -827,6 +855,7 @@ func TestValidateLoopbackAddress(t *testing.T) {
 	}
 }
 
+// TestServeSSE verifies that ServeSSE stops when its context is canceled.
 func TestServeSSE(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

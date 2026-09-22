@@ -35,6 +35,7 @@ interface Settings {
   friendlyName: string,
   logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
   logFormat?: 'json' | 'text',
+  logStoreSize?: number,
   maxMemory: number,
   playbackToken?: string,
   stremioToken?: string,
@@ -57,6 +58,13 @@ interface SystemMetrics {
   activeTorrents: number,
   downloadSpeed: number,
   uploadSpeed: number
+}
+
+interface LogEntry {
+  time: string,
+  level: string,
+  message: string,
+  data?: Record<string, unknown>
 }
 
 interface CreateTokenRequest {
@@ -214,6 +222,7 @@ interface PreloadResponse {
 export type {
   Auth,
   CreateTokenRequest,
+  LogEntry,
   MemoryStats,
   PieceInfo,
   PreloadRequest,

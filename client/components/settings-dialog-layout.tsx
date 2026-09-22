@@ -30,6 +30,10 @@ import { Auth, Settings, TorrentClient } from '@/lib/types/api';
 interface SettingsDialogLayoutProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
+  logsView: boolean,
+  onViewLogs: () => void,
+  onBackFromLogs: () => void,
+  logsContent: React.ReactNode,
   settings?: Settings | null,
   error?: Error | null,
   saving: boolean,
@@ -76,6 +80,10 @@ interface SettingsDialogLayoutProps {
 export function SettingsDialogLayout({
   open,
   onOpenChange,
+  logsView,
+  onViewLogs,
+  onBackFromLogs,
+  logsContent,
   settings,
   error,
   saving,
@@ -117,6 +125,22 @@ export function SettingsDialogLayout({
 }: SettingsDialogLayoutProps) {
   const IS_NATIVE = Capacitor.isNativePlatform();
   const IS_TAURI = isTauri();
+  const backFromLogsRef = React.useRef<HTMLButtonElement>(null);
+  const viewLogsRef = React.useRef<HTMLButtonElement>(null);
+  const previousLogsView = React.useRef(logsView);
+
+  React.useEffect(() => {
+    if (!open) {
+      previousLogsView.current = false;
+      return;
+    }
+    if (logsView && !previousLogsView.current) {
+      backFromLogsRef.current?.focus();
+    } else if (!logsView && previousLogsView.current) {
+      viewLogsRef.current?.focus();
+    }
+    previousLogsView.current = logsView;
+  }, [logsView, open]);
 
   const stremioManifestUrl = (() => {
     const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
@@ -183,18 +207,29 @@ export function SettingsDialogLayout({
   return (
     <Dialog open={open}
       onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className={logsView ? 'sm:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden' : undefined}>
         <DialogHeader>
-          <DialogTitle>Settings</DialogTitle>
-          <DialogDescription>Configure application settings</DialogDescription>
+          <DialogTitle>{logsView ? 'Application logs' : 'Settings'}</DialogTitle>
+          <DialogDescription>{logsView ? 'Search recent application events' : 'Configure application settings'}</DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={e => {
-          e.preventDefault();
-          if (!saving && (isApiUrlChangePending || canSaveServerSettings)) {
-            onSave();
-          }
-        }}>
+        {logsView && (
+          <>
+            <Button type='button'
+              ref={backFromLogsRef}
+              variant='outline'
+              className='self-start'
+              onClick={onBackFromLogs}>Back to Settings</Button>
+            {logsContent}
+          </>
+        )}
+        <form hidden={logsView}
+          onSubmit={e => {
+            e.preventDefault();
+            if (!saving && (isApiUrlChangePending || canSaveServerSettings)) {
+              onSave();
+            }
+          }}>
           <div tabIndex={0}
             className='grid gap-y-6 py-4 max-h-[60vh] overflow-y-auto pr-3 focus:outline-none'>
             {!IS_NATIVE && (
@@ -809,6 +844,10 @@ export function SettingsDialogLayout({
                       Format for application log output.
                     </p>
                   </div>
+                  <Button type='button'
+                    ref={viewLogsRef}
+                    variant='outline'
+                    onClick={onViewLogs}>View logs</Button>
                 </div>
               </div>
             )}

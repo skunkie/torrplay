@@ -251,12 +251,43 @@ func (c *Controller) DeleteTorrent(w http.ResponseWriter, _ *http.Request, ih me
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (c *Controller) GetLogs(w http.ResponseWriter, _ *http.Request) {
-	entries := logging.DefaultStore.Entries()
+func (c *Controller) GetLogs(w http.ResponseWriter, _ *http.Request, params api.GetLogsParams) {
+	level := strings.ToUpper(strings.TrimSpace(string(utils.Val(params.Level))))
+	switch level {
+	case "", "DEBUG", "INFO", "WARN", "ERROR":
+	default:
+		api.HTTPError(w, "invalid log level", http.StatusBadRequest)
+		return
+	}
+	entries := filterLogEntries(logging.DefaultStore.Entries(), strings.TrimSpace(utils.Val(params.Q)), level)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func filterLogEntries(entries []logging.LogEntry, query, level string) []logging.LogEntry {
+	query = strings.ToLower(query)
+	filtered := make([]logging.LogEntry, 0, len(entries))
+	for _, entry := range slices.Backward(entries) {
+		if level != "" && entry.Level.String() != level {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(entry.Message), query) {
+			found := false
+			for key, value := range entry.Data {
+				if strings.Contains(strings.ToLower(key+" "+fmt.Sprint(value)), query) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 // storageMemoryStats maps a storage MemoryStats snapshot to the API type.

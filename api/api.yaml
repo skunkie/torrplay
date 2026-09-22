@@ -647,8 +647,24 @@ paths:
       tags:
         - System
       summary: Get recent application logs.
-      description: Returns a list of the most recent log entries.
+      description: Returns retained log entries, newest first. Searches only the in-memory log buffer.
       operationId: getLogs
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive text to find in messages and structured fields.
+          schema:
+            type: string
+        - name: level
+          in: query
+          description: Exact log level to include.
+          schema:
+            type: string
+            enum:
+              - DEBUG
+              - INFO
+              - WARN
+              - ERROR
       responses:
         "200":
           description: A list of log entries.
@@ -658,6 +674,8 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/LogEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "500":

@@ -7,6 +7,7 @@ package logging
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -67,23 +68,34 @@ func TestStoreHandler_Enabled(t *testing.T) {
 }
 
 func TestStoreHandler_Handle(t *testing.T) {
-	store := NewStore(10)
-	mock := newMockHandler()
-	handler := NewStoreHandler(mock, store)
-	logger := slog.New(handler)
+	t.Run("stores record", func(t *testing.T) {
+		store := NewStore(10)
+		mock := newMockHandler()
+		handler := NewStoreHandler(mock, store)
+		logger := slog.New(handler)
 
-	logger.Info("test message", "key", "value")
+		logger.Info("test message", "key", "value")
 
-	// Check if log was stored.
-	entries := store.Entries()
-	assert.Len(t, entries, 1)
-	assert.Equal(t, "test message", entries[0].Message)
-	assert.Equal(t, slog.LevelInfo, entries[0].Level)
-	assert.Equal(t, "value", entries[0].Data["key"])
+		// Check if log was stored.
+		entries := store.Entries()
+		assert.Len(t, entries, 1)
+		assert.Equal(t, "test message", entries[0].Message)
+		assert.Equal(t, slog.LevelInfo, entries[0].Level)
+		assert.Equal(t, "value", entries[0].Data["key"])
 
-	// Check if underlying handler was called.
-	assert.True(t, mock.handled, "underlying handler's Handle should have been called")
-	assert.Contains(t, mock.buf.String(), "test message")
+		// Check if underlying handler was called.
+		assert.True(t, mock.handled, "underlying handler's Handle should have been called")
+		assert.Contains(t, mock.buf.String(), "test message")
+	})
+
+	t.Run("stores error details", func(t *testing.T) {
+		store := NewStore(1)
+		logger := slog.New(NewStoreHandler(newMockHandler(), store))
+		logger.Error("request failed", "error", errors.New("peer timed out"))
+
+		entries := store.Entries()
+		assert.Equal(t, "peer timed out", entries[0].Data["error"])
+	})
 }
 
 func TestStoreHandler_WithAttrs(t *testing.T) {

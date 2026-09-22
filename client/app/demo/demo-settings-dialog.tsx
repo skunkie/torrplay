@@ -7,10 +7,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { LogsViewLayout } from '@/components/logs-view-layout';
 import { SettingsDialogLayout } from '@/components/settings-dialog-layout';
 import { useAuth } from '@/lib/auth-context';
+import { copyLogEntries } from '@/lib/copy-logs';
+import { demoLogs } from '@/lib/demo-logs';
 import { demoDefaultSettings } from '@/lib/demo-settings';
-import { Auth, TorrentClient } from '@/lib/types/api';
+import { Auth, LogEntry, TorrentClient } from '@/lib/types/api';
 
 interface DemoSettingsDialogProps {
   open: boolean,
@@ -20,6 +23,8 @@ interface DemoSettingsDialogProps {
 const defaultSettings = demoDefaultSettings;
 
 export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogProps) {
+  const [logsView, setLogsView] = useState(false);
+  const [logEntries, setLogEntries] = useState<LogEntry[]>(demoLogs);
   const { settings, updateSettings } = useAuth();
   const [initialized, setInitialized] = useState(false);
 
@@ -54,6 +59,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   // Initialize local state from settings when dialog opens.
   useEffect(() => {
     if (!open) {
+      setLogsView(false);
       setInitialized(false);
       return;
     }
@@ -135,6 +141,21 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     <SettingsDialogLayout
       open={open}
       onOpenChange={onOpenChange}
+      logsView={logsView}
+      onViewLogs={() => setLogsView(true)}
+      onBackFromLogs={() => setLogsView(false)}
+      logsContent={<LogsViewLayout entries={logEntries}
+        loading={false}
+        retainedCount={settings.logStoreSize}
+        onRefresh={() => setLogEntries(current => [
+          { time: new Date().toISOString(), level: 'INFO', message: 'demo log view refreshed' },
+          ...current,
+        ])}
+        onCopyVisible={entries => {
+          void copyLogEntries(entries)
+            .then(() => toast.success('Logs copied'))
+            .catch(() => toast.error('Could not copy logs'));
+        }} />}
       settings={settings}
       error={null}
       saving={false}
