@@ -969,7 +969,7 @@ func computeRange(file *torrent.File, pieceLength, readahead, byteOffset int64) 
 		return int(beginPiece), int(beginPiece)
 	}
 
-	positionPiece := min(max(byteOffset/pieceLength+beginPiece, beginPiece), endPieceMax)
+	positionPiece := min(max((file.Offset()+byteOffset)/pieceLength, beginPiece), endPieceMax)
 	trailing := max(readaheadPieces/trailingReadaheadDivisor, 1)
 
 	startPiece := max(positionPiece-trailing, beginPiece)
@@ -1076,6 +1076,9 @@ func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead in
 	if torrentPieceCount > 0 && endPieceMax > torrentPieceCount {
 		endPieceMax = torrentPieceCount
 	}
+	// The read offset is file-relative, while priorityPlan works in torrent
+	// pieces. Include the file's offset within its first piece.
+	byteOffset += file.Offset() % pieceLength
 	return buildPriorityPlan(byteOffset, readahead, pieceLength, int64(file.BeginPieceIndex()), endPieceMax, fraction, nearFraction)
 }
 
@@ -1266,7 +1269,11 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 	if file != nil && file.Torrent() != nil && file.Torrent().Info() != nil && file.Torrent().Info().PieceLength > 0 {
 		pieceLength = file.Torrent().Info().PieceLength
 	}
-	currentPiece := newOffset / pieceLength
+	torrentOffset := newOffset
+	if file != nil {
+		torrentOffset += file.Offset()
+	}
+	currentPiece := torrentOffset / pieceLength
 	pieceChanged := (currentPiece != sr.lastPieceIdx) || (sr.lastPieceIdx < 0)
 	sr.lastPieceIdx = currentPiece
 
@@ -1340,7 +1347,7 @@ func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 			pieceLength = 1
 		}
 		start, end := computeRange(sr.file, pieceLength, sr.readahead, byteOffset)
-		position := max(int(byteOffset/pieceLength)+sr.file.BeginPieceIndex(), sr.file.BeginPieceIndex())
+		position := max(int((sr.file.Offset()+byteOffset)/pieceLength), sr.file.BeginPieceIndex())
 		lastPiece := sr.file.EndPieceIndex() - 1
 		if position > lastPiece {
 			position = lastPiece
