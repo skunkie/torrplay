@@ -29,6 +29,11 @@ fix(controller): move debug profiler to loopback-only listener
 - Add coverage for listener isolation, settings transitions, and live logger replacement.
 ```
 
+## Code Organization
+
+- Group functions and methods by responsibility so a reader can follow the code's behavior. Keep a public entry point near its private helpers, and preserve meaningful call or lifecycle order.
+- Within a group of independent peer functions or methods, place new declarations alphabetically by name when that makes them easier to find. Follow the surrounding file's established order when it is clearer; do not reorder unrelated declarations solely to alphabetize them.
+
 ## Build & Code Generation
 
 - **API Contract Design**:
@@ -39,7 +44,7 @@ fix(controller): move debug profiler to loopback-only listener
   - Preserve existing legacy and third-party compatibility contracts; do not rename TorrServer, Stremio, DLNA/UPnP, MCP, or other externally defined surfaces solely to conform to these conventions.
 - **OpenAPI Style**: When editing `api/api.yaml`, follow the existing formatting, structure, and prose style in the surrounding definitions. Run `make format-api` to apply the pinned `yamlfmt` configuration and `make lint-api` to verify it.
 - **OpenAPI Schema Sync**: Run `go generate ./...` whenever modifying `api/api.yaml`, `api/cfg.yaml`, or `internal/api/generate.go` to regenerate `internal/api/api.gen.go` and its embedded `swaggerSpec`.
-- **Client Type Parity**: Keep TypeScript definitions in `client/lib/types/api.ts` synchronized with OpenAPI schema updates.
+- **Client Type Parity**: Keep TypeScript definitions in `client/lib/types/api.ts` synchronized with OpenAPI schema updates for all models and endpoints consumed by the client; do not mirror unused external or third-party compatibility payloads.
 - **Zero Diff Verification**: Verify that running `go generate ./...` produces no unstaged changes before committing.
 
 ## Testing & Quality Standards
@@ -59,6 +64,11 @@ fix(controller): move debug profiler to loopback-only listener
   pnpm --prefix client lint
   pnpm --prefix client build
   ```
+- **Test Naming**:
+  - Name a test of a single function `TestFunction` and a test of a single type's method `TestType_Method`, capitalizing unexported names, for example `TestReadaheadForShare` or `TestClient_Counters`.
+  - Name a test of an endpoint, flow, or behavior spanning several units with a plain descriptive name, for example `TestUpdateSettingsRollsBackFailedMemoryResize`. Treat HTTP endpoint tests and controller tests that exercise several subsystems as flow tests.
+  - Express scenarios as subtests or table cases with `t.Run` and descriptive lowercase names. Reserve a `TestType_Method_Scenario` name for a standalone regression test that cannot share its parent's setup.
+  - Do not rename existing tests solely to conform to this convention.
 - **Goroutine Leak Detection**: Use `testutil.VerifyTestMain(m)` in packages whose tests start repository-owned background goroutines or asynchronous services. Add a package-level `TestMain` when new tests introduce that lifecycle risk; simple synchronous test packages do not require one.
 - **Test Coverage & Regression Prevention**:
   - Accompany every bug fix, refactor, and new feature with dedicated unit and integration tests covering edge cases, state transitions, and error paths.
@@ -73,6 +83,8 @@ fix(controller): move debug profiler to loopback-only listener
 
 ## Core Architectural Invariants
 
+- **File Storage Requires Database Persistence**:
+  - Only torrents saved to the database may use file storage. Torrents loaded without a database record, including link resolution and temporary playback, must use memory storage.
 - **Lock Ordering & Concurrency**:
   - Never acquire outer/parent mutexes while holding inner resource locks (e.g. storage client vs piece mutexes).
   - Never hold `Controller.mu` across blocking network calls, long-running database operations, or torrent lifecycle drops.
