@@ -558,6 +558,9 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 				if query.Has("token") {
 					query.Set("token", "[REDACTED]")
 				}
+				if r.URL.Path == "/api/system/logs" && query.Has("q") {
+					query.Set("q", "[REDACTED]")
+				}
 				logAttrs = append(logAttrs, slog.String("query", query.Encode()))
 			}
 			logAttrs = append(logAttrs, slog.String("user-agent", r.UserAgent()))

@@ -1734,6 +1734,12 @@ func TestSlogMiddlewareRedactsTokens(t *testing.T) {
 			expectedPath:  "/api/v1/stream",
 		},
 		{
+			name:          "log search query is redacted",
+			requestURL:    "/api/system/logs?q=private-search-term",
+			unexpectedStr: "private-search-term",
+			expectedPath:  "/api/system/logs",
+		},
+		{
 			name:          "stremio unauthenticated path is not altered",
 			requestURL:    "/stremio/manifest.json",
 			unexpectedStr: "[REDACTED]",

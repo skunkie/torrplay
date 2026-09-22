@@ -7,6 +7,7 @@ package logging
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -84,6 +85,15 @@ func TestStoreHandler_Handle(t *testing.T) {
 	// Check if underlying handler was called.
 	assert.True(t, mock.handled, "underlying handler's Handle should have been called")
 	assert.Contains(t, mock.buf.String(), "test message")
+}
+
+func TestStoreHandler_StoresErrorDetails(t *testing.T) {
+	store := NewStore(1)
+	logger := slog.New(NewStoreHandler(newMockHandler(), store))
+	logger.Error("request failed", "error", errors.New("peer timed out"))
+
+	entries := store.Entries()
+	assert.Equal(t, "peer timed out", entries[0].Data["error"])
 }
 
 func TestStoreHandler_WithAttrs(t *testing.T) {

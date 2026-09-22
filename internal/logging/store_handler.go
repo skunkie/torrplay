@@ -40,11 +40,11 @@ func (h *StoreHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 	// Add attributes from the handler itself.
 	for _, a := range h.attrs {
-		logEntry.Data[a.Key] = a.Value.Any()
+		logEntry.Data[a.Key] = storedValue(a.Value)
 	}
 	// Add attributes from the record.
 	r.Attrs(func(a slog.Attr) bool {
-		logEntry.Data[a.Key] = a.Value.Any()
+		logEntry.Data[a.Key] = storedValue(a.Value)
 		return true
 	})
 
@@ -53,6 +53,14 @@ func (h *StoreHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	// Pass to the next handler in the chain.
 	return h.handler.Handle(ctx, r)
+}
+
+func storedValue(value slog.Value) any {
+	resolved := value.Resolve().Any()
+	if err, ok := resolved.(error); ok {
+		return err.Error()
+	}
+	return resolved
 }
 
 // WithAttrs implements slog.Handler.
