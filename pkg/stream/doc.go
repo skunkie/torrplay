@@ -54,8 +54,12 @@
 //
 // When a reader is acquired, released, or parked, the pool redistributes the total
 // memory readahead budget among active memory-storage readers. File-storage
-// readers retain their configured FileReadaheadBytes. This ensures no single
-// reader monopolizes the torrent client's download capacity while others starve.
+// readers retain their configured FileReadaheadBytes while active. Competing idle
+// readers are parked immediately whenever playback or preload work is active, so
+// released HTTP range requests cannot keep downloading outside the shared budget.
+// The last idle reader may remain warm until its normal park timeout. This ensures
+// no stale reader monopolizes the torrent client's download capacity while active
+// work starves.
 //
 // # Idle GC
 //
@@ -95,7 +99,9 @@
 //			Registry:           nil, // pass a storage.Client here to enable eviction protection
 //		})
 //		defer pool.Close()
-//		pool.SetReadaheadBudget(256 << 20)
+//		if !pool.SetReadaheadBudget(256 << 20) {
+//			panic("readahead budget conflicts with active preload reservations")
+//		}
 //
 //		// Acquire returns the bounded io.ReadSeeker expected by http.ServeContent.
 //		// reader, release, err := pool.Acquire(file, stream.MemoryStorage)

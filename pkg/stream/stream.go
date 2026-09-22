@@ -493,6 +493,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 			sr.readahead = p.cfg.FileReadaheadBytes
 			sr.reader.SetReadahead(p.cfg.FileReadaheadBytes)
 			p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0)
+			p.parkCompetingIdleReadersLocked()
 		} else {
 			p.refreshReadaheadLocked(p.readaheadBudget)
 		}
@@ -564,6 +565,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	case isPreload:
 		sr.readahead = preloadEnd - preloadStart
 		reader.SetReadaheadFunc(preloadReadaheadFunc(preloadEnd))
+		p.parkCompetingIdleReadersLocked()
 		// Claimed synchronously under p.mu, unlike playback's prioritizeAsync
 		// (see updateActiveRange). The claim has to be atomic with reader
 		// creation or a concurrent release could race it, and preload pays the
@@ -578,6 +580,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
 		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0)
+		p.parkCompetingIdleReadersLocked()
 	default:
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	}
@@ -651,11 +654,12 @@ func preloadPriorityPlan(file *torrent.File, start, end int64) []prioritizedPiec
 // release marks a reader as idle and clears active ranges.
 // Called immediately after the HTTP request ends (via defer in streamFile).
 //
-// The reader's context is intentionally NOT cancelled here. The underlying
-// torrent.Reader continues downloading pieces inside its read window while
-// idle, so that when the reader is next acquired the data is already cached
-// and playback can resume without a fetch stall. The context is cancelled
-// only when the reader is evicted by idleGC or when the pool is closed.
+// The reader's context is intentionally NOT cancelled here. The final reader
+// may continue warming its read window while no other work is active. As soon
+// as another playback or preload reader is active, competing idle readers are
+// parked so stale windows cannot consume bandwidth outside the shared budget.
+// The context is cancelled only when the reader is evicted by idleGC or when
+// the pool is closed.
 //
 // Note: ClearActiveRange is called unconditionally here, which tears down
 // eviction protection the moment the reader becomes idle. During the gap
@@ -711,6 +715,8 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 		delete(p.readers, key)
 		if p.readaheadBudget > 0 {
 			p.refreshReadaheadLocked(p.readaheadBudget)
+		} else {
+			p.parkCompetingIdleReadersLocked()
 		}
 		return
 	}
@@ -749,6 +755,8 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 
 	if p.readaheadBudget > 0 {
 		p.refreshReadaheadLocked(p.readaheadBudget)
+	} else {
+		p.parkCompetingIdleReadersLocked()
 	}
 }
 
@@ -814,6 +822,7 @@ func (p *Pool) countReadersLocked(infoHash metainfo.Hash, filePath string) int {
 // File-storage readers keep their fixed readahead and are never divided.
 // Must be called with p.mu held.
 func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
+	p.parkCompetingIdleReadersLocked()
 	readahead := p.computeReadahead(totalReadaheadBudget)
 
 	for key, sr := range p.readers {
@@ -841,23 +850,68 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		slog.Int64("perReader", readahead))
 }
 
+// parkCompetingIdleReadersLocked stops stale read windows whenever playback
+// or preload work is active. An idle reader can remain warm only while it is
+// the pool's sole work, preserving fast reuse without allowing released HTTP
+// range requests to accumulate unbudgeted downloads. Must be called with p.mu
+// held.
+func (p *Pool) parkCompetingIdleReadersLocked() {
+	hasActiveWork := len(p.preloadBudgets) > 0
+	if !hasActiveWork {
+		for _, sr := range p.readers {
+			if sr.active {
+				hasActiveWork = true
+				break
+			}
+		}
+	}
+	if !hasActiveWork {
+		return
+	}
+
+	for _, sr := range p.readers {
+		if sr.active || sr.readahead <= 0 {
+			continue
+		}
+		sr.readahead = 0
+		if sr.reader != nil {
+			sr.reader.SetReadahead(0)
+		}
+		p.logger.Debug("parked competing idle reader",
+			slog.String("hash", sr.infoHash.HexString()),
+			slog.Uint64("readerID", sr.readerID))
+	}
+}
+
 // SetReadaheadBudget recalculates readahead for all active memory-storage
 // readers using the provided total budget. Negative budgets are treated as
-// zero. File-storage readers keep their fixed readahead.
-func (p *Pool) SetReadaheadBudget(budgetBytes int64) {
+// zero. File-storage readers keep their fixed readahead. It returns false and
+// leaves the previous budget unchanged if existing preload reservations would
+// exceed the new preload share.
+func (p *Pool) SetReadaheadBudget(budgetBytes int64) bool {
 	if budgetBytes < 0 {
 		budgetBytes = 0
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	reserved := int64(0)
+	for _, bytes := range p.preloadBudgets {
+		reserved += bytes
+	}
+	if reserved > preloadProtectionCapacity(budgetBytes) {
+		return false
+	}
 	p.readaheadBudget = budgetBytes
 	p.refreshReadaheadLocked(budgetBytes)
+	return true
 }
 
 // ReservePreloadBudget admits a preload into the same global protection budget
 // used by streaming readahead. Replacing a reservation for the same torrent is
-// atomic. The returned byte count may be smaller than requested when other
-// active preloads already consume the budget.
+// atomic. Preloads may use otherwise-idle capacity but always leave a bounded
+// playback reserve, so a newly acquired stream cannot be reduced to the
+// one-byte minimum by completed preload leases. The returned byte count may be
+// smaller than requested when other preloads already consume the preload share.
 func (p *Pool) ReservePreloadBudget(infoHash metainfo.Hash, requested int64) int64 {
 	if requested < 0 {
 		requested = 0
@@ -871,7 +925,8 @@ func (p *Pool) ReservePreloadBudget(infoHash metainfo.Hash, requested int64) int
 			reserved += bytes
 		}
 	}
-	granted := min(requested, max(p.readaheadBudget-reserved, 0))
+	preloadCapacity := preloadProtectionCapacity(p.readaheadBudget)
+	granted := min(requested, max(preloadCapacity-reserved, 0))
 	if granted > 0 {
 		p.preloadBudgets[infoHash] = granted
 	} else {
@@ -935,6 +990,14 @@ func (p *Pool) availableProtectionBudgetLocked(totalBudget int64) int64 {
 		totalBudget -= reserved
 	}
 	return max(totalBudget, 0)
+}
+
+// preloadProtectionCapacity returns the portion of the shared protection
+// budget that speculative preload leases may reserve. The remainder is kept
+// available for playback readers.
+func preloadProtectionCapacity(totalBudget int64) int64 {
+	playbackReserve := min(totalBudget/2, 2*int64(DefaultFileBoundaryBytes))
+	return max(totalBudget-playbackReserve, 0)
 }
 
 type readerFileKey struct {

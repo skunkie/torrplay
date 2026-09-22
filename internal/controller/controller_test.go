@@ -1549,7 +1549,7 @@ func TestController_CleanupExpiredTorrents_ReleasesCompletedPreload(t *testing.T
 	ctrl.torrentTracker.mu.Unlock()
 
 	ctrl.streamPool.SetReadaheadBudget(1000)
-	require.Equal(t, int64(1000), ctrl.streamPool.ReservePreloadBudget(ih, 1000))
+	require.Equal(t, int64(500), ctrl.streamPool.ReservePreloadBudget(ih, 1000))
 	task := &preloadTask{
 		infoHash: ih,
 		cancel:   func() {},
@@ -1569,7 +1569,7 @@ func TestController_CleanupExpiredTorrents_ReleasesCompletedPreload(t *testing.T
 	_, tracked := ctrl.torrentTracker.torrents[ih]
 	ctrl.torrentTracker.mu.RUnlock()
 	assert.False(t, tracked)
-	assert.Equal(t, int64(1000), ctrl.streamPool.ReservePreloadBudget(otherHash, 1000))
+	assert.Equal(t, int64(500), ctrl.streamPool.ReservePreloadBudget(otherHash, 1000))
 	ctrl.streamPool.ReleasePreloadBudget(otherHash)
 }
 

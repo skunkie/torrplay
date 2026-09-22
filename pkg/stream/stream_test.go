@@ -543,30 +543,58 @@ func TestPool_ComputeReadahead_MinimumOne(t *testing.T) {
 
 func TestPool_ReservePreloadBudgetCapsAggregateReservations(t *testing.T) {
 	p := newTestPool(t, Config{Logger: testLogger()})
-	p.SetReadaheadBudget(1000)
+	if !p.SetReadaheadBudget(1000) {
+		t.Fatal("expected initial readahead budget to be accepted")
+	}
 	firstHash := metainfo.Hash{1}
 	secondHash := metainfo.Hash{2}
 
-	if got := p.ReservePreloadBudget(firstHash, 600); got != 600 {
-		t.Fatalf("expected first preload to reserve 600, got %d", got)
+	if got := p.ReservePreloadBudget(firstHash, 300); got != 300 {
+		t.Fatalf("expected first preload to reserve 300, got %d", got)
 	}
-	if got := p.ReservePreloadBudget(secondHash, 600); got != 400 {
-		t.Fatalf("expected second preload to receive remaining 400, got %d", got)
+	if got := p.ReservePreloadBudget(secondHash, 300); got != 200 {
+		t.Fatalf("expected second preload to receive the remaining 200-byte preload share, got %d", got)
 	}
-	if got := p.ReservePreloadBudget(firstHash, 800); got != 600 {
-		t.Fatalf("expected replacement reservation to remain capped at 600, got %d", got)
+	if got := p.ReservePreloadBudget(firstHash, 400); got != 300 {
+		t.Fatalf("expected replacement reservation to remain capped at 300, got %d", got)
 	}
 
 	p.ReleasePreloadBudget(secondHash)
-	if got := p.ReservePreloadBudget(firstHash, 800); got != 800 {
-		t.Fatalf("expected released capacity to become available, got %d", got)
+	if got := p.ReservePreloadBudget(firstHash, 400); got != 400 {
+		t.Fatalf("expected released preload capacity to become available, got %d", got)
 	}
 	p.mu.Lock()
 	available := p.availableProtectionBudgetLocked(p.readaheadBudget)
 	boundaryBytes := p.boundaryBytesPerFileLocked(available, 1)
 	p.mu.Unlock()
-	if available != 200 || boundaryBytes != 50 {
-		t.Fatalf("expected boundaries to share the remaining 200-byte budget, got available=%d boundary=%d", available, boundaryBytes)
+	if available != 600 || boundaryBytes != 150 {
+		t.Fatalf("expected playback to retain 600 bytes with 150-byte boundaries, got available=%d boundary=%d", available, boundaryBytes)
+	}
+}
+
+func TestPool_SetReadaheadBudgetRejectsPreloadOvercommit(t *testing.T) {
+	p := newTestPool(t, Config{Logger: testLogger()})
+	if !p.SetReadaheadBudget(1000) {
+		t.Fatal("expected initial readahead budget to be accepted")
+	}
+	infoHash := metainfo.Hash{1}
+	if got := p.ReservePreloadBudget(infoHash, 400); got != 400 {
+		t.Fatalf("expected 400-byte preload reservation, got %d", got)
+	}
+
+	if p.SetReadaheadBudget(600) {
+		t.Fatal("expected budget reduction to reject an existing 400-byte reservation")
+	}
+	p.mu.Lock()
+	budgetAfterRejection := p.readaheadBudget
+	availableAfterRejection := p.availableProtectionBudgetLocked(p.readaheadBudget)
+	p.mu.Unlock()
+	if budgetAfterRejection != 1000 || availableAfterRejection != 600 {
+		t.Fatalf("rejected update changed the pool: budget=%d available=%d", budgetAfterRejection, availableAfterRejection)
+	}
+	p.ReleasePreloadBudget(infoHash)
+	if !p.SetReadaheadBudget(600) {
+		t.Fatal("expected budget reduction after releasing preload reservation")
 	}
 }
 
@@ -885,8 +913,8 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 	if sr1.readahead != 800 {
 		t.Fatalf("expected active reader readahead=800, got %d", sr1.readahead)
 	}
-	if sr2.readahead != 100 {
-		t.Fatalf("expected idle reader readahead unchanged=100, got %d", sr2.readahead)
+	if sr2.readahead != 0 {
+		t.Fatalf("expected competing idle reader to be parked, got readahead=%d", sr2.readahead)
 	}
 }
 
@@ -1295,10 +1323,11 @@ func TestPool_ReadaheadRebalance_Integration(t *testing.T) {
 		}
 	}
 
-	// Release reader 2: remaining readers split the protected budget.
+	// Release reader 2: it is parked while the remaining active readers split
+	// the protected budget.
 	p.release(infoHash, "f", 2)
-	if srs[1].readahead != 2666 {
-		t.Fatalf("released reader 2 should keep readahead=2666, got %d", srs[1].readahead)
+	if srs[1].readahead != 0 {
+		t.Fatalf("released reader 2 should be parked, got readahead=%d", srs[1].readahead)
 	}
 	for _, sr := range []*streamReader{srs[0], srs[2]} {
 		if sr.readahead != 4000 {
@@ -1311,8 +1340,8 @@ func TestPool_ReadaheadRebalance_Integration(t *testing.T) {
 
 	// Release reader 0: the remaining reader gets 8000 ahead + 2000 trailing.
 	p.release(infoHash, "f", 1)
-	if srs[0].readahead != 4000 {
-		t.Fatalf("released reader 0 should keep readahead=4000, got %d", srs[0].readahead)
+	if srs[0].readahead != 0 {
+		t.Fatalf("released reader 0 should be parked, got readahead=%d", srs[0].readahead)
 	}
 	if srs[2].readahead != 8000 {
 		t.Fatalf("active reader 2: expected readahead 8000, got %d", srs[2].readahead)
@@ -1347,25 +1376,80 @@ func TestPool_ReadaheadRebalance_Integration(t *testing.T) {
 	}
 }
 
+func TestPool_ReadaheadRebalance_LastIdleReaderStaysWarm(t *testing.T) {
+	p := newTestPool(t, Config{Logger: testLogger()})
+	infoHash := metainfo.Hash{6}
+	mr := &mockReader{readahead: 8000}
+	sr := &streamReader{
+		active:    true,
+		infoHash:  infoHash,
+		readerID:  1,
+		readahead: 8000,
+		reader:    mr,
+	}
+	p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+	p.readaheadBudget = 10000
+
+	p.release(infoHash, "f", 1)
+
+	if sr.readahead != 8000 || mr.getReadahead() != 8000 {
+		t.Fatalf("last idle reader should stay warm, got reader=%d underlying=%d", sr.readahead, mr.getReadahead())
+	}
+}
+
+func TestPool_ReservePreloadBudgetParksIdleReader(t *testing.T) {
+	p := newTestPool(t, Config{Logger: testLogger()})
+	infoHash := metainfo.Hash{7}
+	mr := &mockReader{readahead: 8000}
+	sr := &streamReader{
+		infoHash:  infoHash,
+		readerID:  1,
+		readahead: 8000,
+		reader:    mr,
+	}
+	p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+	p.readaheadBudget = 10000
+
+	if got := p.ReservePreloadBudget(metainfo.Hash{8}, 5000); got != 5000 {
+		t.Fatalf("expected 5000-byte preload reservation, got %d", got)
+	}
+	if sr.readahead != 0 || mr.getReadahead() != 0 {
+		t.Fatalf("preload should park idle reader, got reader=%d underlying=%d", sr.readahead, mr.getReadahead())
+	}
+}
+
 func TestPool_ReadaheadRebalance_PoolZero(t *testing.T) {
 	p := newTestPool(t, Config{
 		Logger: testLogger(),
 	})
 	infoHash := metainfo.Hash{7}
 
-	sr := &streamReader{
+	released := &streamReader{
 		active:        true,
 		infoHash:      infoHash,
 		readerID:      1,
 		readahead:     500,
 		isFileStorage: false,
+		reader:        &mockReader{readahead: 500},
 	}
-	p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+	remaining := &streamReader{
+		active:        true,
+		infoHash:      infoHash,
+		readerID:      2,
+		readahead:     500,
+		isFileStorage: false,
+		reader:        &mockReader{readahead: 500},
+	}
+	p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = released
+	p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 2}] = remaining
 
 	p.release(infoHash, "f", 1)
 
-	if sr.readahead != 500 {
-		t.Fatalf("expected readahead unchanged at 500 when readaheadBudget is 0, got %d", sr.readahead)
+	if released.readahead != 0 || released.reader.(*mockReader).getReadahead() != 0 {
+		t.Fatalf("released reader should be parked while another reader is active, got reader=%d underlying=%d", released.readahead, released.reader.(*mockReader).getReadahead())
+	}
+	if remaining.readahead != 500 {
+		t.Fatalf("zero-budget parking should not redistribute active reader readahead, got %d", remaining.readahead)
 	}
 }
 
