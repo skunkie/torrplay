@@ -444,6 +444,21 @@ describe('DemoSettingsDialog', () => {
     });
   });
 
+  it('shows INFO when demo settings contain an unsupported log level', async () => {
+    currentSettings.logLevel = 'INFO+1' as typeof currentSettings.logLevel;
+
+    render(
+      <DemoAuthWrapper settings={currentSettings}>
+        <DemoSettingsDialog open={true}
+          onOpenChange={vi.fn()} />
+      </DemoAuthWrapper>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('combobox', { name: /log level/i })).toHaveTextContent('INFO');
+    });
+  });
+
   it('opens demo logs and returns without losing unsaved settings', async () => {
     setupMocks();
     render(

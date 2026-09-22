@@ -14,6 +14,7 @@ import { getSystemLogs } from '@/lib/api/system';
 import { getApiBaseUrl } from '@/lib/api-client';
 import { useAuth } from '@/lib/auth-context';
 import { copyLogEntries } from '@/lib/copy-logs';
+import { LogLevel, normalizeLogLevel } from '@/lib/log-level';
 import { Auth, Settings, TorrentClient } from '@/lib/types/api';
 
 import { LogsViewLayout } from './logs-view-layout';
@@ -66,7 +67,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [corsAllowedOrigins, setCorsAllowedOrigins] = useState<string[]>([]);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
-  const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
+  const [logLevel, setLogLevel] = useState<LogLevel>('INFO');
   const [logFormat, setLogFormat] = useState<'json' | 'text'>('text');
 
   // State for API URL.
@@ -111,7 +112,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
-      setLogLevel(settings.logLevel || 'INFO');
+      setLogLevel(normalizeLogLevel(settings.logLevel));
       setLogFormat(settings.logFormat || 'text');
     }
   }, [settings, open, IS_TAURI]);
@@ -286,7 +287,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setCorsAllowedOrigins(settings.corsAllowedOrigins || []);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
-      setLogLevel(settings.logLevel || 'INFO');
+      setLogLevel(normalizeLogLevel(settings.logLevel));
       setLogFormat(settings.logFormat || 'text');
     }
   };

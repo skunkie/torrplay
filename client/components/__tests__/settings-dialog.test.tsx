@@ -601,6 +601,19 @@ describe('SettingsDialog', () => {
     });
   });
 
+  it('repairs an unsupported server log level on save', async () => {
+    settingsRef.current = buildMockSettings({ logLevel: 'INFO+1' });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+    await waitFor(() => expect(logLevelSelect).toHaveTextContent('INFO'));
+
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({ logLevel: 'INFO' })));
+  });
+
   it('Torrent Client accordion is expanded by default', async () => {
     render(<SettingsDialog open={true}
       onOpenChange={vi.fn()} />);

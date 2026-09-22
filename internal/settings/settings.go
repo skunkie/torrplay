@@ -97,7 +97,7 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 		target.LogFormat = defaults.LogFormat
 		changed = true
 	}
-	if target.LogLevel == nil {
+	if target.LogLevel == nil || !ValidLogLevel(*target.LogLevel) {
 		target.LogLevel = defaults.LogLevel
 		changed = true
 	}
@@ -184,4 +184,14 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 	}
 
 	return changed
+}
+
+// ValidLogLevel reports whether a level can be represented by the settings API.
+func ValidLogLevel(level slog.Level) bool {
+	switch level {
+	case slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError:
+		return true
+	default:
+		return false
+	}
 }
