@@ -95,6 +95,22 @@ func createMultiPieceTestMetaInfo(t *testing.T) *metainfo.MetaInfo {
 	return &metainfo.MetaInfo{InfoBytes: infoBytes}
 }
 
+func createMisalignedFileTestMetaInfo(t *testing.T) *metainfo.MetaInfo {
+	t.Helper()
+	info := &metainfo.Info{
+		Name:        "split-torrent",
+		PieceLength: 64,
+		Pieces:      make([]byte, 180), // 9 pieces of 64 bytes.
+		Files: []metainfo.FileInfo{
+			{Length: 32, Path: []string{"header.bin"}},
+			{Length: 512, Path: []string{"video.bin"}},
+		},
+	}
+	infoBytes, err := bencode.Marshal(info)
+	require.NoError(t, err)
+	return &metainfo.MetaInfo{InfoBytes: infoBytes}
+}
+
 // addTestTorrent creates a proper torrent with a single 64-byte file.
 func addTestTorrent(t *testing.T, c *torrent.Client) (*torrent.Torrent, *torrent.File) {
 	t.Helper()
@@ -996,6 +1012,38 @@ func TestComputeRange_Integration_MidFile(t *testing.T) {
 
 	release()
 	pool.Close()
+}
+
+func TestPool_MisalignedFileOffsets(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, _ := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
+	file := to.Files()[1]
+	require.Equal(t, int64(32), file.Offset())
+	reg := &stubRegistry{}
+	pool := New(Config{Registry: reg, Logger: testLogger()})
+	defer pool.Close()
+	pool.SetReadaheadBudget(64)
+
+	_, release, err := pool.Acquire(file, MemoryStorage)
+	require.NoError(t, err)
+	defer release()
+
+	key := readerKey{infoHash: to.InfoHash(), filePath: file.Path(), readerID: 1}
+	pool.updateActiveRange(to.InfoHash(), key, file, nil, 31)
+	setsBeforeBoundary := reg.sets
+	pool.updateActiveRange(to.InfoHash(), key, file, nil, 32)
+	assert.Equal(t, setsBeforeBoundary+1, reg.sets, "crossing a torrent piece must refresh the active range")
+	assert.Equal(t, 2, reg.last.endPiece, "readahead must follow the actual torrent piece")
+
+	positions := pool.ReaderPositions(to.InfoHash())
+	require.Len(t, positions, 1)
+	assert.Equal(t, 1, positions[0].Position)
+	assert.Equal(t, 2, positions[0].End)
+
+	plan := pool.prioritizeNextPieces(file, 32, 128, 1, 0.5)
+	require.Len(t, plan, 2)
+	assert.Equal(t, 2, plan[0].index, "the first priority should be beyond the current torrent piece")
+	assert.Equal(t, 3, plan[1].index)
 }
 
 func TestPool_PriorityClaims_OverlappingReaders(t *testing.T) {

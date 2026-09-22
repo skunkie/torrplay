@@ -46,12 +46,19 @@ var ErrEvictionTargetNotReached = errors.New("eviction target not reached")
 
 // Client implements the storage.Client interface from anacrolix/torrent.
 type Client struct {
+	// allocationCond wakes allocations that are temporarily blocked behind
+	// unpublished buffers. It uses mu as its locker.
+	allocationCond *sync.Cond
+	// allocations tracks reservations until their buffers are published or refunded.
+	allocations sync.WaitGroup
 	// activeRanges tracks piece-index windows that readers are actively consuming.
 	// Pieces inside these ranges are protected from standard LRU eviction, except
 	// as a last resort under severe memory pressure (see emergency eviction).
 	activeRanges map[activeRangeKey]activeRange
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
+	// closed is protected by mu and rejects new work before closeCh is signaled.
+	closed bool
 	// fileBoundaries tracks head and tail piece ranges for media files being streamed
 	// or preloaded, protecting container metadata from standard LRU eviction.
 	fileBoundaries map[activeRangeKey]fileBoundary
@@ -62,6 +69,9 @@ type Client struct {
 	mu        sync.RWMutex
 	// pieces stores the metadata and data for each piece across all torrents.
 	pieces map[pieceKey]*pieceData
+	// pendingAllocations counts reservations whose buffers have not yet been
+	// published or refunded. It is protected by mu.
+	pendingAllocations int
 	// torrents tracks the state for each torrent being managed.
 	torrents map[metainfo.Hash]*torrentState
 	// used is the total memory currently consumed by piece data.
@@ -177,8 +187,15 @@ type fileBoundary struct {
 // torrentState holds the state specific to a single torrent.
 type torrentState struct {
 	mu          sync.RWMutex
+	openHandles int   // Number of live TorrentImpl handles; protected by Client.mu.
 	pieceMemory int64 // Memory used by this torrent.
 	totalPieces int   // Total number of pieces from torrent metadata.
+}
+
+type torrentHandle struct {
+	closed    atomic.Bool
+	closeErr  error
+	closeOnce sync.Once
 }
 
 // New creates a storage client with the given memory limit in bytes.
@@ -201,6 +218,7 @@ func New(maxMemory int64, logger *slog.Logger) *Client {
 		closeCh:        make(chan struct{}),
 		logger:         logger,
 	}
+	c.allocationCond = sync.NewCond(&c.mu)
 	return c
 }
 
@@ -208,14 +226,20 @@ func New(maxMemory int64, logger *slog.Logger) *Client {
 // It is safe to call multiple times.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	select {
-	case <-c.closeCh:
+	if c.closed {
+		c.mu.Unlock()
+		<-c.closeCh
 		return nil
-	default:
-		close(c.closeCh)
 	}
+	c.closed = true
+	c.mu.Unlock()
+
+	// No new reservations can start after closed is set. Let existing owners
+	// finish and refund their reservations before signaling shutdown.
+	c.allocations.Wait()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	// Clear all pieces.
 	for key, pd := range c.pieces {
@@ -228,6 +252,7 @@ func (c *Client) Close() error {
 	c.fileBoundaries = make(map[activeRangeKey]fileBoundary)
 	c.lru.Init()
 	c.used = 0
+	close(c.closeCh)
 
 	return nil
 }
@@ -238,14 +263,9 @@ func (c *Client) Closed() <-chan struct{} {
 	return c.closeCh
 }
 
-// isClosed reports whether the client has been closed.
+// isClosed reports whether the client has been closed. c.mu must be held.
 func (c *Client) isClosed() bool {
-	select {
-	case <-c.closeCh:
-		return true
-	default:
-		return false
-	}
+	return c.closed
 }
 
 // EvictTo evicts unprotected pieces until memory usage is at most targetBytes.
@@ -433,13 +453,15 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 	// pure v2 torrents can legitimately omit the v1-only Info.Pieces field.
 	state, exists := c.torrents[infoHash]
 	if !exists {
-		state = &torrentState{totalPieces: pieceCount}
+		state = &torrentState{openHandles: 1, totalPieces: pieceCount}
 		c.torrents[infoHash] = state
 	} else {
+		state.openHandles++
 		state.mu.Lock()
 		state.totalPieces = pieceCount
 		state.mu.Unlock()
 	}
+	handle := &torrentHandle{}
 
 	return storage.TorrentImpl{
 		Piece: func(p metainfo.Piece) storage.PieceImpl {
@@ -449,10 +471,15 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 				index:     p.Index(),
 				pieceSize: p.Length(),
 				torrent:   state,
+				handle:    handle,
 			}
 		},
 		Close: func() error {
-			return c.closeTorrent(infoHash, state)
+			handle.closeOnce.Do(func() {
+				handle.closed.Store(true)
+				handle.closeErr = c.closeTorrent(infoHash, state)
+			})
+			return handle.closeErr
 		},
 	}, nil
 }
@@ -546,84 +573,115 @@ func (c *Client) releaseMemoryLocked(size int64, state *torrentState) {
 // that buffer directly to the incoming allocation for reuse. The returned buffer
 // remains covered by the reservation added before this function returns.
 func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torrentState) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	for {
+		c.mu.Lock()
 
-	if c.isClosed() {
-		return nil, ErrClientClosed
-	}
-	if current, exists := c.torrents[infoHash]; !exists || current != state {
-		return nil, ErrTorrentClosed
-	}
-
-	// Check if piece itself is larger than the total maxMemory limit.
-	if size > c.maxMemory {
-		return nil, ErrInsufficientMemory
-	}
-
-	var reusable []byte
-
-	// Check if we need to evict.
-	if c.used+size > c.maxMemory {
-		target := max(c.maxMemory-size, 0)
-
-		beforeEvict := c.used
-
-		// Standard eviction preserves active playback ranges and file boundaries.
-		reusable = c.evictDownToInternalLocked(target, protectActiveAndBoundaries, size)
-
-		// Boundary metadata yields before active playback ranges. This keeps current
-		// playback data protected when the combined leases exceed the cache budget.
-		if c.used+size > c.maxMemory {
-			reuseSize := size
-			if reusable != nil {
-				reuseSize = 0
-			}
-			if boundaryReusable := c.evictDownToInternalLocked(target, protectActiveOnly, reuseSize); reusable == nil {
-				reusable = boundaryReusable
-			}
+		if c.isClosed() {
+			c.mu.Unlock()
+			return nil, ErrClientClosed
+		}
+		if current, exists := c.torrents[infoHash]; !exists || current != state {
+			c.mu.Unlock()
+			return nil, ErrTorrentClosed
 		}
 
-		// Only an absolute lack of non-active capacity may evict an active range.
-		if c.used+size > c.maxMemory {
-			reuseSize := size
-			if reusable != nil {
-				reuseSize = 0
-			}
-			if emergencyReusable := c.evictDownToInternalLocked(target, protectNone, reuseSize); reusable == nil {
-				reusable = emergencyReusable
-			}
-		}
-
-		if c.logger.Enabled(context.Background(), slog.LevelDebug) {
-			c.logger.Debug("memory allocation eviction",
-				slog.Int64("needed", size),
-				slog.Int64("before", beforeEvict),
-				slog.Int64("after", c.used))
-		}
-
-		// If still not enough memory, return error.
-		if c.used+size > c.maxMemory {
+		// Check if piece itself is larger than the total maxMemory limit.
+		if size > c.maxMemory {
+			c.mu.Unlock()
 			return nil, ErrInsufficientMemory
 		}
+
+		var reusable []byte
+
+		// Check if we need to evict.
+		if c.used+size > c.maxMemory {
+			target := max(c.maxMemory-size, 0)
+
+			beforeEvict := c.used
+
+			// Standard eviction preserves active playback ranges and file boundaries.
+			reusable = c.evictDownToInternalLocked(target, protectActiveAndBoundaries, size)
+
+			// Boundary metadata yields before active playback ranges. This keeps current
+			// playback data protected when the combined leases exceed the cache budget.
+			if c.used+size > c.maxMemory {
+				reuseSize := size
+				if reusable != nil {
+					reuseSize = 0
+				}
+				if boundaryReusable := c.evictDownToInternalLocked(target, protectActiveOnly, reuseSize); reusable == nil {
+					reusable = boundaryReusable
+				}
+			}
+
+			// Only an absolute lack of non-active capacity may evict an active range.
+			if c.used+size > c.maxMemory {
+				reuseSize := size
+				if reusable != nil {
+					reuseSize = 0
+				}
+				if emergencyReusable := c.evictDownToInternalLocked(target, protectNone, reuseSize); reusable == nil {
+					reusable = emergencyReusable
+				}
+			}
+
+			if c.logger.Enabled(context.Background(), slog.LevelDebug) {
+				c.logger.Debug("memory allocation eviction",
+					slog.Int64("needed", size),
+					slog.Int64("before", beforeEvict),
+					slog.Int64("after", c.used))
+			}
+
+			if c.used+size > c.maxMemory {
+				// Resident pieces have already been exhausted, so an unpublished
+				// reservation is the only reclaimable memory left. Wait for one to
+				// publish or refund instead of surfacing a transient WriteAt error,
+				// which the torrent engine treats as fatal.
+				if c.pendingAllocations > 0 {
+					c.allocationCond.Wait()
+					c.mu.Unlock()
+					continue
+				}
+				c.mu.Unlock()
+				return nil, ErrInsufficientMemory
+			}
+		}
+
+		// Reserve the memory. The reservation remains pending until its buffer
+		// is published or refunded by completeAllocation.
+		c.used += size
+		state.mu.Lock()
+		state.pieceMemory += size
+		state.mu.Unlock()
+		c.pendingAllocations++
+		c.allocations.Add(1)
+		c.mu.Unlock()
+
+		return reusable, nil
 	}
-
-	// Allocate the memory.
-	c.used += size
-	state.mu.Lock()
-	state.pieceMemory += size
-	state.mu.Unlock()
-
-	return reusable, nil
 }
 
-// closeTorrent removes all pieces associated with a specific torrent from memory and
-// cleans up the torrent's state.
+// completeAllocation finishes an unpublished reservation and wakes allocators
+// that may now be able to evict its published buffer or use its refunded space.
+func (c *Client) completeAllocation() {
+	c.mu.Lock()
+	c.pendingAllocations--
+	c.allocations.Done()
+	c.allocationCond.Broadcast()
+	c.mu.Unlock()
+}
+
+// closeTorrent releases one TorrentImpl handle. The final handle removes all
+// pieces associated with the torrent and cleans up its state.
 func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if current, exists := c.torrents[infoHash]; !exists || current != state {
+		return nil
+	}
+	state.openHandles--
+	if state.openHandles > 0 {
 		return nil
 	}
 
@@ -929,6 +987,7 @@ func (c *Client) evictPieceLocked(key pieceKey, pd *pieceData) []byte {
 // pieceImpl implements the storage.PieceImpl interface.
 type pieceImpl struct {
 	client    *Client
+	handle    *torrentHandle
 	infoHash  metainfo.Hash
 	index     int
 	pieceSize int64
@@ -1098,6 +1157,10 @@ func (p *pieceImpl) WriteAt(b []byte, off int64) (n int, err error) {
 			pd.mu.Unlock()
 			continue
 		}
+		if p.handle.closed.Load() {
+			pd.mu.Unlock()
+			return 0, ErrTorrentClosed
+		}
 
 		// Boundary checks.
 		if off < 0 || off > p.pieceSize {
@@ -1159,6 +1222,7 @@ func (p *pieceImpl) ensureDataAllocated(pd *pieceData) error {
 		p.cleanupEmptyPiece(pd)
 		return err
 	}
+	defer p.client.completeAllocation()
 
 	if data == nil {
 		data = make([]byte, pd.pieceSize)
@@ -1181,6 +1245,11 @@ func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
 		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
 		p.finishFailedAllocationLocked(pd)
 		return ErrClientClosed
+	}
+	if p.handle.closed.Load() {
+		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
+		p.finishFailedAllocationLocked(pd)
+		return ErrTorrentClosed
 	}
 	if current, exists := c.torrents[p.infoHash]; !exists || current != p.torrent {
 		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
@@ -1255,6 +1324,9 @@ func (p *pieceImpl) getOrCreatePieceData() (*pieceData, error) {
 	if p.client.isClosed() {
 		return nil, ErrClientClosed
 	}
+	if p.handle.closed.Load() {
+		return nil, ErrTorrentClosed
+	}
 	if current, exists := p.client.torrents[p.infoHash]; !exists || current != p.torrent {
 		return nil, ErrTorrentClosed
 	}
@@ -1284,6 +1356,9 @@ func (p *pieceImpl) getOrCreatePieceData() (*pieceData, error) {
 func (p *pieceImpl) getPieceData() (*pieceData, error) {
 	p.client.mu.RLock()
 	defer p.client.mu.RUnlock()
+	if p.handle.closed.Load() {
+		return nil, ErrTorrentClosed
+	}
 	if current, exists := p.client.torrents[p.infoHash]; !exists || current != p.torrent {
 		return nil, ErrTorrentClosed
 	}

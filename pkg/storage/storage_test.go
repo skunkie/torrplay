@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -741,6 +742,68 @@ func TestClient_MemoryAllocationFailure(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInsufficientMemory)
 }
 
+func TestClient_MemoryAllocationWaitsForUnpublishedReservation(t *testing.T) {
+	client := newTestClient(256)
+	info, infoHash := newTestInfo(256, 2)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+	piece := torrentImpl.Piece(info.Piece(1))
+
+	// Hold the entire cache as an unpublished reservation. A concurrent piece
+	// write cannot evict it yet, but it must wait rather than return the fatal
+	// storage error used for genuinely impossible allocations.
+	_, err = client.allocateMemory(256, infoHash, piece.(*pieceImpl).torrent)
+	require.NoError(t, err)
+	releaseReservation := sync.OnceFunc(func() {
+		client.mu.Lock()
+		client.releaseMemoryLocked(256, piece.(*pieceImpl).torrent)
+		client.mu.Unlock()
+		client.completeAllocation()
+	})
+	defer releaseReservation()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := piece.WriteAt([]byte("data"), 0)
+		writeDone <- writeErr
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		client.mu.RLock()
+		pd := client.pieces[pieceKey{infoHash: infoHash, index: 1}]
+		client.mu.RUnlock()
+		waiting := false
+		if pd != nil {
+			pd.mu.RLock()
+			waiting = pd.allocating
+			pd.mu.RUnlock()
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-writeDone:
+			t.Fatalf("write returned before reservation completed: %v", err)
+		case <-deadline:
+			t.Fatal("write did not wait for the unpublished reservation")
+		default:
+			runtime.Gosched()
+		}
+	}
+
+	select {
+	case err := <-writeDone:
+		t.Fatalf("write returned while reservation was unpublished: %v", err)
+	default:
+	}
+
+	releaseReservation()
+	require.NoError(t, <-writeDone)
+	assert.Equal(t, []int{1}, residentPieceIndexes(t, client, infoHash))
+}
+
 // TestClient_ConcurrentAccess stresses concurrent reads and writes for race conditions.
 func TestClient_ConcurrentAccess(t *testing.T) {
 	client := newTestClient(2048)
@@ -1310,6 +1373,112 @@ func TestClient_Close_Idempotent(t *testing.T) {
 	assert.ErrorIs(t, err, ErrClientClosed)
 }
 
+func TestClient_ClosedSignalsAfterCleanup(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 1)
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+	p := torrentImpl.Piece(info.Piece(0)).(*pieceImpl)
+	_, err = p.WriteAt([]byte("data"), 0)
+	require.NoError(t, err)
+	pd, err := p.getPieceData()
+	require.NoError(t, err)
+
+	// Keep cleanup blocked on the resident piece while Close holds client.mu.
+	pd.mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- client.Close() }()
+	deadline := time.After(time.Second)
+	for client.mu.TryLock() {
+		client.mu.Unlock()
+		select {
+		case <-deadline:
+			pd.mu.Unlock()
+			<-done
+			t.Fatal("Close did not start")
+		default:
+			runtime.Gosched()
+		}
+	}
+	signaledBeforeCleanup := false
+	select {
+	case <-client.Closed():
+		signaledBeforeCleanup = true
+	default:
+	}
+	pd.mu.Unlock()
+	require.NoError(t, <-done)
+	assert.False(t, signaledBeforeCleanup, "Closed must wait until resident pieces are evicted")
+	select {
+	case <-client.Closed():
+	default:
+		t.Fatal("Closed was not signaled after Close returned")
+	}
+}
+
+func TestClient_CloseWaitsForUnpublishedReservation(t *testing.T) {
+	client := newTestClient(512)
+	info, infoHash := newTestInfo(256, 1)
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+	p := torrentImpl.Piece(info.Piece(0)).(*pieceImpl)
+
+	// A reservation can be in use while its buffer is being initialized,
+	// even when no piece entry remains in client.pieces.
+	_, err = client.allocateMemory(256, infoHash, p.torrent)
+	require.NoError(t, err)
+	complete := sync.OnceFunc(func() {
+		client.mu.Lock()
+		client.releaseMemoryLocked(256, p.torrent)
+		client.mu.Unlock()
+		client.completeAllocation()
+	})
+	defer complete()
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- client.Close() }()
+	deadline := time.After(time.Second)
+	for {
+		client.mu.RLock()
+		closing := client.closed
+		client.mu.RUnlock()
+		if closing {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("Close did not begin")
+		default:
+			runtime.Gosched()
+		}
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- client.Close() }()
+	select {
+	case <-client.Closed():
+		t.Fatal("Closed signaled with an unpublished reservation")
+	default:
+	}
+	select {
+	case <-firstDone:
+		t.Fatal("first Close returned with an unpublished reservation")
+	case <-secondDone:
+		t.Fatal("second Close returned before cleanup completed")
+	default:
+	}
+
+	complete()
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
+	select {
+	case <-client.Closed():
+	default:
+		t.Fatal("Closed was not signaled after cleanup")
+	}
+	assert.Zero(t, client.MemoryStats().UsedBytes)
+}
+
 func TestPieceImpl_TorrentClose_StalePieceCannotRecreateData(t *testing.T) {
 	client := newTestClient(512)
 	info, infoHash := newTestInfo(256, 1)
@@ -1343,6 +1512,40 @@ func TestClient_OpenTorrent_PreservesPieceMemoryOnReopen(t *testing.T) {
 
 	memAfter := requireTorrentStats(t, client, infoHash).ResidentBytes
 	assert.Equal(t, int64(256), memAfter, "pieceMemory should be preserved on reopen")
+}
+
+func TestClient_OpenTorrent_SharedStateSurvivesOneHandleClose(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 1)
+	first, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+	second, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+	firstPiece := first.Piece(info.Piece(0))
+	secondPiece := second.Piece(info.Piece(0))
+	_, err = firstPiece.WriteAt([]byte("first"), 0)
+	require.NoError(t, err)
+
+	require.NoError(t, first.Close())
+	require.NoError(t, first.Close(), "closing a handle twice must not release another handle")
+	_, err = firstPiece.WriteAt([]byte("stale"), 0)
+	assert.ErrorIs(t, err, ErrTorrentClosed)
+
+	buf := make([]byte, 5)
+	n, err := secondPiece.ReadAt(buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 5, n)
+	assert.Equal(t, "first", string(buf))
+	_, err = secondPiece.WriteAt([]byte("alive"), 0)
+	require.NoError(t, err)
+	assert.Equal(t, int64(256), client.MemoryStats().UsedBytes)
+
+	require.NoError(t, second.Close())
+	assert.Equal(t, int64(0), client.MemoryStats().UsedBytes)
+	_, err = client.TorrentStats(infoHash)
+	assert.ErrorIs(t, err, ErrTorrentNotManaged)
+	_, err = secondPiece.WriteAt([]byte("closed"), 0)
+	assert.ErrorIs(t, err, ErrTorrentClosed)
 }
 
 func TestPieceImpl_ReadAt_MissDoesNotCreateGhostPiece(t *testing.T) {
