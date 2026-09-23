@@ -113,11 +113,24 @@ func TestTorrentPreloadEndpoints(t *testing.T) {
 	assert.Equal(t, preloadNoFileIndex, afterCancel.FileIndex)
 	assert.Equal(t, http.StatusNoContent, doRequest(http.MethodDelete, preloadURL, "").Code)
 
+	ctrl.preloadSnapshots.Store(ih, &preloadStatusSnapshot{
+		completedBytes: 256,
+		progress:       0.25,
+		targetBytes:    1024,
+	})
+	interruptedStatus := decodeStatus(doRequest(http.MethodGet, preloadURL, ""))
+	assert.Equal(t, api.Superseded, interruptedStatus.Status)
+	assert.Equal(t, int64(256), interruptedStatus.CompletedBytes)
+	assert.Equal(t, int64(1024), interruptedStatus.TargetBytes)
+	assert.Equal(t, float32(0.25), interruptedStatus.Progress)
+
 	pathBody, err := json.Marshal(api.PreloadRequest{FilePath: utils.Ptr(to.Files()[0].Path())})
 	require.NoError(t, err)
 	byPath := doRequest(http.MethodPut, preloadURL, string(pathBody))
 	require.Equal(t, http.StatusOK, byPath.Code)
 	assert.Equal(t, 0, decodeStatus(byPath).FileIndex)
+	_, snapshotExists := ctrl.preloadSnapshots.Load(ih)
+	assert.False(t, snapshotExists, "a new preload must replace historical status")
 	ctrl.cancelPreload(ih)
 }
 
@@ -355,11 +368,14 @@ func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing
 	defer readyCancel()
 	var readyBudgetReleases, readyProtectionClears atomic.Int32
 	ready := &preloadTask{
-		ctx:       readyCtx,
-		infoHash:  metainfo.Hash{1},
-		cancel:    readyCancel,
-		done:      make(chan struct{}),
-		protected: true,
+		ctx:         readyCtx,
+		infoHash:    metainfo.Hash{1},
+		cancel:      readyCancel,
+		done:        make(chan struct{}),
+		fileIndex:   1,
+		filePath:    "ready.mkv",
+		targetBytes: 2048,
+		protected:   true,
 		releaseBudget: func() {
 			readyBudgetReleases.Add(1)
 		},
@@ -367,19 +383,24 @@ func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing
 			readyProtectionClears.Add(1)
 		},
 	}
+	ready.bytesRead.Store(ready.targetBytes)
 	ready.ready.Store(true)
 	ready.doneOnce.Do(func() { close(ready.done) })
 	ctrl.preloads.Store(ready.infoHash, ready)
 
 	activeCtx, activeCancel := context.WithCancel(context.Background())
 	active := &preloadTask{
-		ctx:       activeCtx,
-		infoHash:  metainfo.Hash{2},
-		cancel:    activeCancel,
-		done:      make(chan struct{}),
-		active:    true,
-		protected: true,
+		ctx:         activeCtx,
+		infoHash:    metainfo.Hash{2},
+		cancel:      activeCancel,
+		done:        make(chan struct{}),
+		fileIndex:   2,
+		filePath:    "active.mkv",
+		targetBytes: 4096,
+		active:      true,
+		protected:   true,
 	}
+	active.bytesRead.Store(1024)
 	ctrl.preloadActiveTasks = 1
 	ctrl.preloads.Store(active.infoHash, active)
 	go func() {
@@ -399,6 +420,18 @@ func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing
 	assert.Error(t, activeCtx.Err())
 	assert.Equal(t, int32(1), readyBudgetReleases.Load())
 	assert.Equal(t, int32(1), readyProtectionClears.Load())
+	readyValue, ok := ctrl.preloadSnapshots.Load(ready.infoHash)
+	require.True(t, ok)
+	readySnapshot := readyValue.(*preloadStatusSnapshot)
+	assert.Equal(t, ready.targetBytes, readySnapshot.completedBytes)
+	assert.Equal(t, ready.targetBytes, readySnapshot.targetBytes)
+	assert.Equal(t, float32(1), readySnapshot.progress)
+	activeValue, ok := ctrl.preloadSnapshots.Load(active.infoHash)
+	require.True(t, ok)
+	activeSnapshot := activeValue.(*preloadStatusSnapshot)
+	assert.Equal(t, int64(1024), activeSnapshot.completedBytes)
+	assert.Equal(t, active.targetBytes, activeSnapshot.targetBytes)
+	assert.Equal(t, float32(0.25), activeSnapshot.progress)
 }
 
 func TestPreparePreloadsForPlaybackReleasesReadyMemoryWithinTorrent(t *testing.T) {
@@ -432,6 +465,63 @@ func TestPreparePreloadsForPlaybackReleasesReadyMemoryWithinTorrent(t *testing.T
 	assert.False(t, ok, "playback of another file must release the memory preload lease")
 	assert.Equal(t, int32(1), budgetReleases.Load())
 	assert.Equal(t, int32(1), protectionClears.Load())
+}
+
+func TestPreparePreloadsForPlaybackSnapshotsPlayingFileStatus(t *testing.T) {
+	ctrl := &Controller{preloadPlaybackCount: 1, preloadReadyTTL: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var budgetReleases, protectionClears atomic.Int32
+	preload := &preloadTask{
+		ctx:         ctx,
+		infoHash:    metainfo.Hash{1},
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		fileIndex:   2,
+		filePath:    "playing.mkv",
+		targetBytes: 1024,
+		protected:   true,
+		releaseBudget: func() {
+			budgetReleases.Add(1)
+		},
+		clearProtection: func() {
+			protectionClears.Add(1)
+		},
+	}
+	preload.bytesRead.Store(preload.targetBytes)
+	preload.ready.Store(true)
+	preload.doneOnce.Do(func() { close(preload.done) })
+	ctrl.preloads.Store(preload.infoHash, preload)
+
+	ctrl.preloadsMu.Lock()
+	ctrl.preparePreloadsForPlaybackLocked(preload.infoHash, preload.filePath)
+	ctrl.preloadsMu.Unlock()
+
+	_, ok := ctrl.preloads.Load(preload.infoHash)
+	assert.False(t, ok, "playing file must release its scheduler task")
+	value, ok := ctrl.preloadSnapshots.Load(preload.infoHash)
+	require.True(t, ok, "playing file must retain an independent status snapshot")
+	snapshot := value.(*preloadStatusSnapshot)
+	assert.Equal(t, preload.targetBytes, snapshot.completedBytes)
+	assert.Equal(t, preload.targetBytes, snapshot.targetBytes)
+	assert.Equal(t, float32(1), snapshot.progress)
+	assert.Equal(t, int32(1), budgetReleases.Load())
+	assert.Equal(t, int32(1), protectionClears.Load())
+
+	// A later HTTP range for the same playback has no scheduler task to retire
+	// and must not discard the earlier request's status snapshot.
+	ctrl.preloadsMu.Lock()
+	ctrl.preparePreloadsForPlaybackLocked(preload.infoHash, preload.filePath)
+	ctrl.preloadsMu.Unlock()
+	currentSnapshot, ok := ctrl.preloadSnapshots.Load(preload.infoHash)
+	require.True(t, ok)
+	assert.Same(t, snapshot, currentSnapshot)
+	assert.Equal(t, int32(1), budgetReleases.Load(), "lease release must remain idempotent")
+	assert.Equal(t, int32(1), protectionClears.Load(), "protection release must remain idempotent")
+
+	ctrl.cancelPreload(preload.infoHash)
+	_, ok = ctrl.preloadSnapshots.Load(preload.infoHash)
+	assert.False(t, ok, "explicit cancellation must clear the status snapshot")
 }
 
 func TestPreparePreloadsForPlaybackPreservesReadyFileStorage(t *testing.T) {
@@ -768,6 +858,7 @@ func TestDeleteTorrentClearsCompletedPreload(t *testing.T) {
 	}
 	task.ready.Store(true)
 	ctrl.preloads.Store(ih, task)
+	ctrl.preloadSnapshots.Store(ih, &preloadStatusSnapshot{targetBytes: 512})
 
 	ctrl.mu.Lock()
 	err = ctrl.deleteTorrentLocked(ih)
@@ -775,6 +866,8 @@ func TestDeleteTorrentClearsCompletedPreload(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, cleared)
 	_, exists := ctrl.preloads.Load(ih)
+	assert.False(t, exists)
+	_, exists = ctrl.preloadSnapshots.Load(ih)
 	assert.False(t, exists)
 }
 
@@ -804,6 +897,29 @@ func TestReadyPreloadExpires(t *testing.T) {
 	default:
 		t.Fatal("preload expiry did not release cache protection")
 	}
+}
+
+func TestPreloadStatusSnapshotExpires(t *testing.T) {
+	ctrl := &Controller{preloadReadyTTL: 10 * time.Millisecond}
+	preload := &preloadTask{
+		infoHash:    metainfo.Hash{1},
+		fileIndex:   3,
+		filePath:    "ready.mkv",
+		targetBytes: 1024,
+	}
+	preload.bytesRead.Store(preload.targetBytes)
+	preload.ready.Store(true)
+
+	ctrl.preloadsMu.Lock()
+	ctrl.snapshotPreloadLocked(preload)
+	ctrl.preloadsMu.Unlock()
+
+	_, exists := ctrl.preloadSnapshots.Load(preload.infoHash)
+	require.True(t, exists)
+	require.Eventually(t, func() bool {
+		_, exists := ctrl.preloadSnapshots.Load(preload.infoHash)
+		return !exists
+	}, time.Second, time.Millisecond)
 }
 
 func TestPreloadExpiryDoesNotRemoveReplacement(t *testing.T) {

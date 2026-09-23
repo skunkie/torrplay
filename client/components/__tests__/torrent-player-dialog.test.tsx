@@ -758,7 +758,7 @@ describe('TorrentPlayerDialog', () => {
       expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
     });
 
-    it('cancels server preload when polling reports that the task stopped', async () => {
+    it('stops polling without clearing status when playback supersedes the task', async () => {
       vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
         fileIndex: 0,
         targetBytes: 1000,
@@ -774,7 +774,7 @@ describe('TorrentPlayerDialog', () => {
         targetBytes: 0,
         completedBytes: 0,
         progress: 0,
-        status: 'idle',
+        status: 'superseded',
         activePeers: 0,
         downloadRate: 0,
         totalPeers: 0,
@@ -791,9 +791,9 @@ describe('TorrentPlayerDialog', () => {
       );
 
       await waitFor(() => {
-        expect(cancelSpy).toHaveBeenCalledWith(mockTorrentSingleVideo.hash);
         expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
       });
+      expect(cancelSpy).not.toHaveBeenCalled();
     });
 
     it('cancels preload when exiting the player', async () => {

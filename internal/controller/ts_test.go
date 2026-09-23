@@ -489,6 +489,18 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 		assert.Equal(t, int64(1048576), resp.PreloadSize)
 		assert.Positive(t, storageStats.WrittenBytes)
 		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
+
+		ctrl.preloads.Delete(to.InfoHash())
+		ctrl.preloadSnapshots.Store(to.InfoHash(), &preloadStatusSnapshot{
+			completedBytes: storageStats.WrittenBytes + 512,
+			targetBytes:    1048576,
+		})
+		defer ctrl.preloadSnapshots.Delete(to.InfoHash())
+		resp = ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
+		assert.Equal(t, tsStatWorking, resp.Stat)
+		assert.Equal(t, "Torrent working", resp.StatString)
+		assert.Equal(t, int64(1048576), resp.PreloadSize)
+		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
 	})
 }
 

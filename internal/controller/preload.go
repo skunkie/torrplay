@@ -71,6 +71,13 @@ type preloadTask struct {
 	ready           atomic.Bool
 }
 
+type preloadStatusSnapshot struct {
+	completedBytes int64
+	expiryTimer    *time.Timer
+	progress       float32
+	targetBytes    int64
+}
+
 func (p *preloadTask) progressBytes() int64 {
 	return min(p.bytesRead.Load(), p.targetBytes)
 }
@@ -216,6 +223,12 @@ func (c *Controller) DeleteTorrentPreload(w http.ResponseWriter, _ *http.Request
 
 func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 	to, hasTorrent := c.client.Torrent(ih)
+	var completedLength int64
+	fullyComplete := false
+	if hasTorrent && to != nil && to.Info() != nil {
+		completedLength = to.Length()
+		fullyComplete = to.BytesCompleted() == completedLength
+	}
 
 	base := api.PreloadResponse{
 		FileIndex: preloadNoFileIndex,
@@ -230,6 +243,9 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 		base.ActivePeers = stats.ActivePeers
 		base.TotalPeers = stats.TotalPeers
 	}
+
+	c.preloadsMu.Lock()
+	defer c.preloadsMu.Unlock()
 
 	if val, preloading := c.preloads.Load(ih); preloading {
 		if p, ok := val.(*preloadTask); ok && p != nil {
@@ -260,13 +276,31 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 			return resp
 		}
 	}
+	if val, ok := c.preloadSnapshots.Load(ih); ok {
+		if snapshot, isSnapshot := val.(*preloadStatusSnapshot); isSnapshot && snapshot != nil {
+			if fullyComplete {
+				resp := base
+				resp.CompletedBytes = completedLength
+				resp.Progress = 1
+				resp.Status = api.Ready
+				resp.TargetBytes = completedLength
+				return resp
+			}
+			resp := base
+			resp.CompletedBytes = snapshot.completedBytes
+			resp.Progress = snapshot.progress
+			resp.Status = api.Superseded
+			resp.TargetBytes = snapshot.targetBytes
+			return resp
+		}
+	}
 
-	if hasTorrent && to.Info() != nil && to.BytesCompleted() == to.Length() {
+	if fullyComplete {
 		resp := base
-		resp.CompletedBytes = to.Length()
+		resp.CompletedBytes = completedLength
 		resp.Progress = 1.0
 		resp.Status = api.Ready
-		resp.TargetBytes = to.Length()
+		resp.TargetBytes = completedLength
 		return resp
 	}
 
@@ -302,6 +336,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 	}
 
 	c.preloadsMu.Lock()
+	c.clearPreloadSnapshotLocked(ih)
 	if current, ok := c.preloads.Load(ih); ok {
 		if p, ok := current.(*preloadTask); ok && p != nil && p.fileIndex == fileIndex {
 			c.preloadsMu.Unlock()
@@ -608,10 +643,50 @@ func preloadPieceBoundaries(file *torrent.File, headEnd, tailStart, tailEnd int6
 func (c *Controller) cancelPreload(ih metainfo.Hash) {
 	c.preloadsMu.Lock()
 	defer c.preloadsMu.Unlock()
+	c.clearPreloadSnapshotLocked(ih)
 	if val, ok := c.preloads.LoadAndDelete(ih); ok {
 		if p, ok := val.(*preloadTask); ok {
 			c.releasePreloadLocked(p, true)
 		}
+	}
+}
+
+func (c *Controller) clearPreloadSnapshotLocked(ih metainfo.Hash) {
+	val, ok := c.preloadSnapshots.LoadAndDelete(ih)
+	if !ok {
+		return
+	}
+	if snapshot, isSnapshot := val.(*preloadStatusSnapshot); isSnapshot && snapshot != nil && snapshot.expiryTimer != nil {
+		snapshot.expiryTimer.Stop()
+	}
+}
+
+func (c *Controller) snapshotPreloadLocked(preload *preloadTask) {
+	if preload == nil {
+		return
+	}
+	c.clearPreloadSnapshotLocked(preload.infoHash)
+	completedBytes := preload.progressBytes()
+	progress := float32(0)
+	if preload.targetBytes > 0 {
+		progress = min(1, float32(completedBytes)/float32(preload.targetBytes))
+	}
+	if preload.ready.Load() {
+		completedBytes = preload.targetBytes
+		progress = 1
+	}
+	snapshot := &preloadStatusSnapshot{
+		completedBytes: completedBytes,
+		progress:       progress,
+		targetBytes:    preload.targetBytes,
+	}
+	c.preloadSnapshots.Store(preload.infoHash, snapshot)
+	if c.preloadReadyTTL > 0 {
+		snapshot.expiryTimer = time.AfterFunc(c.preloadReadyTTL, func() {
+			c.preloadsMu.Lock()
+			defer c.preloadsMu.Unlock()
+			c.preloadSnapshots.CompareAndDelete(preload.infoHash, snapshot)
+		})
 	}
 }
 
@@ -736,24 +811,28 @@ func (c *Controller) evictReadyPreloadLocked(except *preloadTask) bool {
 }
 
 // preparePreloadsForPlaybackLocked retires the preload for the file that is
-// about to play and stops unrelated workers that are still downloading. Ready
-// memory preloads also yield their speculative cache leases so concurrent live
-// readers retain the full readahead budget. Ready file-storage preloads do not
-// reserve memory and may remain cached; queued requests remain registered until
-// playback ends. The caller must hold preloadsMu and increment
-// preloadPlaybackCount before calling this method.
+// about to play and stops unrelated workers that are still downloading. Each
+// retired task leaves an immutable, short-lived status snapshot, while all of
+// its bandwidth, cache protection, and memory reservations are released. Ready
+// file-storage preloads unrelated to this playback do not reserve memory and
+// may remain cached; queued requests remain registered until playback ends. The
+// caller must hold preloadsMu and increment preloadPlaybackCount before calling
+// this method.
 func (c *Controller) preparePreloadsForPlaybackLocked(infoHash metainfo.Hash, filePath string) {
+	var matchedPreload *preloadTask
 	if current, ok := c.preloads.Load(infoHash); ok {
 		preload, isPreload := current.(*preloadTask)
 		if isPreload && preload != nil && preload.filePath == filePath &&
 			c.preloads.CompareAndDelete(infoHash, preload) {
+			matchedPreload = preload
 			c.releasePreloadLocked(preload, false)
+			c.snapshotPreloadLocked(preload)
 		}
 	}
 
 	c.preloads.Range(func(key, value any) bool {
 		preload, ok := value.(*preloadTask)
-		if !ok || preload == nil || preload.queued {
+		if !ok || preload == nil || preload == matchedPreload || preload.queued {
 			return true
 		}
 		// Active workers always yield bandwidth. A non-active task with a
@@ -764,6 +843,7 @@ func (c *Controller) preparePreloadsForPlaybackLocked(infoHash metainfo.Hash, fi
 		}
 		c.preloads.Delete(key)
 		c.releasePreloadLocked(preload, false)
+		c.snapshotPreloadLocked(preload)
 		return true
 	})
 }
@@ -778,6 +858,13 @@ func (c *Controller) cancelAllPreloads() {
 // claim. The caller must hold preloadsMu.
 func (c *Controller) cancelAllPreloadsLocked() {
 	c.preloadQueue = nil
+	c.preloadSnapshots.Range(func(key, val any) bool {
+		c.preloadSnapshots.Delete(key)
+		if snapshot, ok := val.(*preloadStatusSnapshot); ok && snapshot != nil && snapshot.expiryTimer != nil {
+			snapshot.expiryTimer.Stop()
+		}
+		return true
+	})
 	c.preloads.Range(func(key, val any) bool {
 		c.preloads.Delete(key)
 		if p, ok := val.(*preloadTask); ok {

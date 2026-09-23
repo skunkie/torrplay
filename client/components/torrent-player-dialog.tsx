@@ -74,6 +74,11 @@ export const TorrentPlayerDialog = ({
     }
   }, [stopPreloadPolling]);
 
+  const finishInactivePreload = useCallback(() => {
+    stopPreloadPolling();
+    activePreloadHashRef.current = null;
+  }, [stopPreloadPolling]);
+
   if (open && !prevOpenRef.current) {
     setUserSelectedFile(null);
     preloadedFileRef.current = null;
@@ -153,8 +158,8 @@ export const TorrentPlayerDialog = ({
         setActivePeers(resp.activePeers || 0);
         setTotalPeers(resp.totalPeers || 0);
 
-        if (resp.status === 'idle') {
-          cancelActivePreload();
+        if (resp.status === 'idle' || resp.status === 'superseded') {
+          finishInactivePreload();
           preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
           return;
@@ -188,8 +193,8 @@ export const TorrentPlayerDialog = ({
             setActivePeers(statusResp.activePeers || 0);
             setTotalPeers(statusResp.totalPeers || 0);
 
-            if (statusResp.status === 'idle') {
-              cancelActivePreload();
+            if (statusResp.status === 'idle' || statusResp.status === 'superseded') {
+              finishInactivePreload();
               preloadedFileRef.current = currentSelectedFile.path;
               setIsPreloading(false);
               return;
@@ -237,7 +242,7 @@ export const TorrentPlayerDialog = ({
       isMounted = false;
       stopPreloadPolling();
     };
-  }, [cancelActivePreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
+  }, [cancelActivePreload, finishInactivePreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
 
   // Clean up when dialog closes
   useEffect(() => {

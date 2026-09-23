@@ -145,6 +145,7 @@ type Controller struct {
 	stremio              *stremio.Service
 	preloadsMu           sync.Mutex
 	preloads             sync.Map
+	preloadSnapshots     sync.Map
 	torrentTracker       torrentTracker
 	trackers             [][]string
 	runtimeConfig        controllerRuntimeConfig

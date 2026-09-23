@@ -511,6 +511,7 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	assert.Equal(t, float32(1), readyState.Progress)
 	assert.Equal(t, int64(len(fixture.payload)), readyState.TargetBytes)
 	assert.Equal(t, readyState.TargetBytes, readyState.CompletedBytes)
+	assert.Positive(t, readyState.DownloadRate, "webseed payload rate must be included")
 
 	unrelatedHash := metainfo.Hash{0xff}
 	unrelatedBudgetReleases := 0
@@ -539,6 +540,18 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	assert.Equal(t, http.StatusPartialContent, streamResponse.StatusCode)
 	_, stillPreloading = ctrl.preloads.Load(ih)
 	assert.False(t, stillPreloading, "playback should retire its ready preload")
+	_, snapshotRetained := ctrl.preloadSnapshots.Load(ih)
+	assert.True(t, snapshotRetained, "playback must retain status independently of the HTTP range")
+	retainedResponse, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
+	require.NoError(t, err)
+	var retainedState api.PreloadResponse
+	require.NoError(t, json.NewDecoder(retainedResponse.Body).Decode(&retainedState))
+	require.NoError(t, retainedResponse.Body.Close())
+	assert.Equal(t, api.Ready, retainedState.Status, "a fully downloaded torrent remains ready")
+	assert.Equal(t, preloadNoFileIndex, retainedState.FileIndex)
+	assert.Equal(t, float32(1), retainedState.Progress)
+	assert.Equal(t, readyState.TargetBytes, retainedState.TargetBytes)
+	assert.Equal(t, readyState.CompletedBytes, retainedState.CompletedBytes)
 	_, unrelatedStillPreloading := ctrl.preloads.Load(unrelatedHash)
 	assert.False(t, unrelatedStillPreloading, "playback should release unrelated ready memory preloads")
 	assert.Equal(t, 1, unrelatedBudgetReleases)

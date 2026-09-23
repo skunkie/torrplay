@@ -704,19 +704,32 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 		resp.LoadedSize = stats.CompletedSize
 		resp.PreloadSize = stats.CompletedSize
 		resp.PreloadedBytes = stats.CompletedSize
+		c.preloadsMu.Lock()
+		preloadValue, preloading := c.preloads.Load(to.InfoHash())
+		snapshotValue, snapshotted := c.preloadSnapshots.Load(to.InfoHash())
+		c.preloadsMu.Unlock()
 
-		if to.Info() == nil {
+		switch {
+		case to.Info() == nil:
 			resp.Stat = tsStatGettingInfo
 			resp.StatString = "Torrent getting info"
-		} else if val, preloading := c.preloads.Load(to.InfoHash()); preloading {
+		case preloading:
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatPreload
 			resp.StatString = "Torrent preload"
-			if p, ok := val.(*preloadTask); ok && p != nil {
+			if p, ok := preloadValue.(*preloadTask); ok && p != nil {
 				resp.PreloadSize = p.targetBytes
 				resp.PreloadedBytes = p.progressBytes()
 			}
-		} else {
+		case snapshotted:
+			resp.TorrentSize = to.Length()
+			resp.Stat = tsStatWorking
+			resp.StatString = "Torrent working"
+			if snapshot, isSnapshot := snapshotValue.(*preloadStatusSnapshot); isSnapshot && snapshot != nil {
+				resp.PreloadSize = snapshot.targetBytes
+				resp.PreloadedBytes = snapshot.completedBytes
+			}
+		default:
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatWorking
 			resp.StatString = "Torrent working"

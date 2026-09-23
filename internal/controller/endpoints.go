@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -1373,15 +1374,24 @@ func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	return &s
 }
 
-// peerTransferRates sums the live per-peer transfer rates for a torrent's current connections.
+// peerTransferRates sums live payload rates across native peers and webseeds.
 func peerTransferRates(to *torrent.Torrent) (downloadRate, uploadRate float64) {
 	if to == nil {
 		return 0, 0
 	}
+	add := func(stats torrent.PeerStats) {
+		if !math.IsNaN(stats.DownloadRate) && !math.IsInf(stats.DownloadRate, 0) {
+			downloadRate += stats.DownloadRate
+		}
+		if !math.IsNaN(stats.LastWriteUploadRate) && !math.IsInf(stats.LastWriteUploadRate, 0) {
+			uploadRate += stats.LastWriteUploadRate
+		}
+	}
 	for _, peer := range to.PeerConns() {
-		stats := peer.Stats()
-		downloadRate += stats.DownloadRate
-		uploadRate += stats.LastWriteUploadRate
+		add(peer.Stats())
+	}
+	for _, peer := range to.WebseedPeerConns() {
+		add(peer.Stats())
 	}
 	return downloadRate, uploadRate
 }

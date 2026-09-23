@@ -2241,7 +2241,7 @@ components:
         completed_bytes:
           type: integer
           format: int64
-          description: Number of bytes completed toward the target. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
+          description: Number of bytes completed toward the target, including the final count when playback supersedes preloading. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
           minimum: 0
           example: 10485760
         download_rate:
@@ -2253,7 +2253,7 @@ components:
         file_index:
           type: integer
           minimum: -1
-          description: 0-based index of the file currently preloaded, or -1 when idle or when readiness applies to the fully downloaded torrent rather than one file.
+          description: 0-based index of the file currently preloaded, or -1 when idle, superseded by playback, or when readiness applies to the fully downloaded torrent rather than one file.
           example: 0
         file_path:
           type: string
@@ -2271,6 +2271,7 @@ components:
             - "idle"
             - "preloading"
             - "ready"
+            - "superseded"
           example: "preloading"
         target_bytes:
           type: integer

@@ -210,11 +210,11 @@ interface PreloadResponse {
   activePeers: number,
   completedBytes: number,
   downloadRate: number,
-  // -1 means idle or readiness applies to the fully downloaded torrent.
+  // -1 means idle, superseded by playback, or readiness applies to the fully downloaded torrent.
   fileIndex: number,
   filePath?: string,
   progress: number,
-  status: 'idle' | 'preloading' | 'ready',
+  status: 'idle' | 'preloading' | 'ready' | 'superseded',
   targetBytes: number,
   totalPeers: number
 }
