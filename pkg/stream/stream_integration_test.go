@@ -215,6 +215,91 @@ func TestPool_AcquireReuseIdleReader(t *testing.T) {
 	pool.Close()
 }
 
+func TestPool_DoesNotReuseReaderFromReplacedTorrent(t *testing.T) {
+	c := newTestTorrentClient(t)
+	metaInfo := createTestMetaInfo(t)
+	oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+	pool := New(Config{
+		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		IdleCloseTimeout:  -1,
+		IdleParkTimeout:   30 * time.Second,
+		MaxReadersPerFile: -1,
+	})
+	t.Cleanup(pool.Close)
+	require.True(t, pool.SetReadaheadBudget(1024*1024))
+
+	_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
+	require.NoError(t, err)
+
+	pool.mu.Lock()
+	var oldReaderID uint64
+	for _, sr := range pool.readers {
+		oldReaderID = sr.readerID
+	}
+	pool.mu.Unlock()
+	require.NotZero(t, oldReaderID)
+
+	oldTorrent.Drop()
+	<-oldTorrent.Closed()
+	newTorrent, newFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+	require.NotSame(t, oldTorrent, newTorrent)
+
+	// The old reader remains active while the replacement gets its own reader.
+	// Releasing it afterward must close it instead of admitting it to the idle
+	// pool, without requiring another acquisition to trigger cleanup.
+	_, releaseNew, err := pool.Acquire(newFile, MemoryStorage)
+	require.NoError(t, err)
+	releaseNew()
+	releaseOld()
+
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	require.Len(t, pool.readers, 1)
+	for _, sr := range pool.readers {
+		assert.NotEqual(t, oldReaderID, sr.readerID)
+		assert.Same(t, newTorrent, sr.file.Torrent())
+	}
+}
+
+func TestPool_PreloadPurgesReaderFromReplacedTorrent(t *testing.T) {
+	c := newTestTorrentClient(t)
+	metaInfo := createTestMetaInfo(t)
+	oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+	pool := New(Config{
+		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		IdleCloseTimeout:  -1,
+		IdleParkTimeout:   30 * time.Second,
+		MaxReadersPerFile: -1,
+	})
+	t.Cleanup(pool.Close)
+	require.True(t, pool.SetReadaheadBudget(1024*1024))
+
+	_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
+	require.NoError(t, err)
+	releaseOld()
+
+	oldTorrent.Drop()
+	<-oldTorrent.Closed()
+	newTorrent, newFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+	require.NotSame(t, oldTorrent, newTorrent)
+
+	_, releasePreload, err := pool.AcquirePreloadContext(
+		context.Background(), newFile, MemoryStorage, 0, newFile.Length(),
+	)
+	require.NoError(t, err)
+
+	pool.mu.Lock()
+	require.Len(t, pool.readers, 1)
+	for _, sr := range pool.readers {
+		assert.True(t, sr.isPreload)
+		assert.Same(t, newTorrent, sr.file.Torrent())
+	}
+	pool.mu.Unlock()
+
+	releasePreload()
+	assert.False(t, pool.HasReaders(newTorrent.InfoHash()))
+}
+
 func TestPool_ReaderPositions_Integration(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, f := addTestTorrent(t, c)

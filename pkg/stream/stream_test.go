@@ -90,6 +90,67 @@ type mockReader struct {
 	readahead int64 // current readahead
 }
 
+type blockingReader struct {
+	closeDuringRead atomic.Bool
+	ctx             context.Context
+	mu              sync.Mutex
+	position        int64
+	readStarted     chan struct{}
+	reading         atomic.Bool
+	startOnce       sync.Once
+}
+
+func newBlockingReader() *blockingReader {
+	return &blockingReader{ctx: context.Background(), readStarted: make(chan struct{})}
+}
+
+func (r *blockingReader) Read(_ []byte) (int, error) {
+	r.reading.Store(true)
+	r.startOnce.Do(func() { close(r.readStarted) })
+	defer r.reading.Store(false)
+	r.mu.Lock()
+	ctx := r.ctx
+	r.mu.Unlock()
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+
+func (r *blockingReader) ReadContext(ctx context.Context, p []byte) (int, error) {
+	r.SetContext(ctx)
+	return r.Read(p)
+}
+
+func (r *blockingReader) Seek(offset int64, whence int) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch whence {
+	case io.SeekStart:
+		r.position = offset
+	case io.SeekCurrent:
+		r.position += offset
+	default:
+		return 0, errors.New("unsupported seek")
+	}
+	return r.position, nil
+}
+
+func (r *blockingReader) Close() error {
+	if r.reading.Load() {
+		r.closeDuringRead.Store(true)
+	}
+	return nil
+}
+
+func (r *blockingReader) SetContext(ctx context.Context) {
+	r.mu.Lock()
+	r.ctx = ctx
+	r.mu.Unlock()
+}
+
+func (r *blockingReader) SetReadahead(int64)                     {}
+func (r *blockingReader) SetReadaheadFunc(torrent.ReadaheadFunc) {}
+func (r *blockingReader) SetResponsive()                         {}
+
 func (m *mockReader) Read(p []byte) (int, error)              { return 0, io.EOF }
 func (m *mockReader) ReadAt(p []byte, off int64) (int, error) { return 0, io.EOF }
 func (m *mockReader) ReadContext(ctx context.Context, p []byte) (int, error) {
@@ -327,6 +388,63 @@ func TestReadAtWrapper_Close(t *testing.T) {
 	// Offset should be reset.
 	if rw.offset != 0 {
 		t.Fatalf("expected offset reset to 0, got %d", rw.offset)
+	}
+	if _, err := rw.ReadAt(make([]byte, 1), 0); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("expected io.ErrClosedPipe after close, got %v", err)
+	}
+}
+
+func TestSeekNotifyingReader_NotifiesBeforeRead(t *testing.T) {
+	section := io.NewSectionReader(bytes.NewReader([]byte("abcdef")), 0, 6)
+	var notified int64 = -1
+	reader := &seekNotifyingReader{
+		ReadSeeker: section,
+		onSeek: func(offset int64) {
+			notified = offset
+		},
+	}
+
+	position, err := reader.Seek(4, io.SeekStart)
+	if err != nil {
+		t.Fatalf("seek failed: %v", err)
+	}
+	if position != 4 || notified != 4 {
+		t.Fatalf("expected synchronous notification at 4, got position=%d notification=%d", position, notified)
+	}
+}
+
+func TestPool_CloseSerializesWithActiveRead(t *testing.T) {
+	pool := New(Config{Logger: testLogger()})
+	reader := newBlockingReader()
+	readerCtx, cancel := context.WithCancel(context.Background())
+	reader.SetContext(readerCtx)
+	wrapper := &readAtWrapper{reader: reader}
+	key := readerKey{filePath: "active", readerID: 1}
+
+	pool.mu.Lock()
+	pool.readers[key] = &streamReader{
+		active:   true,
+		cancel:   cancel,
+		ctx:      readerCtx,
+		reader:   reader,
+		readerID: 1,
+		wrapper:  wrapper,
+	}
+	pool.mu.Unlock()
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := wrapper.ReadAt(make([]byte, 1), 0)
+		readDone <- err
+	}()
+	<-reader.readStarted
+
+	pool.Close()
+	if reader.closeDuringRead.Load() {
+		t.Fatal("underlying reader was closed concurrently with Read")
+	}
+	if err := <-readDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled read, got %v", err)
 	}
 }
 

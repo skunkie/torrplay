@@ -147,14 +147,12 @@ const defaultWrapperBufSize = 256 * 1024
 // It seeks to the requested offset and leaves the dedicated underlying reader
 // at the end of the read so its torrent readahead window remains active.
 //
-// Lock ordering: wrapper.mu is never held while acquiring pool.mu, and
-// pool.mu is never held while acquiring wrapper.mu, except in Acquire's
-// reuse path where pool.mu is held while clearing sr.wrapper.onOffsetChange
-// (the old wrapper's callback) before replacing it. This is safe because
-// ReadAt always releases wrapper.mu before invoking the callback, so no
-// code path holds wrapper.mu while blocking on pool.mu. The callback
-// (onOffsetChange) fires AFTER releasing wrapper.mu.
+// Lock ordering: wrapper.mu is never held while acquiring pool.mu. Pool
+// lifecycle paths may hold pool.mu while acquiring wrapper.mu to replace or
+// close a wrapper. This is safe because ReadAt and notifyOffsetChange always
+// release wrapper.mu before invoking the pool callback.
 type readAtWrapper struct {
+	closed bool
 	mu     sync.Mutex
 	reader io.ReadSeekCloser
 	offset int64 // tracks the read position in bytes
@@ -172,11 +170,35 @@ type readAtWrapper struct {
 func (rw *readAtWrapper) Close() error {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
+	if rw.closed {
+		return nil
+	}
+	rw.closed = true
+	rw.onOffsetChange = nil
 	rw.cacheBuf = nil
 	rw.cacheLen = 0
 	rw.cacheStart = 0
 	rw.offset = 0
+	if rw.reader == nil {
+		return nil
+	}
 	return rw.reader.Close()
+}
+
+// notifyOffsetChange invokes the current callback without holding rw.mu. Seek
+// notifications use this path so the pool can protect the destination before
+// the next potentially blocking ReadAt cache refill.
+func (rw *readAtWrapper) notifyOffsetChange(newOffset int64) {
+	rw.mu.Lock()
+	if rw.closed {
+		rw.mu.Unlock()
+		return
+	}
+	cb := rw.onOffsetChange
+	rw.mu.Unlock()
+	if cb != nil {
+		cb(newOffset)
+	}
 }
 
 // ReadAt seeks to the requested offset, reads data, and notifies the pool of the
@@ -187,6 +209,10 @@ func (rw *readAtWrapper) Close() error {
 // underlying reader's shared Seek and Read positions.
 func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 	rw.mu.Lock()
+	if rw.closed {
+		rw.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
 
 	// 1. Try to fulfill the read request from the internal buffer.
 	if rw.cacheLen > 0 && off >= rw.cacheStart && off < rw.cacheStart+int64(rw.cacheLen) {
@@ -293,17 +319,33 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
+// seekNotifyingReader reports successful seeks before the following read can
+// block on torrent data. io.SectionReader still provides the bounded file view.
+type seekNotifyingReader struct {
+	io.ReadSeeker
+	onSeek func(int64)
+}
+
+func (r *seekNotifyingReader) Seek(offset int64, whence int) (int64, error) {
+	position, err := r.ReadSeeker.Seek(offset, whence)
+	if err == nil && r.onSeek != nil {
+		r.onSeek(position)
+	}
+	return position, err
+}
+
 // streamReader wraps a torrent.Reader with lifecycle management.
 type streamReader struct {
-	active        bool
-	cancel        context.CancelFunc
-	ctx           context.Context
-	file          *torrent.File
-	infoHash      metainfo.Hash
-	idleSince     time.Time
-	isFileStorage bool
-	isPreload     bool
-	preloadEnd    int64
+	active         bool
+	cancel         context.CancelFunc
+	closeOnRelease bool
+	ctx            context.Context
+	file           *torrent.File
+	infoHash       metainfo.Hash
+	idleSince      time.Time
+	isFileStorage  bool
+	isPreload      bool
+	preloadEnd     int64
 	// lastOffset is the last byte offset reported by the onOffsetChange
 	// callback. Updated under pool.mu only, so code holding pool.mu can
 	// read it without acquiring wrapper.mu.
@@ -437,13 +479,40 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	// playback position and destroy it once the preload finishes.
 	var reusableKey readerKey
 	var reusableSR *streamReader
-	if !isPreload {
-		for key, sr := range p.readers {
-			if key.infoHash == infoHash && key.filePath == file.Path() && !sr.active {
-				reusableKey = key
-				reusableSR = sr
-				break
+	for key, sr := range p.readers {
+		if key.infoHash != infoHash || key.filePath != file.Path() {
+			continue
+		}
+
+		// A torrent can be explicitly dropped and re-added with the same
+		// info hash and file path. Its old readers remain bound to the closed
+		// torrent instance and must never be reused for the replacement. Remove
+		// idle readers immediately and retire active readers when their caller
+		// releases them. This reconciliation applies to preload acquisitions too,
+		// even though preload readers themselves are never reused.
+		if sr.file == nil || sr.file.Torrent() != file.Torrent() {
+			if sr.active {
+				sr.closeOnRelease = true
+				continue
 			}
+			sr.prioritySeq.Add(1)
+			if len(sr.prioritizedPieces) > 0 {
+				sr.priorityMu.Lock()
+				p.clearReaderPrioritiesLocked(sr)
+				sr.priorityMu.Unlock()
+			}
+			if p.cfg.Registry != nil {
+				p.cfg.Registry.ClearActiveRange(sr.infoHash, sr.readerID)
+				p.cfg.Registry.ClearFileBoundaries(sr.infoHash, sr.readerID)
+			}
+			closeStreamReaderLocked(sr)
+			delete(p.readers, key)
+			continue
+		}
+
+		if !isPreload && !sr.active && reusableSR == nil {
+			reusableKey = key
+			reusableSR = sr
 		}
 	}
 
@@ -523,7 +592,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		}
 
 		sectionReader := io.NewSectionReader(sr.wrapper, 0, file.Length())
-		return sectionReader, release, nil
+		return &seekNotifyingReader{ReadSeeker: sectionReader, onSeek: sr.wrapper.notifyOffsetChange}, release, nil
 	}
 
 	// No idle reader found for reuse. All existing readers for this file are active.
@@ -597,7 +666,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	}
 
 	sectionReader := io.NewSectionReader(wrapper, 0, file.Length())
-	return sectionReader, release, nil
+	return &seekNotifyingReader{ReadSeeker: sectionReader, onSeek: wrapper.notifyOffsetChange}, release, nil
 }
 
 func preloadReadaheadFunc(end int64) torrent.ReadaheadFunc {
@@ -651,6 +720,22 @@ func preloadPriorityPlan(file *torrent.File, start, end int64) []prioritizedPiec
 	return planned
 }
 
+// closeStreamReaderLocked cancels and closes a reader while serializing with
+// any in-flight ReadAt operation through its wrapper. The caller must hold
+// Pool.mu so no new pool-owned use can begin while closure is in progress.
+func closeStreamReaderLocked(sr *streamReader) {
+	if sr.cancel != nil {
+		sr.cancel()
+		sr.cancel = nil
+	}
+	if sr.wrapper != nil {
+		_ = sr.wrapper.Close()
+	} else if sr.reader != nil {
+		_ = sr.reader.Close()
+	}
+	sr.reader = nil
+}
+
 // release marks a reader as idle and clears active ranges.
 // Called immediately after the HTTP request ends (via defer in streamFile).
 //
@@ -691,27 +776,13 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 	sr.priorityMu.Lock()
 	p.clearReaderPrioritiesLocked(sr)
 	sr.priorityMu.Unlock()
-	if sr.isPreload {
-		// Preload readers are one-shot range workers. Closing them immediately
-		// clears anacrolix's current-piece claim at the range boundary and avoids
-		// an idle reader continuing to schedule data after its reservation ends.
+	if sr.isPreload || sr.closeOnRelease {
+		// Preload readers are one-shot range workers, and readers belonging to a
+		// replaced torrent generation must not enter the idle reuse pool. Closing
+		// either immediately clears anacrolix's current-piece claim and prevents
+		// stale readers from keeping the current torrent alive through HasReaders.
 		sr.active = false
-		if sr.wrapper != nil {
-			sr.wrapper.mu.Lock()
-			sr.wrapper.onOffsetChange = nil
-			sr.wrapper.cacheBuf = nil
-			sr.wrapper.cacheLen = 0
-			sr.wrapper.cacheStart = 0
-			sr.wrapper.mu.Unlock()
-		}
-		if sr.cancel != nil {
-			sr.cancel()
-		}
-		reader := sr.reader
-		sr.reader = nil
-		if reader != nil {
-			_ = reader.Close()
-		}
+		closeStreamReaderLocked(sr)
 		delete(p.readers, key)
 		if p.readaheadBudget > 0 {
 			p.refreshReadaheadLocked(p.readaheadBudget)
@@ -787,14 +858,7 @@ func (p *Pool) evictOldestIdleLocked(infoHash metainfo.Hash, filePath string) bo
 			p.cfg.Registry.ClearActiveRange(oldest.infoHash, oldest.readerID)
 			p.cfg.Registry.ClearFileBoundaries(oldest.infoHash, oldest.readerID)
 		}
-		if oldest.cancel != nil {
-			oldest.cancel()
-		}
-		r := oldest.reader
-		oldest.reader = nil
-		if r != nil {
-			_ = r.Close()
-		}
+		closeStreamReaderLocked(oldest)
 		delete(p.readers, oldestKey)
 		p.logger.Debug("evicted idle reader to make room",
 			slog.String("hash", infoHash.HexString()),
@@ -1475,13 +1539,7 @@ func (p *Pool) Close() {
 		}
 		sr.prioritizedPieces = nil
 		sr.priorityMu.Unlock()
-		if sr.cancel != nil {
-			sr.cancel()
-		}
-		if sr.reader != nil {
-			_ = sr.reader.Close()
-			sr.reader = nil
-		}
+		closeStreamReaderLocked(sr)
 		if p.cfg.Registry != nil {
 			p.cfg.Registry.ClearActiveRange(sr.infoHash, sr.readerID)
 			p.cfg.Registry.ClearFileBoundaries(sr.infoHash, sr.readerID)
@@ -1602,13 +1660,7 @@ func (p *Pool) parkIdleReaders() {
 			c.sr.prioritizedPieces = nil
 			c.sr.priorityMu.Unlock()
 		}
-		if c.sr.cancel != nil {
-			c.sr.cancel()
-		}
-		if c.sr.reader != nil {
-			_ = c.sr.reader.Close()
-			c.sr.reader = nil
-		}
+		closeStreamReaderLocked(c.sr)
 		if p.cfg.Registry != nil {
 			p.cfg.Registry.ClearActiveRange(c.sr.infoHash, c.sr.readerID)
 			p.cfg.Registry.ClearFileBoundaries(c.sr.infoHash, c.sr.readerID)
