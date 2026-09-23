@@ -18,13 +18,14 @@ var ErrUnimplemented = errors.New("unimplemented")
 // It is used for embedding in other implementations to ensure forward compatibility.
 type Unimplemented struct{}
 
-func (Unimplemented) Delete(_ *string) error { return ErrUnimplemented }
-func (Unimplemented) DownloadImageData(_ context.Context, url string) ([]byte, error) {
+func (Unimplemented) Close() error          { return ErrUnimplemented }
+func (Unimplemented) Delete(_ string) error { return ErrUnimplemented }
+func (Unimplemented) DownloadImageData(_ context.Context, _ string) ([]byte, error) {
 	return nil, ErrUnimplemented
 }
-func (Unimplemented) Get(_ string) ([]byte, error)       { return nil, ErrUnimplemented }
-func (Unimplemented) ListIDs() ([]string, error)         { return nil, ErrUnimplemented }
-func (Unimplemented) SaveData(_ []byte) (*string, error) { return nil, ErrUnimplemented }
+func (Unimplemented) Get(_ string) ([]byte, error)      { return nil, ErrUnimplemented }
+func (Unimplemented) ListIDs() ([]string, error)        { return nil, ErrUnimplemented }
+func (Unimplemented) SaveData(_ []byte) (string, error) { return "", ErrUnimplemented }
 func (Unimplemented) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	http.Error(w, ErrUnimplemented.Error(), http.StatusNotImplemented)
 }

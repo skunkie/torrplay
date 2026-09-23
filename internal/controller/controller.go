@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -318,12 +317,7 @@ func (c *Controller) buildRouter() *chi.Mux {
 	}
 
 	// Posters routes.
-	postersHandler := http.StripPrefix(c.postersPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		ext := path.Ext(p)
-		r.URL.Path = strings.TrimSuffix(p, ext)
-		c.images.ServeHTTP(w, r)
-	}))
+	postersHandler := http.StripPrefix(c.postersPath, c.images)
 	router.Mount(c.postersPath, postersHandler)
 
 	// Metrics routes.
@@ -576,6 +570,9 @@ func (c *Controller) Shutdown() {
 	if c.client != nil {
 		_ = c.client.Close()
 	}
+	if c.images != nil {
+		_ = c.images.Close()
+	}
 	if c.logFile != nil {
 		_ = c.logFile.Close()
 	}
@@ -699,7 +696,7 @@ func (c *Controller) cleanupUnusedPosters() {
 		}
 
 		if !isUsed {
-			if err := c.images.Delete(&id); err != nil {
+			if err := c.images.Delete(id); err != nil {
 				c.logger.Load().Error("failed to delete unused poster", "err", err)
 			} else {
 				c.logger.Load().Debug("deleted unused poster", "poster id", id)

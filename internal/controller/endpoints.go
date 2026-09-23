@@ -1166,7 +1166,7 @@ func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	if err != nil {
 		return nil
 	}
-	contentType := http.DetectContentType(data)
+	contentType := images.DetectContentType(data)
 	ext, ok := images.ImageTypes[contentType]
 	if ok {
 		posterURL.Path = path.Join(c.postersPath, id+ext)
@@ -1382,11 +1382,11 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 	}
 
 	// If the poster is the same, do nothing.
-	if t.Poster != nil && imageID != nil && *t.Poster == *imageID {
+	if t.Poster != nil && *t.Poster == imageID {
 		return
 	}
 
-	t.Poster = imageID
+	t.Poster = &imageID
 	t.UpdatedAt = new(time.Now())
 
 	if err := c.db.UpdateTorrent(t); err != nil {
