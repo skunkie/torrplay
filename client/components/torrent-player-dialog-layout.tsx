@@ -19,24 +19,26 @@ import { Button } from './ui/button';
 import { VideoPlayerLayout } from './video-player-layout';
 
 interface TorrentPlayerDialogLayoutProps {
-  open: boolean,
-  onOpenChange: (open: boolean) => void,
-  videoFiles: TorrentFile[],
-  setSelectedFile: (file: TorrentFile) => void,
-  isPlayerVisible: boolean,
-  videoPlayerOptions: {
-    src: PlayerSrc,
-    title?: string,
-    autoPlay?: boolean,
-    tracks?: SubtitleTrackInfo[]
-  } | null,
   handleExit?: () => void,
+  initialPlaybackPositionSeconds?: number,
+  isDemo?: boolean,
+  isPlayerVisible: boolean,
+  onOpenChange: (open: boolean) => void,
+  onPlaybackPositionChange?: (positionSeconds: number) => void,
+  open: boolean,
   playlistNavigation?: {
-    onPrevious?: () => void,
-    onNext?: () => void
+    onNext?: () => void,
+    onPrevious?: () => void
   },
   preloadBadge?: PreloadBadgeInfo | null,
-  isDemo?: boolean
+  setSelectedFile: (file: TorrentFile) => void,
+  videoFiles: TorrentFile[],
+  videoPlayerOptions: {
+    autoPlay?: boolean,
+    src: PlayerSrc,
+    title?: string,
+    tracks?: SubtitleTrackInfo[]
+  } | null
 }
 
 export const TorrentPlayerDialogLayout = ({
@@ -47,6 +49,8 @@ export const TorrentPlayerDialogLayout = ({
   isPlayerVisible,
   videoPlayerOptions,
   handleExit,
+  initialPlaybackPositionSeconds,
+  onPlaybackPositionChange,
   playlistNavigation,
   preloadBadge,
   isDemo = false,
@@ -64,6 +68,8 @@ export const TorrentPlayerDialogLayout = ({
         }}
         options={videoPlayerOptions}
         onExit={handleExit}
+        initialPlaybackPositionSeconds={initialPlaybackPositionSeconds}
+        onPlaybackPositionChange={onPlaybackPositionChange}
         playlistNavigation={playlistNavigation}
         preloadBadge={preloadBadge}
         isDemo={isDemo}

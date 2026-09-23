@@ -337,6 +337,7 @@ func registerTools(s *server.MCPServer, client *Client) {
 			mcp.WithInteger("file_index", mcp.Description("Index of the file to preload. Takes precedence over file_path; defaults to file 0 when both are omitted.")),
 			mcp.WithString("file_path", mcp.Description("Relative path of the file to preload within the torrent.")),
 			mcp.WithString("magnet", mcp.Description("Optional magnet URI used to bootstrap a torrent that is not stored in TorrPlay.")),
+			mcp.WithNumber("playback_position_seconds", mcp.Description("Zero-based position on the selected media file's presentation timeline in seconds. The server resolves it through the container index.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			hash, err := req.RequireString("hash")
@@ -368,6 +369,14 @@ func registerTools(s *server.MCPServer, client *Client) {
 			}
 			if magnet != "" {
 				preloadReq.Magnet = &magnet
+			}
+			arguments := req.GetArguments()
+			if _, ok := arguments["playback_position_seconds"]; ok {
+				playbackPositionSeconds, positionErr := req.RequireFloat("playback_position_seconds")
+				if positionErr != nil {
+					return nil, positionErr
+				}
+				preloadReq.PlaybackPositionSeconds = &playbackPositionSeconds
 			}
 
 			status, err := client.PreloadTorrent(ctx, h.HexString(), preloadReq)

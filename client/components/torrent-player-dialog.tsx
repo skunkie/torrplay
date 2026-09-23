@@ -7,7 +7,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { cancelPreload, getPreload, getTorrentStreamUrl, startPreload } from '@/lib/api/torrents';
-import { type Torrent, type TorrentFile } from '@/lib/types/api';
+import { getPlaybackPositionSeconds, savePlaybackPositionSeconds } from '@/lib/playback-position';
+import { type PreloadRequest, type Torrent, type TorrentFile } from '@/lib/types/api';
 import { getInitialVideoFile, getSubtitleTracksForVideo, getVideoFiles, getVideoType } from '@/lib/video-utils';
 
 import { TorrentPlayerDialogLayout } from './torrent-player-dialog-layout';
@@ -148,7 +149,10 @@ export const TorrentPlayerDialog = ({
     setActivePeers(0);
     setTotalPeers(0);
 
-    startPreload(currentTorrent.hash, { filePath: currentSelectedFile.path })
+    const playbackPositionSeconds = getPlaybackPositionSeconds(currentTorrent.hash, currentSelectedFile.path);
+    const preloadRequest: PreloadRequest = { filePath: currentSelectedFile.path };
+    if (playbackPositionSeconds > 0) preloadRequest.playbackPositionSeconds = playbackPositionSeconds;
+    startPreload(currentTorrent.hash, preloadRequest)
       .then(resp => {
         if (!isMounted) return;
         setPreloadProgress(current => Math.max(current, resp.progress || 0));
@@ -272,6 +276,16 @@ export const TorrentPlayerDialog = ({
   }, [selectedFile, torrent]);
 
   const isPlayerVisible = !!videoPlayerOptions;
+
+  const initialPlaybackPositionSeconds = selectedFile && torrent
+    ? getPlaybackPositionSeconds(torrent.hash, selectedFile.path)
+    : 0;
+
+  const handlePlaybackPositionChange = useCallback((positionSeconds: number) => {
+    if (!torrentHash || !selectedFilePath) return;
+    savePlaybackPositionSeconds(torrentHash, selectedFilePath, positionSeconds);
+  }, [selectedFilePath, torrentHash]);
+
   const selectedFileIndex = selectedFile
     ? videoFiles.findIndex(file => file.path === selectedFile.path)
     : -1;
@@ -323,6 +337,8 @@ export const TorrentPlayerDialog = ({
       isPlayerVisible={isPlayerVisible}
       videoPlayerOptions={videoPlayerOptions}
       handleExit={handleExit}
+      initialPlaybackPositionSeconds={initialPlaybackPositionSeconds}
+      onPlaybackPositionChange={handlePlaybackPositionChange}
       playlistNavigation={playlistNavigation}
       preloadBadge={preloadBadge}
     />

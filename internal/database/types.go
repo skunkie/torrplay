@@ -12,7 +12,8 @@ import (
 // It embeds the api.Torrent struct and adds an InfoBytes field.
 type Torrent struct {
 	api.Torrent
-	InfoBytes []byte `json:"info_bytes,omitempty"`
+	InfoBytes         []byte             `json:"info_bytes,omitempty"`
+	PlaybackPositions map[string]float64 `json:"playback_positions,omitempty"`
 }
 
 // Settings represents the application settings in the database.

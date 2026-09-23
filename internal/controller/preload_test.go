@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -216,6 +217,91 @@ func TestCalculatePreloadBudget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expectedPreloaded, calculatePreloadBudget(tt.fileSize, tt.maxMemory))
+		})
+	}
+}
+
+func TestPlanPreloadRanges(t *testing.T) {
+	t.Run("fresh playback preserves head and tail preload", func(t *testing.T) {
+		ranges := planPreloadRanges(1000, 400, 100, nil)
+
+		assert.Equal(t, []preloadByteRange{
+			{end: 300},
+			{start: 900, end: 1000},
+		}, ranges)
+		assert.Equal(t, int64(400), preloadRangesSize(ranges))
+	})
+
+	t.Run("resume reserves metadata and position ranges", func(t *testing.T) {
+		position := int64(500)
+		ranges := planPreloadRanges(1000, 400, 100, &position)
+
+		assert.Equal(t, []preloadByteRange{
+			{end: 100},
+			{start: 475, end: 675},
+			{start: 900, end: 1000},
+		}, ranges)
+		assert.Equal(t, int64(400), preloadRangesSize(ranges))
+	})
+
+	t.Run("resume near beginning keeps its forward window outside metadata", func(t *testing.T) {
+		position := int64(10)
+		ranges := planPreloadRanges(1000, 400, 100, &position)
+
+		assert.Equal(t, preloadByteRange{end: 300}, ranges[0])
+	})
+
+	t.Run("whole-file budget uses one range", func(t *testing.T) {
+		position := int64(50)
+		assert.Equal(t, []preloadByteRange{{end: 100}}, planPreloadRanges(100, 100, 20, &position))
+	})
+
+	t.Run("overlapping metadata and position windows merge", func(t *testing.T) {
+		position := int64(125)
+		ranges := planPreloadRanges(1000, 400, 100, &position)
+
+		assert.Equal(t, []preloadByteRange{
+			{end: 300},
+			{start: 900, end: 1000},
+		}, ranges)
+		assert.Equal(t, int64(400), preloadRangesSize(ranges))
+	})
+}
+
+func TestValidatePreloadPosition(t *testing.T) {
+	tests := []struct {
+		name             string
+		req              api.PreloadRequest
+		expectedPosition float64
+		wantErr          string
+	}{
+		{name: "omitted"},
+		{
+			name:             "valid fractional position",
+			req:              api.PreloadRequest{PlaybackPositionSeconds: utils.Ptr(900.25)},
+			expectedPosition: 900.25,
+		},
+		{
+			name:    "negative position",
+			req:     api.PreloadRequest{PlaybackPositionSeconds: utils.Ptr(-1.0)},
+			wantErr: "playback_position_seconds must be",
+		},
+		{
+			name:    "non-finite position",
+			req:     api.PreloadRequest{PlaybackPositionSeconds: utils.Ptr(math.Inf(1))},
+			wantErr: "playback_position_seconds must be",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			position, err := validatePreloadPosition(test.req)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.expectedPosition, position)
 		})
 	}
 }
@@ -781,7 +867,7 @@ func TestStartPreloadConcurrentSameFileIsIdempotent(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			<-start
-			tasks <- ctrl.startPreload(to, file, 0)
+			tasks <- ctrl.startPreload(to, file, 0, nil)
 		})
 	}
 	close(start)
@@ -818,7 +904,7 @@ func TestStartPreloadQueuesWhilePlaybackIsActive(t *testing.T) {
 	ctrl.preloadPlaybackCount = 1
 	ctrl.preloadsMu.Unlock()
 
-	preload := ctrl.startPreload(to, file, 0)
+	preload := ctrl.startPreload(to, file, 0, nil)
 	require.NotNil(t, preload)
 	assert.True(t, preload.queued)
 	assert.False(t, preload.active)

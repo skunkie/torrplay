@@ -13,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/media"
 	"github.com/torrplay/torrplay/internal/utils"
 	"github.com/torrplay/torrplay/pkg/stream"
 )
@@ -45,9 +47,13 @@ const (
 	// Preload protection is registered directly with storage rather than by a
 	// Pool reader. Keep these sentinels far from Pool.nextID's zero-based reader
 	// IDs; changes to either allocation scheme must preserve that separation.
-	preloadHeadReaderID uint64 = 1<<63 - 1
-	preloadTailReaderID uint64 = preloadHeadReaderID - 1
+	preloadReaderIDBase uint64 = 1<<63 - 1
 )
+
+type preloadByteRange struct {
+	end   int64
+	start int64
+}
 
 type preloadTask struct {
 	ctx             context.Context
@@ -64,6 +70,7 @@ type preloadTask struct {
 	targetBytes     int64
 	fileIndex       int
 	filePath        string
+	ranges          []preloadByteRange
 	active          bool
 	protected       bool
 	queued          bool
@@ -76,6 +83,20 @@ type preloadStatusSnapshot struct {
 	expiryTimer    *time.Timer
 	progress       float32
 	targetBytes    int64
+}
+
+type preloadSeekReaderAt struct {
+	mu     sync.Mutex
+	reader io.ReadSeeker
+}
+
+func (reader *preloadSeekReaderAt) ReadAt(buffer []byte, offset int64) (int, error) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	if _, err := reader.reader.Seek(offset, io.SeekStart); err != nil {
+		return 0, err
+	}
+	return io.ReadFull(reader.reader, buffer)
 }
 
 func (p *preloadTask) progressBytes() int64 {
@@ -171,13 +192,63 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 		}
 	}
 
-	c.startPreload(to, files[targetIdx], targetIdx)
+	playbackPositionSeconds, err := validatePreloadPosition(req)
+	if err != nil {
+		api.HTTPError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var playbackOffset *int64
+	if playbackPositionSeconds > 0 {
+		if offset, ok := c.resolvePreloadOffset(r.Context(), files[targetIdx], playbackPositionSeconds); ok {
+			playbackOffset = &offset
+		}
+	}
+
+	c.startPreload(to, files[targetIdx], targetIdx, playbackOffset)
 
 	resp := c.getPreloadStatus(ih)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func validatePreloadPosition(req api.PreloadRequest) (float64, error) {
+	positionSeconds := 0.0
+	if req.PlaybackPositionSeconds != nil {
+		positionSeconds = *req.PlaybackPositionSeconds
+		if math.IsNaN(positionSeconds) || math.IsInf(positionSeconds, 0) || positionSeconds < 0 {
+			return 0, errors.New("playback_position_seconds must be a finite number greater than or equal to 0")
+		}
+	}
+	return positionSeconds, nil
+}
+
+func (c *Controller) resolvePreloadOffset(ctx context.Context, file *torrent.File, positionSeconds float64) (int64, bool) {
+	if file == nil || positionSeconds <= 0 {
+		return 0, false
+	}
+	reader := file.NewReader()
+	reader.SetContext(ctx)
+	reader.SetReadahead(1 << 20)
+	reader.SetResponsive()
+	defer reader.Close()
+
+	offset, ok, err := media.ResolvePlaybackOffset(
+		&preloadSeekReaderAt{reader: reader},
+		file.Length(),
+		file.Path(),
+		positionSeconds,
+	)
+	if err != nil {
+		c.logger.Debug("failed to resolve preload playback position",
+			"error", err,
+			"file", file.Path(),
+			"positionSeconds", positionSeconds)
+		return 0, false
+	}
+	return offset, ok
 }
 
 // GetTorrentPreload returns the current preload status and progress for a torrent.
@@ -307,7 +378,12 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 	return base
 }
 
-func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileIndex int) *preloadTask {
+func (c *Controller) startPreload(
+	to *torrent.Torrent,
+	file *torrent.File,
+	fileIndex int,
+	playbackOffset *int64,
+) *preloadTask {
 	if to == nil || to.Info() == nil || file == nil {
 		return nil
 	}
@@ -337,14 +413,21 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 
 	c.preloadsMu.Lock()
 	c.clearPreloadSnapshotLocked(ih)
+	preloadBudget := calculatePreloadBudget(file.Length(), maxMem)
+	startend := max(int64(stream.DefaultFileBoundaryBytes), to.Info().PieceLength)
+	ranges := planPreloadRanges(
+		file.Length(),
+		preloadBudget,
+		startend,
+		playbackOffset,
+	)
 	if current, ok := c.preloads.Load(ih); ok {
-		if p, ok := current.(*preloadTask); ok && p != nil && p.fileIndex == fileIndex {
+		if p, ok := current.(*preloadTask); ok && p != nil && p.fileIndex == fileIndex && preloadRangesEqual(p.ranges, ranges) {
 			c.preloadsMu.Unlock()
 			return p
 		}
 	}
-	preloadBudget := calculatePreloadBudget(file.Length(), maxMem)
-	if preloadBudget <= 0 {
+	if len(ranges) == 0 {
 		if old, ok := c.preloads.LoadAndDelete(ih); ok {
 			if p, ok := old.(*preloadTask); ok {
 				c.releasePreloadLocked(p, true)
@@ -353,22 +436,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		c.preloadsMu.Unlock()
 		return nil
 	}
-
-	startend := max(int64(stream.DefaultFileBoundaryBytes), to.Info().PieceLength)
-	var readerStartEnd, readerEndStart, readerEndEnd, targetBytes int64
-	switch {
-	case file.Length() <= startend:
-		readerStartEnd = min(preloadBudget, file.Length())
-		targetBytes = readerStartEnd
-	case preloadBudget <= startend:
-		readerStartEnd = preloadBudget
-		targetBytes = readerStartEnd
-	default:
-		readerEndStart = file.Length() - startend
-		readerEndEnd = file.Length()
-		readerStartEnd = min(preloadBudget-startend, readerEndStart)
-		targetBytes = readerStartEnd + (readerEndEnd - readerEndStart)
-	}
+	targetBytes := preloadRangesSize(ranges)
 
 	if old, ok := c.preloads.LoadAndDelete(ih); ok {
 		if p, ok := old.(*preloadTask); ok {
@@ -379,8 +447,11 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 	ctx, cancel := context.WithCancel(context.Background())
 	clearProtection := func() {
 		if storageClient != nil {
-			storageClient.ClearActiveRange(ih, preloadHeadReaderID)
-			storageClient.ClearActiveRange(ih, preloadTailReaderID)
+			readerID := preloadReaderIDBase
+			for range ranges {
+				storageClient.ClearActiveRange(ih, readerID)
+				readerID--
+			}
 		}
 	}
 	preload := &preloadTask{
@@ -392,6 +463,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		targetBytes:     targetBytes,
 		fileIndex:       fileIndex,
 		filePath:        file.Path(),
+		ranges:          ranges,
 		queued:          true,
 	}
 	preload.reserveBudget = func() bool {
@@ -412,14 +484,18 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 	}
 	preload.setProtection = func() {
 		if storageClient != nil {
-			if hs, he, ts, te, ok := preloadPieceBoundaries(file, readerStartEnd, readerEndStart, readerEndEnd); ok {
-				storageClient.SetActiveRange(ih, preloadHeadReaderID, hs, he)
-				storageClient.SetActiveRange(ih, preloadTailReaderID, ts, te)
+			readerID := preloadReaderIDBase
+			for _, byteRange := range ranges {
+				startPiece, endPiece, ok := preloadPieceRange(file, byteRange)
+				if ok {
+					storageClient.SetActiveRange(ih, readerID, startPiece, endPiece)
+				}
+				readerID--
 			}
 		}
 	}
 	preload.start = func() {
-		c.runPreload(preload, to, file, pool, mode, readerStartEnd, readerEndStart, readerEndEnd)
+		c.runPreload(preload, to, file, pool, mode, ranges)
 	}
 	c.preloads.Store(ih, preload)
 	c.preloadQueue = append(c.preloadQueue, preload)
@@ -495,7 +571,14 @@ func (c *Controller) dropUndispatchablePreloadLocked(preload *preloadTask, reaso
 	preload.cancel()
 }
 
-func (c *Controller) runPreload(preload *preloadTask, to *torrent.Torrent, file *torrent.File, pool *stream.Pool, mode stream.StorageMode, readerStartEnd, readerEndStart, readerEndEnd int64) {
+func (c *Controller) runPreload(
+	preload *preloadTask,
+	to *torrent.Torrent,
+	file *torrent.File,
+	pool *stream.Pool,
+	mode stream.StorageMode,
+	ranges []preloadByteRange,
+) {
 	completed := false
 	defer func() {
 		preload.doneOnce.Do(func() { close(preload.done) })
@@ -515,20 +598,15 @@ func (c *Controller) runPreload(preload *preloadTask, to *torrent.Torrent, file 
 		}
 	}()
 
-	results := make(chan error, 2)
-	workers := 1
-	go func() {
-		results <- preloadRange(preload.ctx, pool, file, mode, 0, readerStartEnd, &preload.bytesRead)
-	}()
-	if readerEndEnd > readerEndStart {
-		workers++
-		go func() {
-			results <- preloadRange(preload.ctx, pool, file, mode, readerEndStart, readerEndEnd, &preload.bytesRead)
-		}()
+	results := make(chan error, len(ranges))
+	for _, byteRange := range ranges {
+		go func(target preloadByteRange) {
+			results <- preloadRange(preload.ctx, pool, file, mode, target.start, target.end, &preload.bytesRead)
+		}(byteRange)
 	}
 
 	var preloadErr error
-	for range workers {
+	for range ranges {
 		if err := <-results; err != nil && !errors.Is(err, context.Canceled) && preloadErr == nil {
 			preloadErr = err
 			preload.cancel()
@@ -558,6 +636,104 @@ func (c *Controller) runPreload(preload *preloadTask, to *torrent.Torrent, file 
 // right now is decided by the stream pool at reservation time.
 func calculatePreloadBudget(fileSize, maxMemory int64) int64 {
 	return max(min(fileSize, maxMemory/2/maxConcurrentPreloads, maxPreloadBytes), 0)
+}
+
+func planPreloadRanges(
+	fileSize int64,
+	preloadBudget int64,
+	boundaryBytes int64,
+	playbackOffset *int64,
+) []preloadByteRange {
+	preloadBudget = min(max(preloadBudget, 0), max(fileSize, 0))
+	if preloadBudget == 0 {
+		return nil
+	}
+	if preloadBudget == fileSize {
+		return []preloadByteRange{{end: fileSize}}
+	}
+
+	if playbackOffset == nil {
+		boundaryBytes = min(max(boundaryBytes, 0), fileSize)
+		if preloadBudget <= boundaryBytes {
+			return []preloadByteRange{{end: preloadBudget}}
+		}
+
+		tailStart := fileSize - boundaryBytes
+		headEnd := min(preloadBudget-boundaryBytes, tailStart)
+		ranges := make([]preloadByteRange, 0, 2)
+		if headEnd > 0 {
+			ranges = append(ranges, preloadByteRange{end: headEnd})
+		}
+		if tailStart < fileSize {
+			ranges = append(ranges, preloadByteRange{end: fileSize, start: tailStart})
+		}
+		return ranges
+	}
+
+	metadataBytes := min(max(boundaryBytes, 0), preloadBudget/4)
+	headEnd := metadataBytes
+	tailStart := fileSize - metadataBytes
+	positionBudget := min(preloadBudget-2*metadataBytes, tailStart-headEnd)
+	positionByte := *playbackOffset
+	positionByte = min(max(positionByte, headEnd), tailStart)
+	positionStart := positionByte - positionBudget/8
+	positionStart = min(max(positionStart, headEnd), tailStart-positionBudget)
+
+	ranges := make([]preloadByteRange, 0, 3)
+	if headEnd > 0 {
+		ranges = append(ranges, preloadByteRange{end: headEnd})
+	}
+	if positionBudget > 0 {
+		ranges = append(ranges, preloadByteRange{
+			end:   positionStart + positionBudget,
+			start: positionStart,
+		})
+	}
+	if tailStart < fileSize {
+		ranges = append(ranges, preloadByteRange{end: fileSize, start: tailStart})
+	}
+	return normalizePreloadRanges(ranges)
+}
+
+func normalizePreloadRanges(ranges []preloadByteRange) []preloadByteRange {
+	filtered := ranges[:0]
+	for _, byteRange := range ranges {
+		if byteRange.end > byteRange.start {
+			filtered = append(filtered, byteRange)
+		}
+	}
+	sort.Slice(filtered, func(left, right int) bool {
+		return filtered[left].start < filtered[right].start
+	})
+	merged := make([]preloadByteRange, 0, len(filtered))
+	for _, byteRange := range filtered {
+		if len(merged) == 0 || byteRange.start > merged[len(merged)-1].end {
+			merged = append(merged, byteRange)
+			continue
+		}
+		merged[len(merged)-1].end = max(merged[len(merged)-1].end, byteRange.end)
+	}
+	return merged
+}
+
+func preloadRangesEqual(left, right []preloadByteRange) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func preloadRangesSize(ranges []preloadByteRange) int64 {
+	var size int64
+	for _, byteRange := range ranges {
+		size += max(byteRange.end-byteRange.start, 0)
+	}
+	return size
 }
 
 func (c *Controller) finishPreload(preload *preloadTask, completed bool) {
@@ -624,20 +800,14 @@ func readPreloadRange(ctx context.Context, reader io.ReadSeeker, start, end int6
 	return nil
 }
 
-func preloadPieceBoundaries(file *torrent.File, headEnd, tailStart, tailEnd int64) (int, int, int, int, bool) {
-	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil || headEnd <= 0 {
-		return 0, 0, 0, 0, false
+func preloadPieceRange(file *torrent.File, byteRange preloadByteRange) (int, int, bool) {
+	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil || byteRange.end <= byteRange.start {
+		return 0, 0, false
 	}
 	pieceLength := max(file.Torrent().Info().PieceLength, 1)
 	fileOffset := file.Offset()
-	headStartPiece := int(fileOffset / pieceLength)
-	headEndPiece := int((fileOffset + headEnd - 1) / pieceLength)
-	if tailEnd <= tailStart {
-		return headStartPiece, headEndPiece, headStartPiece, headEndPiece, true
-	}
-	return headStartPiece, headEndPiece,
-		int((fileOffset + tailStart) / pieceLength),
-		int((fileOffset + tailEnd - 1) / pieceLength), true
+	return int((fileOffset + byteRange.start) / pieceLength),
+		int((fileOffset + byteRange.end - 1) / pieceLength), true
 }
 
 func (c *Controller) cancelPreload(ih metainfo.Hash) {

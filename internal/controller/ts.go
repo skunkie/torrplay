@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -568,6 +569,10 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 	switch req.Action {
 	case api.TSViewedRequestActionSet, api.TSViewedRequestActionRem:
 		viewed := req.Action == api.TSViewedRequestActionSet
+		if req.Timecode != nil && (math.IsNaN(*req.Timecode) || math.IsInf(*req.Timecode, 0) || *req.Timecode < 0) {
+			api.HTTPError(w, "timecode must be a finite number greater than or equal to 0", http.StatusBadRequest)
+			return
+		}
 		ih, err := utils.HashFromHexString(req.Hash)
 		if err != nil {
 			api.HTTPError(w, err.Error(), http.StatusBadRequest)
@@ -601,9 +606,47 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 			api.HandleError(w, err)
 			return
 		}
+		updated, err := c.db.GetTorrent(ih)
+		if err != nil {
+			api.HandleError(w, err)
+			return
+		}
+		filePath := updated.Files[index].Path
+		positionChanged := false
+		if viewed && req.Timecode != nil {
+			if updated.PlaybackPositions == nil {
+				updated.PlaybackPositions = make(map[string]float64)
+			}
+			if current, exists := updated.PlaybackPositions[filePath]; !exists || current != *req.Timecode {
+				updated.PlaybackPositions[filePath] = *req.Timecode
+				positionChanged = true
+			}
+		} else if !viewed && updated.PlaybackPositions != nil {
+			if _, exists := updated.PlaybackPositions[filePath]; exists {
+				delete(updated.PlaybackPositions, filePath)
+				positionChanged = true
+			}
+		}
+		if positionChanged {
+			now := time.Now()
+			updated.UpdatedAt = &now
+			if err := c.db.UpdateTorrent(updated); err != nil {
+				api.HandleError(w, err)
+				return
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 
 	case api.TSViewedRequestActionList:
+		var filterHash *metainfo.Hash
+		if req.Hash != "" {
+			parsedHash, err := utils.HashFromHexString(req.Hash)
+			if err != nil {
+				api.HTTPError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			filterHash = &parsedHash
+		}
 		allTorrents, err := c.db.GetTorrents()
 		if err != nil {
 			api.HTTPError(w, "failed to get torrents", http.StatusInternalServerError)
@@ -612,11 +655,15 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 
 		var viewedFiles []api.TSViewedResponse
 		for _, t := range allTorrents {
+			if filterHash != nil && t.Hash != *filterHash {
+				continue
+			}
 			for i, f := range t.Files {
 				if f.ViewedAt != nil {
 					viewedFiles = append(viewedFiles, api.TSViewedResponse{
 						Hash:      t.Hash.HexString(),
 						FileIndex: i + 1,
+						Timecode:  t.PlaybackPositions[f.Path],
 					})
 				}
 			}
@@ -757,7 +804,7 @@ func (c *Controller) startPreloadByFileIndex(to *torrent.Torrent, fileIndex *int
 		idx = 0
 	}
 
-	c.startPreload(to, files[idx], idx)
+	c.startPreload(to, files[idx], idx, nil)
 }
 
 func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int, error) {

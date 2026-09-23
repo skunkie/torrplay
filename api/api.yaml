@@ -2219,6 +2219,12 @@ components:
           description: Optional magnet URI to bootstrap torrent discovery with trackers.
           pattern: "^magnet:\\?xt=urn:btih:([0-9a-fA-F]{40}|[a-zA-Z2-7]{32})"
           example: "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+        playback_position_seconds:
+          type: number
+          format: double
+          minimum: 0
+          description: Zero-based position on the selected media file's presentation timeline in seconds. The server resolves the timestamp through the container index. Omit or set to 0 to preload from the beginning.
+          example: 900
 
     PreloadResponse:
       type: object
@@ -2616,8 +2622,8 @@ components:
       type: object
       required:
         - action
-        - hash
         - file_index
+        - hash
       description: TorrServer view tag request.
       properties:
         action:
@@ -2627,19 +2633,30 @@ components:
             - "set"
             - "rem"
             - "list"
-        hash:
-          type: string
         file_index:
           type: integer
+        hash:
+          type: string
+        timecode:
+          type: number
+          format: double
+          minimum: 0
+          description: Legacy TorrServer playback position in seconds.
 
     TSViewedResponse:
       type: object
       required:
-        - hash
         - file_index
+        - hash
+        - timecode
       description: TorrServer view tag response.
       properties:
-        hash:
-          type: string
         file_index:
           type: integer
+        hash:
+          type: string
+        timecode:
+          type: number
+          format: double
+          minimum: 0
+          description: Legacy TorrServer playback position in seconds.

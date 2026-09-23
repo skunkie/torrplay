@@ -40,6 +40,8 @@ const PLAYBACK_ERROR_MESSAGES: Record<number, string> = {
   4: 'This video container or codec is not supported by the internal player.',
 };
 
+const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5000;
+
 function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
   if (detail.code && PLAYBACK_ERROR_MESSAGES[detail.code]) {
     return PLAYBACK_ERROR_MESSAGES[detail.code];
@@ -48,18 +50,20 @@ function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
 }
 
 export interface VideoPlayerProps {
+  initialPlaybackPositionSeconds?: number,
+  internalOnly?: boolean,
+  onExit?: () => void,
+  onPlaybackPositionChange?: (positionSeconds: number) => void,
   options: {
+    autoPlay?: boolean,
     src?: PlayerSrc,
     title?: string,
-    autoPlay?: boolean,
     tracks?: SubtitleTrackInfo[]
   },
-  onExit?: () => void,
   playlistNavigation?: {
-    onPrevious?: () => void,
-    onNext?: () => void
+    onNext?: () => void,
+    onPrevious?: () => void
   },
-  internalOnly?: boolean,
   preloadBadge?: PreloadBadgeInfo | null
 }
 
@@ -67,10 +71,12 @@ const IS_NATIVE = Capacitor.isNativePlatform();
 const IS_TAURI = isTauri();
 
 const VideoPlayer: React.FC<VideoPlayerProps> = ({
-  options,
-  onExit,
-  playlistNavigation,
+  initialPlaybackPositionSeconds = 0,
   internalOnly = false,
+  onExit,
+  onPlaybackPositionChange,
+  options,
+  playlistNavigation,
   preloadBadge,
 }) => {
   const isPreloading = !!preloadBadge;
@@ -80,6 +86,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [preferenceLoaded, setPreferenceLoaded] = useState(internalOnly);
   const hasPlayedRef = useRef(false);
   const handleEndedRef = useRef<(() => void) | null>(null);
+  const hasPositionUpdateRef = useRef(false);
+  const lastPlaybackPositionRef = useRef(initialPlaybackPositionSeconds);
+  const lastPositionSaveMsRef = useRef(0);
+  const restoredSourceRef = useRef<string | undefined>(undefined);
 
   // Audio track management
   const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
@@ -123,6 +133,38 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     // loaded during preloading.
     enabled: preferenceLoaded && !useExternalPlayer && !isPreloading,
   });
+
+  const persistPlaybackPosition = useCallback((positionSeconds: number, force: boolean) => {
+    if (!isFinite(positionSeconds) || positionSeconds < 0) return;
+    lastPlaybackPositionRef.current = positionSeconds;
+    hasPositionUpdateRef.current = true;
+    const now = Date.now();
+    if (!force && now - lastPositionSaveMsRef.current < PLAYBACK_POSITION_SAVE_INTERVAL_MS) return;
+    lastPositionSaveMsRef.current = now;
+    onPlaybackPositionChange?.(positionSeconds);
+  }, [onPlaybackPositionChange]);
+
+  useEffect(() => {
+    hasPositionUpdateRef.current = false;
+    lastPlaybackPositionRef.current = initialPlaybackPositionSeconds;
+    lastPositionSaveMsRef.current = 0;
+    restoredSourceRef.current = undefined;
+    return () => {
+      if (hasPositionUpdateRef.current) {
+        onPlaybackPositionChange?.(lastPlaybackPositionRef.current);
+      }
+    };
+  }, [initialPlaybackPositionSeconds, onPlaybackPositionChange, streamUrl]);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      if (hasPositionUpdateRef.current) {
+        onPlaybackPositionChange?.(lastPlaybackPositionRef.current);
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, [onPlaybackPositionChange]);
 
   useEffect(() => {
     if (internalOnly) {
@@ -250,8 +292,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onPause();
     }
-    if (handleEndedRef.current && hasPlayedRef.current) {
-      handleEndedRef.current();
+    if (hasPlayedRef.current) {
+      persistPlaybackPosition(0, true);
+      handleEndedRef.current?.();
     }
   };
 
@@ -272,17 +315,26 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onPause();
     }
+    if (hasPlayedRef.current && player.current) {
+      persistPlaybackPosition(player.current.currentTime, true);
+    }
   };
 
   const handleSeeked = () => {
     if (isWasmAudioActive && syncEngineRef.current && player.current) {
       syncEngineRef.current.onSeek(player.current.currentTime);
     }
+    if (hasPlayedRef.current && player.current) {
+      persistPlaybackPosition(player.current.currentTime, true);
+    }
   };
 
   const handleTimeUpdate = (detail: { currentTime: number }) => {
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onTimeUpdate(detail.currentTime);
+    }
+    if (hasPlayedRef.current) {
+      persistPlaybackPosition(detail.currentTime, false);
     }
   };
 
@@ -391,10 +443,20 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const handleCanPlay = useCallback(() => {
     canPlayRef.current = true;
     setPlaybackError(null);
+    if (
+      player.current
+      && streamUrl
+      && restoredSourceRef.current !== streamUrl
+      && initialPlaybackPositionSeconds > 0
+      && (!player.current.duration || initialPlaybackPositionSeconds < player.current.duration)
+    ) {
+      player.current.currentTime = initialPlaybackPositionSeconds;
+      restoredSourceRef.current = streamUrl;
+    }
     if (!isPreloading && options.autoPlay) {
       tryPlay();
     }
-  }, [isPreloading, options.autoPlay, tryPlay]);
+  }, [initialPlaybackPositionSeconds, isPreloading, options.autoPlay, streamUrl, tryPlay]);
 
   useEffect(() => {
     if (prevPreloadingRef.current && !isPreloading && options.autoPlay) {

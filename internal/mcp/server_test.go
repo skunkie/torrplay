@@ -396,8 +396,9 @@ func TestTools(t *testing.T) {
 			Params: mcp.CallToolParams{
 				Name: "preload_torrent",
 				Arguments: map[string]any{
-					"hash":       testHash,
-					"file_index": 0,
+					"hash":                      testHash,
+					"file_index":                0,
+					"playback_position_seconds": 900.25,
 				},
 			},
 		})
@@ -789,9 +790,11 @@ func TestClientPreloadTorrent(t *testing.T) {
 
 	client := NewClient(ts.URL, "", ts.Client())
 	fileIndex := 2
+	playbackPositionSeconds := 900.25
 	res, err := client.PreloadTorrent(context.Background(), hash, api.PreloadRequest{
-		FileIndex: &fileIndex,
-		Magnet:    &magnet,
+		FileIndex:               &fileIndex,
+		Magnet:                  &magnet,
+		PlaybackPositionSeconds: &playbackPositionSeconds,
 	})
 	require.NoError(t, err)
 
@@ -801,6 +804,8 @@ func TestClientPreloadTorrent(t *testing.T) {
 	assert.Equal(t, 2, *gotBody.FileIndex)
 	require.NotNil(t, gotBody.Magnet)
 	assert.Equal(t, magnet, *gotBody.Magnet)
+	require.NotNil(t, gotBody.PlaybackPositionSeconds)
+	assert.Equal(t, playbackPositionSeconds, *gotBody.PlaybackPositionSeconds)
 	assert.Equal(t, api.Preloading, res.Status)
 }
 

@@ -203,7 +203,8 @@ interface TorrentUpdate {
 interface PreloadRequest {
   fileIndex?: number,
   filePath?: string,
-  magnet?: string
+  magnet?: string,
+  playbackPositionSeconds?: number
 }
 
 interface PreloadResponse {

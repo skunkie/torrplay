@@ -13,21 +13,23 @@ import DemoVideoPlayer from './demo-video-player';
 import VideoPlayer from './video-player';
 
 interface VideoPlayerLayoutProps {
-  open: boolean,
+  initialPlaybackPositionSeconds?: number,
+  isDemo?: boolean,
+  onExit?: () => void,
   onOpenChange: (open: boolean) => void,
+  onPlaybackPositionChange?: (positionSeconds: number) => void,
+  open: boolean,
   options: {
+    autoPlay?: boolean,
     src: PlayerSrc,
     title?: string,
-    autoPlay?: boolean,
     tracks?: SubtitleTrackInfo[]
   },
-  onExit?: () => void,
   playlistNavigation?: {
-    onPrevious?: () => void,
-    onNext?: () => void
+    onNext?: () => void,
+    onPrevious?: () => void
   },
-  preloadBadge?: PreloadBadgeInfo | null,
-  isDemo?: boolean
+  preloadBadge?: PreloadBadgeInfo | null
 }
 
 export const VideoPlayerLayout = ({
@@ -35,6 +37,8 @@ export const VideoPlayerLayout = ({
   onOpenChange,
   options,
   onExit,
+  initialPlaybackPositionSeconds,
+  onPlaybackPositionChange,
   playlistNavigation,
   preloadBadge,
   isDemo = false,
@@ -56,11 +60,15 @@ export const VideoPlayerLayout = ({
             <DemoVideoPlayer
               options={options}
               onExit={onExit}
+              initialPlaybackPositionSeconds={initialPlaybackPositionSeconds}
+              onPlaybackPositionChange={onPlaybackPositionChange}
               playlistNavigation={playlistNavigation}
               preloadBadge={preloadBadge}
             />
           ) : (
             <VideoPlayer
+              initialPlaybackPositionSeconds={initialPlaybackPositionSeconds}
+              onPlaybackPositionChange={onPlaybackPositionChange}
               options={options}
               onExit={onExit}
               playlistNavigation={playlistNavigation}

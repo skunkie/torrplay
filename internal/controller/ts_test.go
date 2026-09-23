@@ -346,6 +346,57 @@ func TestTSViewed_Deadlock(t *testing.T) {
 	}
 }
 
+func TestTSViewedStoresAndReturnsTimecode(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	ih := bunnyHash
+	primeSampleMetadata(t, ctrl, ih)
+	magnet := samples[ih]
+	created := testutil.NewRequest().Post("/api/v1/torrents").
+		WithJsonBody(api.TorrentAdd{Magnet: &magnet}).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, created.Code)
+
+	position := 321.5
+	setResponse := testutil.NewRequest().Post("/viewed").
+		WithJsonBody(api.TSViewedRequest{
+			Action:    api.TSViewedRequestActionSet,
+			FileIndex: 1,
+			Hash:      ih.HexString(),
+			Timecode:  &position,
+		}).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusNoContent, setResponse.Code)
+
+	stored, err := ctrl.db.GetTorrent(ih)
+	require.NoError(t, err)
+	require.NotEmpty(t, stored.Files)
+	assert.Equal(t, position, stored.PlaybackPositions[stored.Files[0].Path])
+
+	listResponse := testutil.NewRequest().Post("/viewed").
+		WithJsonBody(api.TSViewedRequest{Action: api.TSViewedRequestActionList, Hash: ih.HexString()}).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, listResponse.Code)
+	var viewed []api.TSViewedResponse
+	require.NoError(t, json.NewDecoder(listResponse.Body).Decode(&viewed))
+	require.Len(t, viewed, 1)
+	assert.Equal(t, 1, viewed[0].FileIndex)
+	assert.Equal(t, position, viewed[0].Timecode)
+
+	removeResponse := testutil.NewRequest().Post("/viewed").
+		WithJsonBody(api.TSViewedRequest{
+			Action:    api.TSViewedRequestActionRem,
+			FileIndex: 1,
+			Hash:      ih.HexString(),
+		}).
+		GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusNoContent, removeResponse.Code)
+	stored, err = ctrl.db.GetTorrent(ih)
+	require.NoError(t, err)
+	assert.NotContains(t, stored.PlaybackPositions, stored.Files[0].Path)
+}
+
 func TestTSTorrentsAddMagnetField(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
