@@ -98,37 +98,40 @@ type torrentTracker struct {
 }
 
 type Controller struct {
-	client              *torrent.Client
-	dataDir             string
-	db                  database.DatabaseInterface
-	dlna                *dlna.Service
-	dlnaPath            string
-	downloader          atomic.Pointer[downloader.Downloader]
-	httpAddr            string
-	httpClient          *httpclient.Client
-	httpServer          *httpserver.Server
-	images              images.ServiceInterface
-	lastMetricsTime     time.Time
-	lastTotalDownload   int64
-	lastTotalUpload     int64
-	logFile             io.Closer
-	logger              atomic.Pointer[slog.Logger]
-	metrics             *metrics.Metrics
-	metricsMu           sync.RWMutex
-	mu                  sync.RWMutex
-	port                int
-	pieceCompletion     piececompletion.DeletablePieceCompletion
-	posterCleanupDone   chan struct{}
-	posterCleanupTicker *time.Ticker
-	posterOpMu          sync.Mutex
-	postersPath         string
-	profilerAddr        string
-	profilerListener    net.Listener
-	profilerMu          sync.Mutex
-	profilerServer      *http.Server
-	router              *chi.Mux
-	runtimeConfig       controllerRuntimeConfig
-	settings            atomic.Pointer[api.Settings]
+	client               *torrent.Client
+	dataDir              string
+	db                   database.DatabaseInterface
+	dlna                 *dlna.Service
+	dlnaPath             string
+	downloader           atomic.Pointer[downloader.Downloader]
+	httpAddr             string
+	httpClient           *httpclient.Client
+	httpServer           *httpserver.Server
+	images               images.ServiceInterface
+	lastMetricsTime      time.Time
+	lastTotalDownload    int64
+	lastTotalUpload      int64
+	logFile              io.Closer
+	logger               atomic.Pointer[slog.Logger]
+	metrics              *metrics.Metrics
+	metricsMu            sync.RWMutex
+	mu                   sync.RWMutex
+	pieceCompletion      piececompletion.DeletablePieceCompletion
+	port                 int
+	posterCleanupDone    chan struct{}
+	posterCleanupTicker  *time.Ticker
+	posterOpMu           sync.Mutex
+	posterWorkers        sync.WaitGroup
+	posterWorkersMu      sync.Mutex
+	posterWorkersStopped bool
+	postersPath          string
+	profilerAddr         string
+	profilerListener     net.Listener
+	profilerMu           sync.Mutex
+	profilerServer       *http.Server
+	router               *chi.Mux
+	runtimeConfig        controllerRuntimeConfig
+	settings             atomic.Pointer[api.Settings]
 	// settingsUpdateMu serializes settings updates from read through apply.
 	settingsUpdateMu sync.Mutex
 	// torrentClientUnavailable is set while the torrent client, storage, and
@@ -268,7 +271,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 
 	go c.startTorrentCleanup()
-	go c.startPosterCleanup()
+	c.startPosterWorker(c.startPosterCleanup)
 
 	return c, nil
 }
@@ -570,6 +573,7 @@ func (c *Controller) Shutdown() {
 	if c.client != nil {
 		_ = c.client.Close()
 	}
+	c.stopPosterWorkers()
 	if c.images != nil {
 		_ = c.images.Close()
 	}
@@ -578,6 +582,26 @@ func (c *Controller) Shutdown() {
 	}
 
 	c.logger.Load().Info("TorrPlay stopped")
+}
+
+func (c *Controller) startPosterWorker(worker func()) bool {
+	c.posterWorkersMu.Lock()
+	defer c.posterWorkersMu.Unlock()
+
+	if c.posterWorkersStopped {
+		return false
+	}
+
+	c.posterWorkers.Go(worker)
+	return true
+}
+
+func (c *Controller) stopPosterWorkers() {
+	c.posterWorkersMu.Lock()
+	c.posterWorkersStopped = true
+	c.posterWorkersMu.Unlock()
+
+	c.posterWorkers.Wait()
 }
 
 func profilerHandler() http.Handler {
