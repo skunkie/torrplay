@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -863,28 +862,20 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize the whole read-modify-write so concurrent patches cannot merge
+	// against the same snapshot and overwrite each other's fields.
+	c.settingsUpdateMu.Lock()
+	defer c.settingsUpdateMu.Unlock()
+
 	var reconfigureDLNA, reconfigureLogger, reconfigureProfiler, reconfigureTorrentClient, restartHTTPServer, saveSettings bool
 
-	c.mu.Lock()
 	dbOldSettings, err := c.db.GetSettings()
 	if err != nil {
-		c.mu.Unlock()
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	oldSettings := database.ToAPISettings(dbOldSettings)
 	newSettings := *oldSettings
-
-	c.mu.Unlock()
-
-	// Defer error handling to roll back settings.
-	defer func() {
-		if err != nil {
-			c.mu.Lock()
-			c.settings.Store(oldSettings)
-			c.mu.Unlock()
-		}
-	}()
 
 	if reqSettings.Auth != nil {
 		var needsReplace bool
@@ -1066,7 +1057,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if utils.Differ(oldSettings.LogStoreSize, newSettings.LogStoreSize) {
 		saveSettings = true
-		logging.DefaultStore.Resize(*newSettings.LogStoreSize)
 	}
 	if !slices.Equal(utils.Val(oldSettings.CorsAllowedOrigins), utils.Val(newSettings.CorsAllowedOrigins)) {
 		saveSettings = true
@@ -1100,19 +1090,15 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		restartHTTPServer = true
 		saveSettings = true
 	}
+	// Open the new piece completion database before anything is applied so an
+	// invalid path is rejected without disturbing the running configuration.
+	var newPieceCompletion piececompletion.DeletablePieceCompletion
+	var replacePieceCompletion bool
 	if utils.Differ(oldSettings.FileStoragePath, newSettings.FileStoragePath) {
-		c.mu.Lock()
-		if c.pieceCompletion != nil {
-			c.pieceCompletion.Close()
-			c.pieceCompletion = nil
-		}
-
-		if newSettings.FileStoragePath != nil && *newSettings.FileStoragePath != "" {
-			p := *newSettings.FileStoragePath
+		if p := utils.Val(newSettings.FileStoragePath); p != "" {
 			// Create the directory if it does not exist.
 			if _, err := os.Stat(p); os.IsNotExist(err) {
 				if err := os.MkdirAll(p, 0o755); err != nil {
-					c.mu.Unlock()
 					api.HTTPError(w, fmt.Sprintf("failed to create file storage directory: %v", err), http.StatusBadRequest)
 					return
 				}
@@ -1120,7 +1106,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			// Check for write permissions by creating a temporary file.
 			tempFile, err := os.CreateTemp(p, "writable-test-")
 			if err != nil {
-				c.mu.Unlock()
 				api.HTTPError(w, fmt.Sprintf("file storage path is not writable: %v", err), http.StatusBadRequest)
 				return
 			}
@@ -1130,14 +1115,12 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			// Create the new piece completion database.
 			pc, err := piececompletion.New(p, c.logger.Load())
 			if err != nil {
-				c.mu.Unlock()
 				api.HTTPError(w, fmt.Sprintf("failed to create piece completion database: %v", err), http.StatusInternalServerError)
 				return
 			}
-			c.pieceCompletion = pc
+			newPieceCompletion = pc
 		}
-		c.mu.Unlock()
-
+		replacePieceCompletion = true
 		reconfigureTorrentClient = true
 		restartHTTPServer = true
 		saveSettings = true
@@ -1146,58 +1129,63 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		reconfigureTorrentClient = true
 		saveSettings = true
 	}
+	// A torrent client left unavailable by an earlier failed update is retried
+	// on any later update, including one that changes no client settings.
+	if c.torrentClientUnavailable.Load() {
+		reconfigureTorrentClient = true
+	}
 
 	if saveSettings {
-		c.mu.Lock()
-		c.settings.Store(&newSettings)
-		c.mu.Unlock()
-		err = c.db.UpdateSettings(database.FromAPISettings(&newSettings))
-		if err != nil {
+		if err := c.db.UpdateSettings(database.FromAPISettings(&newSettings)); err != nil {
+			if newPieceCompletion != nil {
+				_ = newPieceCompletion.Close()
+			}
 			api.HTTPError(w, fmt.Sprintf("failed to update settings, %v", err), http.StatusInternalServerError)
 			return
 		}
+		c.mu.Lock()
+		c.settings.Store(&newSettings)
+		c.mu.Unlock()
 	}
 
-	// Reconfigure components.
+	// Apply the new settings. A failure restores the previous settings in
+	// memory and in the database, and reapplies them to every component this
+	// update already touched.
+	var applied appliedSettings
+	fail := func(msg string) {
+		c.rollbackSettings(oldSettings, applied)
+		api.HTTPError(w, msg, http.StatusInternalServerError)
+	}
+
+	if utils.Differ(oldSettings.LogStoreSize, newSettings.LogStoreSize) {
+		logging.DefaultStore.Resize(*newSettings.LogStoreSize)
+		applied.logStoreSize = true
+	}
+	if replacePieceCompletion {
+		c.swapPieceCompletion(newPieceCompletion)
+		applied.pieceCompletion = true
+	}
 	if reconfigureLogger {
 		reconfigureTorrentClient = true
-		settings := c.settings.Load()
-		// configureLogger replaces c.logFile, so it needs the write lock.
-		c.mu.Lock()
-		newLogger := c.configureLogger(*settings.LogLevel, settings)
-		c.logger.Store(newLogger)
-		httpServer := c.httpServer
-		c.mu.Unlock()
-		if httpServer != nil {
-			httpServer.SetLogger(newLogger)
-		}
-		c.dlna.SetLogger(newLogger)
+		c.applyLoggerSettings()
+		applied.logger = true
 	}
 
 	if reconfigureTorrentClient {
-		err = c.configureTorrentClient(slog.LevelError)
-		if err != nil {
-			api.HTTPError(w, fmt.Sprintf("failed to reconfigure torrent client, %v", err), http.StatusInternalServerError)
+		applied.torrentClient = true
+		if err := c.configureTorrentClient(); err != nil {
+			fail(fmt.Sprintf("failed to reconfigure torrent client, %v", err))
 			return
 		}
 	} else if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
-		c.mu.Lock()
-		if settings := c.settings.Load(); *settings.EnableDownloader && *settings.FileStoragePath != "" {
-			c.downloader.Load().Start()
-		} else {
-			c.downloader.Load().Stop()
-		}
-		c.mu.Unlock()
+		c.applyDownloaderSettings()
+		applied.downloader = true
 	}
 
 	if reconfigureDLNA {
-		if settings := c.settings.Load(); *settings.EnableDlna {
-			err = c.dlna.Reconfigure(*settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
-		} else {
-			err = c.dlna.Stop()
-		}
-		if err != nil {
-			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+		applied.dlna = true
+		if err := c.applyDLNASettings(); err != nil {
+			fail(err.Error())
 			return
 		}
 	}
@@ -1234,6 +1222,111 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// appliedSettings records which components a settings update has already
+// changed, so a failed update knows what to restore.
+type appliedSettings struct {
+	dlna            bool
+	downloader      bool
+	logStoreSize    bool
+	logger          bool
+	pieceCompletion bool
+	torrentClient   bool
+}
+
+// applyDLNASettings starts, restarts, or stops the DLNA service to match the
+// current settings.
+func (c *Controller) applyDLNASettings() error {
+	if settings := c.settings.Load(); *settings.EnableDlna {
+		return c.dlna.Reconfigure(*settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
+	}
+	return c.dlna.Stop()
+}
+
+// applyDownloaderSettings starts or stops the background downloader to match
+// the current settings.
+func (c *Controller) applyDownloaderSettings() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if settings := c.settings.Load(); *settings.EnableDownloader && *settings.FileStoragePath != "" {
+		c.downloader.Load().Start()
+	} else {
+		c.downloader.Load().Stop()
+	}
+}
+
+// applyLoggerSettings replaces the application logger to match the current
+// settings.
+func (c *Controller) applyLoggerSettings() {
+	settings := c.settings.Load()
+	// configureLogger replaces c.logFile, so it needs the write lock.
+	c.mu.Lock()
+	newLogger := c.configureLogger(*settings.LogLevel, settings)
+	c.logger.Store(newLogger)
+	httpServer := c.httpServer
+	c.mu.Unlock()
+	if httpServer != nil {
+		httpServer.SetLogger(newLogger)
+	}
+	c.dlna.SetLogger(newLogger)
+}
+
+// rollbackSettings restores the previous settings in memory and in the
+// database after a failed update, then reapplies them to the components the
+// update changed. The logger and piece completion database are restored before
+// the torrent client, whose rebuilt downloader captures both. Restoration is
+// best effort: failures are logged because the original error is what the
+// caller reports.
+func (c *Controller) rollbackSettings(old *api.Settings, applied appliedSettings) {
+	if err := c.db.UpdateSettings(database.FromAPISettings(old)); err != nil {
+		c.logger.Load().Error("failed to restore previous settings", "err", err)
+	}
+	c.mu.Lock()
+	c.settings.Store(old)
+	c.mu.Unlock()
+
+	if applied.dlna {
+		if err := c.applyDLNASettings(); err != nil {
+			c.logger.Load().Error("failed to restore DLNA service", "err", err)
+		}
+	}
+	if applied.downloader {
+		c.applyDownloaderSettings()
+	}
+	if applied.logger {
+		c.applyLoggerSettings()
+	}
+	if applied.pieceCompletion {
+		var pc piececompletion.DeletablePieceCompletion
+		if p := utils.Val(old.FileStoragePath); p != "" {
+			var err error
+			if pc, err = piececompletion.New(p, c.logger.Load()); err != nil {
+				c.logger.Load().Error("failed to reopen piece completion database", "err", err)
+			}
+		}
+		c.swapPieceCompletion(pc)
+	}
+	if applied.torrentClient {
+		if err := c.configureTorrentClient(); err != nil {
+			c.logger.Load().Error("failed to restore torrent client", "err", err)
+		}
+	}
+	if applied.logStoreSize {
+		logging.DefaultStore.Resize(*old.LogStoreSize)
+	}
+}
+
+// swapPieceCompletion installs pc as the piece completion database and
+// closes the one it replaces.
+func (c *Controller) swapPieceCompletion(pc piececompletion.DeletablePieceCompletion) {
+	c.mu.Lock()
+	previous := c.pieceCompletion
+	c.pieceCompletion = pc
+	c.mu.Unlock()
+	if previous != nil {
+		_ = previous.Close()
+	}
 }
 
 func (c *Controller) UpdateTorrent(w http.ResponseWriter, r *http.Request, ih metainfo.Hash) {

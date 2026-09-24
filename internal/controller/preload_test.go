@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -532,7 +531,7 @@ func setTestMemoryLimit(t *testing.T, ctrl *Controller, limit int64) {
 	ctrl.mu.Lock()
 	ctrl.settings.Load().MaxMemory = utils.Ptr(limit)
 	ctrl.mu.Unlock()
-	require.NoError(t, ctrl.configureTorrentClient(slog.LevelError))
+	require.NoError(t, ctrl.configureTorrentClient())
 }
 
 func TestStartPreloadConcurrencyFollowsPoolCapacity(t *testing.T) {

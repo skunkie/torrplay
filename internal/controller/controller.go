@@ -152,6 +152,8 @@ type Controller struct {
 	router           *chi.Mux
 	runtimeConfig    controllerRuntimeConfig
 	settings         atomic.Pointer[api.Settings]
+	// settingsUpdateMu serializes settings updates from read through apply.
+	settingsUpdateMu sync.Mutex
 	shutdownOnce     sync.Once
 	speedMonitor     *speedMonitor
 	startedAt        time.Time
@@ -282,7 +284,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	c.trackers = append(c.trackers, trackers...)
 
-	err = c.configureTorrentClient(slog.LevelError)
+	err = c.configureTorrentClient()
 	if err != nil {
 		return nil, err
 	}
@@ -902,7 +904,7 @@ func (c *Controller) currentClient() *torrent.Client {
 	return c.client
 }
 
-func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
+func (c *Controller) configureTorrentClient() error {
 	c.torrentConfigMu.Lock()
 	defer c.torrentConfigMu.Unlock()
 
@@ -976,7 +978,8 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	}
 	clientConfig.ExtendedHandshakeClientVersion = "qBittorrent/5.1.4"
 	clientConfig.ListenPort = 0
-	clientConfig.Slogger = c.configureLogger(clientLevel, currentSettings)
+	// The torrent client logs only errors, whatever the application log level.
+	clientConfig.Slogger = c.configureLogger(slog.LevelError, currentSettings)
 	if c.runtimeConfig.configureClient != nil {
 		c.runtimeConfig.configureClient(clientConfig)
 	}

@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1458,6 +1459,130 @@ func TestUpdateSettingsPreservesSecrets(t *testing.T) {
 	udnAfter, err := ctrl.db.GetDLNAUDN()
 	require.NoError(t, err)
 	assert.Equal(t, udnBefore, udnAfter)
+}
+
+func TestUpdateSettingsRollsBackFailedTorrentClientReconfiguration(t *testing.T) {
+	var failClient atomic.Bool
+	runtimeConfig := testControllerRuntimeConfig()
+	baseConfigure := runtimeConfig.configureClient
+	runtimeConfig.configureClient = func(config *torrent.ClientConfig) {
+		baseConfigure(config)
+		if failClient.Load() {
+			// An unparsable listen address makes torrent.NewClient fail.
+			config.DisableTCP = false
+			config.ListenHost = func(string) string { return "256.256.256.256" }
+		}
+	}
+	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+	defer cleanup()
+
+	oldSettings := *ctrl.settings.Load()
+	oldGeneration := ctrl.torrentGeneration.Load()
+	storagePath := t.TempDir()
+
+	failClient.Store(true)
+	patch := map[string]any{
+		"file_storage_path": storagePath,
+		"friendly_name":     "Rolled Back",
+		"max_memory":        *oldSettings.MaxMemory * 2,
+	}
+	rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(patch).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "failed to reconfigure torrent client")
+
+	// Both the in-memory and the persisted settings keep their previous values.
+	current := ctrl.settings.Load()
+	assert.Equal(t, *oldSettings.MaxMemory, *current.MaxMemory)
+	assert.Equal(t, *oldSettings.FriendlyName, *current.FriendlyName)
+	assert.Equal(t, utils.Val(oldSettings.FileStoragePath), utils.Val(current.FileStoragePath))
+	stored, err := ctrl.db.GetSettings()
+	require.NoError(t, err)
+	persisted := database.ToAPISettings(stored)
+	assert.Equal(t, *oldSettings.MaxMemory, *persisted.MaxMemory)
+	assert.Equal(t, *oldSettings.FriendlyName, *persisted.FriendlyName)
+	assert.Equal(t, utils.Val(oldSettings.FileStoragePath), utils.Val(persisted.FileStoragePath))
+
+	// Restoring the previous client fails too while the injected failure
+	// persists, so the client stays unavailable.
+	assert.True(t, ctrl.torrentClientUnavailable.Load())
+
+	// A later update retries the client even when it changes no client
+	// settings, and reports a retry that still fails.
+	rr = testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]any{"friendly_name": "Still Failing"}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	assert.True(t, ctrl.torrentClientUnavailable.Load())
+	assert.Equal(t, *oldSettings.FriendlyName, *ctrl.settings.Load().FriendlyName)
+
+	failClient.Store(false)
+	rr = testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]any{}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	assert.False(t, ctrl.torrentClientUnavailable.Load())
+	assert.Greater(t, ctrl.torrentGeneration.Load(), oldGeneration)
+	assert.Equal(t, *oldSettings.MaxMemory, *ctrl.settings.Load().MaxMemory)
+}
+
+func TestUpdateSettingsRollsBackFailedDLNAReconfiguration(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	// DLNA refuses to start on a public address.
+	ctrl.httpAddr = "203.0.113.1"
+
+	oldSettings := *ctrl.settings.Load()
+	require.False(t, utils.Val(oldSettings.EnableDlna))
+
+	patch := map[string]any{
+		"enable_dlna":       true,
+		"enable_downloader": !utils.Val(oldSettings.EnableDownloader),
+		"friendly_name":     "Rolled Back",
+	}
+	rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(patch).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "private networks")
+
+	for name, got := range map[string]*api.Settings{
+		"memory": ctrl.settings.Load(),
+		"database": func() *api.Settings {
+			stored, err := ctrl.db.GetSettings()
+			require.NoError(t, err)
+			return database.ToAPISettings(stored)
+		}(),
+	} {
+		assert.Equal(t, utils.Val(oldSettings.EnableDlna), utils.Val(got.EnableDlna), name)
+		assert.Equal(t, utils.Val(oldSettings.EnableDownloader), utils.Val(got.EnableDownloader), name)
+		assert.Equal(t, utils.Val(oldSettings.FriendlyName), utils.Val(got.FriendlyName), name)
+	}
+}
+
+func TestUpdateSettingsSerializesConcurrentPatches(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	const iterations = 20
+	var wg sync.WaitGroup
+	patch := func(body map[string]any) {
+		rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(body).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+		assert.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	}
+	wg.Go(func() {
+		for i := range iterations {
+			patch(map[string]any{"auth": map[string]any{"username": fmt.Sprintf("user-%d", i)}})
+		}
+	})
+	wg.Go(func() {
+		for i := range iterations {
+			patch(map[string]any{"cors_allowed_origins": []string{fmt.Sprintf("https://host-%d.example", i)}})
+		}
+	})
+	wg.Wait()
+
+	// Each writer's final value survives the other writer's patches.
+	stored, err := ctrl.db.GetSettings()
+	require.NoError(t, err)
+	persisted := database.ToAPISettings(stored)
+	require.NotNil(t, persisted.Auth)
+	assert.Equal(t, fmt.Sprintf("user-%d", iterations-1), utils.Val(persisted.Auth.Username))
+	assert.Equal(t, []string{fmt.Sprintf("https://host-%d.example", iterations-1)}, utils.Val(persisted.CorsAllowedOrigins))
+	assert.Equal(t, utils.Val(persisted.Auth.Username), utils.Val(ctrl.settings.Load().Auth.Username))
 }
 
 func TestController_Shutdown(t *testing.T) {
