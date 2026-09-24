@@ -112,7 +112,7 @@ func TestRestoreInvalidBackup(t *testing.T) {
 
 func TestRestoreTorrentsPreservesTargetStorageChoices(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = nil
+		c.settings.Load().FileStoragePath = nil
 	})
 	defer cleanup()
 

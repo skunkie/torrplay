@@ -269,24 +269,24 @@ func TestTSUploadTorrentMiddleware(t *testing.T) {
 			assert.True(t, called)
 		})
 	}
-}
 
-func TestTSUploadTorrentMiddleware_ParseError(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/torrent/upload", strings.NewReader("bad data"))
-	req.Header.Set("Content-Type", "multipart/form-data; boundary=bad")
+	t.Run("rejects unparsable form", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/torrent/upload", strings.NewReader("bad data"))
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=bad")
 
-	rr := httptest.NewRecorder()
+		rr := httptest.NewRecorder()
 
-	called := false
-	mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
+		called := false
+		mockHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})
+
+		middleware := tSUploadTorrentMiddleware(mockHandler)
+		middleware.ServeHTTP(rr, req)
+
+		assert.False(t, called, "next handler should not be called on parse error")
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
 	})
-
-	middleware := tSUploadTorrentMiddleware(mockHandler)
-	middleware.ServeHTTP(rr, req)
-
-	assert.False(t, called, "next handler should not be called on parse error")
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestTSViewedDoesNotDeadlock(t *testing.T) {
@@ -409,7 +409,7 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 		meta := &api.Torrent{
 			Hash:      ih,
 			Name:      "Sintel",
-			Title:     utils.Ptr("Sintel"),
+			Title:     new("Sintel"),
 			TotalSize: 12345678,
 		}
 
@@ -429,7 +429,7 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 		meta := &api.Torrent{
 			Hash:  to.InfoHash(),
 			Name:  "Unknown",
-			Title: utils.Ptr("Unknown"),
+			Title: new("Unknown"),
 		}
 		resp := ctrl.buildTSTorrentResponse(meta, to)
 
@@ -470,12 +470,12 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 		require.NoError(t, err)
 		<-to.GotInfo()
 
-		storageTorrent, err := ctrl.storageClient.OpenTorrent(context.Background(), to.Info(), to.InfoHash())
+		storageTorrent, err := ctrl.storageClient.Load().OpenTorrent(context.Background(), to.Info(), to.InfoHash())
 		require.NoError(t, err)
 		piece := storageTorrent.Piece(to.Piece(0).Info())
 		_, err = piece.WriteAt(make([]byte, 1024), 0)
 		require.NoError(t, err)
-		storageStats, err := ctrl.storageClient.TorrentStats(to.InfoHash())
+		storageStats, err := ctrl.storageClient.Load().TorrentStats(to.InfoHash())
 		require.NoError(t, err)
 
 		preload := &preloadTask{targetBytes: 1048576}
@@ -488,6 +488,26 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 		assert.Equal(t, "Torrent preload", resp.StatString)
 		assert.Equal(t, int64(1048576), resp.PreloadSize)
 		assert.Positive(t, storageStats.WrittenBytes)
+		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
+
+		// A finished preload reports the torrent as working, as TorrServer does.
+		preload.ready.Store(true)
+		resp = ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
+		assert.Equal(t, tsStatWorking, resp.Stat)
+		assert.Equal(t, "Torrent working", resp.StatString)
+		assert.Equal(t, int64(1048576), resp.PreloadSize)
+		assert.Equal(t, int64(1048576), resp.PreloadedBytes)
+
+		ctrl.preloads.Delete(to.InfoHash())
+		ctrl.preloadSnapshots.Store(to.InfoHash(), &preloadStatusSnapshot{
+			completedBytes: storageStats.WrittenBytes + 512,
+			targetBytes:    1048576,
+		})
+		defer ctrl.preloadSnapshots.Delete(to.InfoHash())
+		resp = ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
+		assert.Equal(t, tsStatWorking, resp.Stat)
+		assert.Equal(t, "Torrent working", resp.StatString)
+		assert.Equal(t, int64(1048576), resp.PreloadSize)
 		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
 	})
 }
@@ -562,7 +582,7 @@ func TestTSCacheFileStorage(t *testing.T) {
 	t.Run("file storage torrent not yet active returns empty 200", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		ctrl, cleanup := newTestController(t, func(c *Controller) {
-			c.settings.FileStoragePath = &tmpDir
+			c.settings.Load().FileStoragePath = &tmpDir
 		})
 		defer cleanup()
 
@@ -594,7 +614,7 @@ func TestTSCacheFileStorage(t *testing.T) {
 	t.Run("active file storage torrent reports full piece state", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		ctrl, cleanup := newTestController(t, func(c *Controller) {
-			c.settings.FileStoragePath = &tmpDir
+			c.settings.Load().FileStoragePath = &tmpDir
 		})
 		defer cleanup()
 

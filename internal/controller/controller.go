@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -72,13 +73,17 @@ type controllerRuntimeConfig struct {
 	configureClient  func(*torrent.ClientConfig)
 	fetchTrackers    func(context.Context, *httpclient.Client) ([][]string, error)
 	gotInfoTimeout   time.Duration
+	// playbackGracePeriod keeps a playback session open between HTTP range
+	// requests. Zero closes it as soon as its last request ends.
+	playbackGracePeriod time.Duration
 }
 
 func defaultControllerRuntimeConfig() controllerRuntimeConfig {
 	return controllerRuntimeConfig{
-		clientCloseDelay: 500 * time.Millisecond,
-		fetchTrackers:    utils.FetchTrackers,
-		gotInfoTimeout:   30 * time.Second,
+		clientCloseDelay:    500 * time.Millisecond,
+		fetchTrackers:       utils.FetchTrackers,
+		gotInfoTimeout:      30 * time.Second,
+		playbackGracePeriod: defaultPlaybackGracePeriod,
 	}
 }
 
@@ -109,16 +114,17 @@ type Controller struct {
 	db                   database.DatabaseInterface
 	dlna                 *dlna.Service
 	dlnaPath             string
-	downloader           *downloader.Downloader
+	downloader           atomic.Pointer[downloader.Downloader]
 	httpAddr             string
 	httpClient           *httpclient.Client
 	httpServer           *httpserver.Server
 	images               images.ServiceInterface
 	logFile              io.Closer
-	logger               *slog.Logger
+	logger               atomic.Pointer[slog.Logger]
 	metrics              *metrics.Metrics
 	mu                   sync.RWMutex
 	pieceCompletion      piececompletion.DeletablePieceCompletion
+	playbackSessions     map[playbackKey]*playbackSession
 	port                 int
 	posterCleanupDone    chan struct{}
 	posterCleanupTicker  *time.Ticker
@@ -128,25 +134,38 @@ type Controller struct {
 	posterWorkersStopped bool
 	postersPath          string
 	preloadActiveTasks   int
+	// preloadPlaybackCount is the number of open playback sessions. Preload
+	// dispatch is paused while it is positive.
+	preloadPlaybackCount int
 	preloadQueue         []*preloadTask
 	preloadReadyTTL      time.Duration
-	preloads             sync.Map
-	preloadsMu           sync.Mutex
-	profilerAddr         string
-	profilerListener     net.Listener
-	profilerMu           sync.Mutex
-	profilerServer       *http.Server
-	router               *chi.Mux
-	runtimeConfig        controllerRuntimeConfig
-	settings             *api.Settings
-	shutdownOnce         sync.Once
-	speedMonitor         *speedMonitor
-	startedAt            time.Time
-	storageClient        *memstorage.Client
-	streamPool           *stream.Pool
-	stremio              *stremio.Service
-	torrentTracker       torrentTracker
-	trackers             [][]string
+	// preloadRequests counts preload tasks created by explicit requests. A
+	// playback session that sees it change knows the viewer has moved on.
+	preloadRequests  uint64
+	preloadSnapshots sync.Map
+	preloads         sync.Map
+	preloadsMu       sync.Mutex
+	profilerAddr     string
+	profilerListener net.Listener
+	profilerMu       sync.Mutex
+	profilerServer   *http.Server
+	router           *chi.Mux
+	runtimeConfig    controllerRuntimeConfig
+	settings         atomic.Pointer[api.Settings]
+	shutdownOnce     sync.Once
+	speedMonitor     *speedMonitor
+	startedAt        time.Time
+	storageClient    atomic.Pointer[memstorage.Client]
+	streamPool       atomic.Pointer[stream.Pool]
+	stremio          *stremio.Service
+	// torrentClientUnavailable is set while the torrent client, storage, and
+	// stream pool are being replaced, and stays set if the replacement fails.
+	// Streams and preloads are rejected while it is set.
+	torrentClientUnavailable atomic.Bool
+	torrentConfigMu          sync.Mutex
+	torrentGeneration        atomic.Uint64
+	torrentTracker           torrentTracker
+	trackers                 [][]string
 
 	api.Unimplemented
 }
@@ -167,6 +186,11 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	if runtimeConfig.clientCloseDelay < 0 {
 		runtimeConfig.clientCloseDelay = defaults.clientCloseDelay
 	}
+	// A zero grace period intentionally closes playback sessions immediately.
+	if runtimeConfig.playbackGracePeriod < 0 {
+		runtimeConfig.playbackGracePeriod = defaults.playbackGracePeriod
+	}
+
 	dbSettings, err := dbClient.GetSettings()
 	if err != nil {
 		if errors.Is(err, database.ErrSettingsNotFound) {
@@ -202,7 +226,6 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		postersPath:       "/posters/",
 		preloadReadyTTL:   defaultPreloadReadyTTL,
 		profilerAddr:      profilerAddress,
-		settings:          appSettings,
 		speedMonitor:      newSpeedMonitor(),
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
@@ -212,7 +235,8 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		},
 	}
 
-	c.logger = c.configureLogger(*appSettings.LogLevel, appSettings)
+	c.settings.Store(appSettings)
+	c.logger.Store(c.configureLogger(*appSettings.LogLevel, appSettings))
 
 	var pc piececompletion.DeletablePieceCompletion
 	if fsp := utils.Val(appSettings.FileStoragePath); fsp != "" {
@@ -221,31 +245,31 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 				return nil, fmt.Errorf("failed to create file storage directory: %w", err)
 			}
 		}
-		pc, err = piececompletion.New(fsp, c.logger)
+		pc, err = piececompletion.New(fsp, c.logger.Load())
 		if err != nil {
 			return nil, fmt.Errorf("failed to create piece completion database: %w", err)
 		}
 	}
 	c.pieceCompletion = pc
 
-	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger, c.dlnaPlaybackToken)
+	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger.Load(), c.dlnaPlaybackToken)
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.
 	if authOverride, exists := os.LookupEnv("TORRPLAY_DISABLE_AUTH"); exists {
 		if enabled, err := strconv.ParseBool(authOverride); err == nil && enabled {
-			if c.settings.Auth == nil {
-				c.settings.Auth = &api.Auth{}
+			if appSettings.Auth == nil {
+				appSettings.Auth = &api.Auth{}
 			}
-			c.settings.Auth.Enabled = new(false)
-			c.logger.Warn("Authentication has been disabled via the TORRPLAY_DISABLE_AUTH environment variable.")
+			appSettings.Auth.Enabled = new(false)
+			c.logger.Load().Warn("Authentication has been disabled via the TORRPLAY_DISABLE_AUTH environment variable.")
 		}
 	}
 
-	c.logger.Info("initializing TorrPlay with data directory: " + c.dataDir)
+	c.logger.Load().Info("initializing TorrPlay with data directory: " + c.dataDir)
 
-	if c.settings.TorrentTrackers != nil && len(*c.settings.TorrentTrackers) > 0 {
-		for _, tracker := range *c.settings.TorrentTrackers {
+	if appSettings.TorrentTrackers != nil && len(*appSettings.TorrentTrackers) > 0 {
+		for _, tracker := range *appSettings.TorrentTrackers {
 			c.trackers = append(c.trackers, strings.Split(tracker, ","))
 		}
 	}
@@ -254,7 +278,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	trackers, err := c.runtimeConfig.fetchTrackers(ctx, c.httpClient)
 	if err != nil {
-		c.logger.Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
+		c.logger.Load().Debug(fmt.Sprintf("failed to get trackers, %v", err.Error()))
 	}
 	c.trackers = append(c.trackers, trackers...)
 
@@ -263,23 +287,23 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		return nil, err
 	}
 
-	c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(c.settings.FileStoragePath), c.trackers)
+	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers))
 
-	if *c.settings.EnableDlna {
-		err = c.dlna.Start(*c.settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
+	if *appSettings.EnableDlna {
+		err = c.dlna.Start(*appSettings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if *c.settings.EnableDownloader {
-		c.downloader.Start()
+	if *appSettings.EnableDownloader {
+		c.downloader.Load().Start()
 	}
 
 	c.stremio = stremio.NewService(
 		dbClient,
 		c.postersPath,
-		c.logger,
+		c.logger.Load(),
 		func(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdx int) {
 			c.streamFile(w, r, ih, fileIdx, nil)
 		},
@@ -303,9 +327,8 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 }
 
 func (c *Controller) validateStremioToken(token string) bool {
-	c.mu.RLock()
-	authEnabled := c.settings != nil && c.settings.Auth != nil && utils.Val(c.settings.Auth.Enabled)
-	c.mu.RUnlock()
+	currentSettings := c.settings.Load()
+	authEnabled := currentSettings != nil && currentSettings.Auth != nil && utils.Val(currentSettings.Auth.Enabled)
 	if !authEnabled {
 		return true
 	}
@@ -318,17 +341,11 @@ func (c *Controller) validateStremioToken(token string) bool {
 }
 
 func (c *Controller) Logger() *slog.Logger {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.logger
+	return c.logger.Load()
 }
 
 func (c *Controller) Settings() *api.Settings {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	return c.settings
+	return c.settings.Load()
 }
 
 func (c *Controller) buildRouter() *chi.Mux {
@@ -354,11 +371,12 @@ func (c *Controller) buildRouter() *chi.Mux {
 	router.Use(tSCorrectionMiddleware)
 	router.Use(tSUploadTorrentMiddleware)
 
-	if *c.settings.EnableDlna {
+	currentSettings := c.settings.Load()
+	if *currentSettings.EnableDlna {
 		router.Mount(c.dlnaPath, c.dlna)
 	}
 
-	if utils.Val(c.settings.EnableStremio) && c.stremio != nil {
+	if utils.Val(currentSettings.EnableStremio) && c.stremio != nil {
 		router.Mount("/stremio", c.stremio)
 	}
 
@@ -435,9 +453,7 @@ func (c *Controller) SetupRouter() *chi.Mux {
 
 func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 	return func(ctx context.Context, input *openapi3filter.AuthenticationInput) error {
-		c.mu.RLock()
-		currentSettings := c.settings
-		c.mu.RUnlock()
+		currentSettings := c.settings.Load()
 
 		if !utils.Val(currentSettings.Auth.Enabled) {
 			return nil
@@ -524,10 +540,8 @@ func (c *Controller) validatePlaybackQueryToken(r *http.Request) error {
 }
 
 func (c *Controller) dlnaPlaybackToken() (string, error) {
-	c.mu.RLock()
-	authSettings := c.settings.Auth
+	authSettings := c.settings.Load().Auth
 	enabled := authSettings != nil && utils.Val(authSettings.Enabled)
-	c.mu.RUnlock()
 
 	if !enabled {
 		return "", nil
@@ -545,9 +559,7 @@ func (c *Controller) dlnaPlaybackToken() (string, error) {
 func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			c.mu.RLock()
-			logger := c.logger
-			c.mu.RUnlock()
+			logger := c.logger.Load()
 
 			logAttrs := []any{
 				slog.String("path", stremio.RedactPathToken(r.URL.Path)),
@@ -625,31 +637,31 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 }
 
 func (c *Controller) Start() {
-	c.logger.Info("starting TorrPlay...")
-	c.logger.Info("build info", "commit", buildinfo.Commit, "version", buildinfo.Version, "build date", buildinfo.BuildDate)
+	c.logger.Load().Info("starting TorrPlay...")
+	c.logger.Load().Info("build info", "commit", buildinfo.Commit, "version", buildinfo.Version, "build date", buildinfo.BuildDate)
 	c.reconcileProfiler()
 
 	addr := net.JoinHostPort(c.httpAddr, strconv.Itoa(c.resolveHTTPPort()))
-	c.httpServer = httpserver.NewServer(c.SetupRouter(), addr, c.logger)
+	c.httpServer = httpserver.NewServer(c.SetupRouter(), addr, c.logger.Load())
 
 	go func() {
 		if err := c.httpServer.Run(); err != nil {
-			c.logger.Error("HTTP server stopped with error", "error", err)
+			c.logger.Load().Error("HTTP server stopped with error", "error", err)
 		}
 	}()
 }
 
 func (c *Controller) Shutdown() {
 	c.shutdownOnce.Do(func() {
-		c.logger.Info("shutting down TorrPlay...")
+		c.logger.Load().Info("shutting down TorrPlay...")
 
 		if c.httpServer != nil {
 			_ = c.httpServer.Close()
 		}
 		c.stopProfiler()
 
-		if c.downloader != nil {
-			c.downloader.Stop()
+		if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+			activeDownloader.Stop()
 		}
 
 		close(c.torrentTracker.cleanupDone)
@@ -660,10 +672,12 @@ func (c *Controller) Shutdown() {
 
 		_ = c.dlna.Stop()
 		c.cancelAllPreloads()
-		if c.streamPool != nil {
-			c.streamPool.Close()
+		if pool := c.streamPool.Load(); pool != nil {
+			pool.Close()
 		}
-		_ = c.storageClient.Close()
+		if storageClient := c.storageClient.Load(); storageClient != nil {
+			_ = storageClient.Close()
+		}
 		if c.pieceCompletion != nil {
 			_ = c.pieceCompletion.Close()
 		}
@@ -676,7 +690,7 @@ func (c *Controller) Shutdown() {
 			_ = c.logFile.Close()
 		}
 
-		c.logger.Info("TorrPlay stopped")
+		c.logger.Load().Info("TorrPlay stopped")
 	})
 }
 
@@ -708,9 +722,7 @@ func profilerHandler() http.Handler {
 
 func (c *Controller) reconcileProfiler() {
 	c.profilerMu.Lock()
-	c.mu.RLock()
-	enabled := c.settings.LogLevel != nil && *c.settings.LogLevel == slog.LevelDebug
-	c.mu.RUnlock()
+	enabled := utils.Val(c.settings.Load().LogLevel) == slog.LevelDebug
 
 	if !enabled {
 		server := c.detachProfilerLocked()
@@ -726,7 +738,7 @@ func (c *Controller) reconcileProfiler() {
 
 	listener, err := net.Listen("tcp4", c.profilerAddr)
 	if err != nil {
-		c.logger.Error("failed to start profiler server", "address", c.profilerAddr, "error", err)
+		c.logger.Load().Error("failed to start profiler server", "address", c.profilerAddr, "error", err)
 		return
 	}
 
@@ -736,11 +748,11 @@ func (c *Controller) reconcileProfiler() {
 	}
 	c.profilerListener = listener
 	c.profilerServer = server
-	c.logger.Info("starting profiler server", "address", listener.Addr().String())
+	c.logger.Load().Info("starting profiler server", "address", listener.Addr().String())
 
 	go func() {
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			c.logger.Error("profiler server stopped with error", "error", err)
+			c.logger.Load().Error("profiler server stopped with error", "error", err)
 		}
 	}()
 }
@@ -767,7 +779,7 @@ func (c *Controller) shutdownProfiler(server *http.Server) {
 	ctx, cancel := context.WithTimeout(context.Background(), profilerShutdownTimeout)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
-		c.logger.Error("failed to shut down profiler server", "error", err)
+		c.logger.Load().Error("failed to shut down profiler server", "error", err)
 		_ = server.Close()
 	}
 }
@@ -806,22 +818,22 @@ func (c *Controller) cleanupUnusedPosters() {
 
 	ids, err := c.images.ListIDs()
 	if err != nil {
-		c.logger.Error("failed to list image ids", "err", err)
+		c.logger.Load().Error("failed to list image ids", "err", err)
 		return
 	}
 
 	for _, id := range ids {
 		isUsed, err := c.db.IsPosterUsed(id)
 		if err != nil {
-			c.logger.Error("failed to check if poster is used", "err", err)
+			c.logger.Load().Error("failed to check if poster is used", "err", err)
 			continue
 		}
 
 		if !isUsed {
 			if err := c.images.Delete(id); err != nil {
-				c.logger.Error("failed to delete unused poster", "err", err)
+				c.logger.Load().Error("failed to delete unused poster", "err", err)
 			} else {
-				c.logger.Debug("deleted unused poster", "poster id", id)
+				c.logger.Load().Debug("deleted unused poster", "poster id", id)
 			}
 		}
 	}
@@ -831,33 +843,30 @@ func (c *Controller) cleanupExpiredTorrents() {
 	c.torrentTracker.mu.Lock()
 	defer c.torrentTracker.mu.Unlock()
 
-	c.logger.Debug("cleanup expired torrents", "total", len(c.torrentTracker.torrents))
+	c.logger.Load().Debug("cleanup expired torrents", "total", len(c.torrentTracker.torrents))
 	now := time.Now()
 
 	for ih, info := range c.torrentTracker.torrents {
 		sub := now.Sub(info.lastUsedAt)
 		if sub > c.torrentTracker.ttl {
 			// Check if the torrent is actively being streamed or downloaded in the background.
-			c.mu.RLock()
-			isStreaming := c.streamPool != nil && c.streamPool.HasReaders(ih)
-			isDownloading := c.downloader != nil && c.downloader.IsActive(ih)
-			c.mu.RUnlock()
+			isStreaming, isDownloading := c.torrentActivity(ih)
 
 			if isStreaming || isDownloading {
 				info.lastUsedAt = now
 				c.torrentTracker.torrents[ih] = info
-				c.logger.Debug("skipping expiration for active torrent", "hash", ih)
+				c.logger.Load().Debug("skipping expiration for active torrent", "hash", ih)
 				continue
 			}
 
-			c.logger.Debug("mark torrent as expired", "hash", ih, "age", sub)
+			c.logger.Load().Debug("mark torrent as expired", "hash", ih, "age", sub)
 			c.cancelPreload(ih)
 			delete(c.torrentTracker.torrents, ih)
-			if to, ok := c.client.Torrent(ih); ok {
+			if to, ok := c.clientTorrent(ih); ok {
 				go func(t *torrent.Torrent, hash metainfo.Hash, age time.Duration) {
 					t.Drop()
 					<-t.Closed()
-					c.logger.Debug("dropped torrent", "hash", hash, "age", age)
+					c.logger.Load().Debug("dropped torrent", "hash", hash, "age", age)
 				}(to, ih, sub)
 			}
 		}
@@ -869,20 +878,41 @@ func (c *Controller) cleanupExpiredTorrents() {
 // over the port number stored in the application's persistent settings.
 func (c *Controller) resolveHTTPPort() int {
 	if c.port < 1 || c.port > 65535 {
-		return *c.settings.HTTPServerPort
+		return *c.settings.Load().HTTPServerPort
 	}
 
 	return c.port
 }
 
+// clientTorrent looks up a torrent in the active client. It reports false when
+// no client is configured.
+func (c *Controller) clientTorrent(ih metainfo.Hash) (*torrent.Torrent, bool) {
+	client := c.currentClient()
+	if client == nil {
+		return nil, false
+	}
+	return client.Torrent(ih)
+}
+
+// currentClient returns the active torrent client, or nil before the first
+// configuration. Callers that already hold c.mu must read c.client directly.
+func (c *Controller) currentClient() *torrent.Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client
+}
+
 func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
+	c.torrentConfigMu.Lock()
+	defer c.torrentConfigMu.Unlock()
+
 	c.mu.RLock()
 	oldClient := c.client
-	oldStorageClient := c.storageClient
-	oldPool := c.streamPool
-	currentSettings := c.settings
-	logger := c.logger
-	isReconfiguring := c.downloader != nil
+	oldStorageClient := c.storageClient.Load()
+	oldPool := c.streamPool.Load()
+	currentSettings := c.settings.Load()
+	logger := c.logger.Load()
+	isReconfiguring := c.downloader.Load() != nil
 	c.mu.RUnlock()
 
 	var newTrackers [][]string
@@ -902,6 +932,10 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 	}
 
 	if oldClient != nil {
+		c.torrentClientUnavailable.Store(true)
+		// Preload tasks reference the outgoing client, pool, and storage. Retire
+		// them before those close so none keeps reporting a vanished cache.
+		c.cancelAllPreloads()
 		_ = oldClient.Close()
 		<-oldClient.Closed()
 		if c.runtimeConfig.clientCloseDelay > 0 {
@@ -974,21 +1008,29 @@ func (c *Controller) configureTorrentClient(clientLevel slog.Level) error {
 		},
 		Registry: storageClient,
 	})
-	pool.SetReadaheadBudget(*currentSettings.MaxMemory * int64(calcReadaheadPct(*currentSettings.MaxMemory)) / 100)
+	readaheadBudget := *currentSettings.MaxMemory * int64(calcReadaheadPct(*currentSettings.MaxMemory)) / 100
+	if !pool.SetReadaheadBudget(readaheadBudget) {
+		pool.Close()
+		_ = client.Close()
+		return errors.New("failed to set initial stream readahead budget")
+	}
 
 	c.mu.Lock()
 	c.client = client
-	c.storageClient = storageClient
-	c.streamPool = pool
+	c.storageClient.Store(storageClient)
+	c.streamPool.Store(pool)
 	if isReconfiguring {
-		c.downloader.Stop()
+		c.downloader.Load().Stop()
 		c.trackers = newTrackers
-		c.downloader = downloader.New(c.client, c.db, c.logger, c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers)
+		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers)
+		c.downloader.Store(newDownloader)
 		if utils.Val(currentSettings.EnableDownloader) {
-			c.downloader.Start()
+			newDownloader.Start()
 		}
 	}
+	c.torrentGeneration.Add(1)
 	c.mu.Unlock()
+	c.torrentClientUnavailable.Store(false)
 
 	return nil
 }

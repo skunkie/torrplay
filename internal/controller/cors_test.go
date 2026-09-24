@@ -7,6 +7,7 @@ package controller
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,7 +32,8 @@ func TestRouteScopedCORS(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctrl := &Controller{settings: &api.Settings{CorsAllowedOrigins: &tc.allowed}}
+			ctrl := &Controller{}
+			ctrl.settings.Store(&api.Settings{CorsAllowedOrigins: &tc.allowed})
 			handler := ctrl.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
 			}))
@@ -77,7 +79,8 @@ func TestNormalizeOrigin(t *testing.T) {
 }
 
 func TestCORSAllowedHeaders(t *testing.T) {
-	ctrl := &Controller{settings: &api.Settings{}}
+	ctrl := &Controller{}
+	ctrl.settings.Store(&api.Settings{})
 	handler := ctrl.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -91,4 +94,24 @@ func TestCORSAllowedHeaders(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Contains(t, rr.Header().Get("Access-Control-Allow-Headers"), "X-Requested-With")
+}
+
+func TestCORSAllowsMethodOverridePreflight(t *testing.T) {
+	ctrl := &Controller{}
+	ctrl.settings.Store(&api.Settings{})
+	handler := ctrl.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/settings", http.NoBody)
+	req.Header.Set("Origin", "tauri://localhost")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type,x-http-method-override")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, "tauri://localhost", rr.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, http.MethodPost, rr.Header().Get("Access-Control-Allow-Methods"))
+	assert.Contains(t, strings.ToLower(rr.Header().Get("Access-Control-Allow-Headers")), "x-http-method-override")
 }

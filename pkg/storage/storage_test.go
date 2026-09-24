@@ -197,6 +197,43 @@ func TestClient_TorrentStats(t *testing.T) {
 	assert.Equal(t, 2, stats.ResidentPieces)
 }
 
+func TestClient_PiecesCached(t *testing.T) {
+	client := newTestClient(1024)
+	info, infoHash := newTestInfo(256, 3)
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	complete := torrentImpl.Piece(info.Piece(0))
+	_, err = complete.WriteAt(make([]byte, 256), 0)
+	require.NoError(t, err)
+	require.NoError(t, complete.MarkComplete())
+	_, err = torrentImpl.Piece(info.Piece(1)).WriteAt(make([]byte, 256), 0)
+	require.NoError(t, err)
+
+	cached, err := client.PiecesCached(infoHash, []int{0})
+	require.NoError(t, err)
+	assert.True(t, cached)
+	cached, err = client.PiecesCached(infoHash, nil)
+	require.NoError(t, err)
+	assert.True(t, cached, "an empty set is trivially cached")
+
+	cached, err = client.PiecesCached(infoHash, []int{0, 1})
+	require.NoError(t, err)
+	assert.False(t, cached, "a resident piece that is not complete is not cached")
+	cached, err = client.PiecesCached(infoHash, []int{0, 2})
+	require.NoError(t, err)
+	assert.False(t, cached, "a piece that was never written is not cached")
+
+	_, err = client.EvictTo(0)
+	require.NoError(t, err)
+	cached, err = client.PiecesCached(infoHash, []int{0})
+	require.NoError(t, err)
+	assert.False(t, cached, "an evicted piece is not cached")
+
+	_, err = client.PiecesCached(metainfo.Hash{0xff}, []int{0})
+	require.ErrorIs(t, err, ErrTorrentNotManaged)
+}
+
 func TestClient_TorrentStats_TracksWrittenBytes(t *testing.T) {
 	client := newTestClient(1024)
 	info, infoHash := newTestInfo(256, 1)
@@ -1232,6 +1269,111 @@ func TestClient_MemoryAllocationFailure_NoUsedDrift(t *testing.T) {
 // TestClient_AllocateMemory_ActiveRangeEmergencyEviction verifies that when protected
 // pieces fill maxMemory, the allocator emergency-evicts the oldest piece to allow
 // incoming pieces to be written without failing and halting torrent downloads.
+func TestPieceDataRecordWrittenRange(t *testing.T) {
+	tests := []struct {
+		name   string
+		writes [][2]int64
+		want   []byteRange
+	}{
+		{name: "empty write ignored", writes: [][2]int64{{5, 5}}, want: nil},
+		{name: "sequential writes merge", writes: [][2]int64{{0, 4}, {4, 8}, {8, 12}}, want: []byteRange{{0, 12}}},
+		{name: "gap kept sorted", writes: [][2]int64{{8, 12}, {0, 4}}, want: []byteRange{{0, 4}, {8, 12}}},
+		{name: "insert between", writes: [][2]int64{{0, 2}, {10, 12}, {5, 6}}, want: []byteRange{{0, 2}, {5, 6}, {10, 12}}},
+		{name: "overlap extends", writes: [][2]int64{{2, 6}, {4, 10}}, want: []byteRange{{2, 10}}},
+		{name: "bridge several", writes: [][2]int64{{0, 2}, {4, 6}, {8, 10}, {1, 9}}, want: []byteRange{{0, 10}}},
+		{name: "duplicate write", writes: [][2]int64{{3, 7}, {3, 7}}, want: []byteRange{{3, 7}}},
+		{name: "contained write", writes: [][2]int64{{0, 10}, {2, 4}}, want: []byteRange{{0, 10}}},
+		{name: "touch previous start", writes: [][2]int64{{4, 8}, {0, 4}}, want: []byteRange{{0, 8}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pd := &pieceData{}
+			for _, write := range tt.writes {
+				pd.recordWrittenRange(write[0], write[1])
+			}
+			assert.Equal(t, tt.want, pd.writtenRanges)
+			var wantBytes int64
+			for _, r := range tt.want {
+				wantBytes += r.end - r.start
+			}
+			assert.Equal(t, wantBytes, pd.writtenBytes)
+		})
+	}
+}
+
+func TestPieceDataRecordWrittenRangeSequentialWritesDoNotAllocate(t *testing.T) {
+	pd := &pieceData{}
+	pd.recordWrittenRange(0, 16)
+	offset := int64(16)
+	allocs := testing.AllocsPerRun(100, func() {
+		pd.recordWrittenRange(offset, offset+16)
+		offset += 16
+	})
+	assert.Zero(t, allocs)
+	assert.Len(t, pd.writtenRanges, 1)
+}
+
+func TestClient_AllocateMemory_WaitsForReservationBeforeEvictingActiveRange(t *testing.T) {
+	client := newTestClient(512) // room for exactly 2 pieces
+	info, infoHash := newTestInfo(256, 3)
+
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	require.NoError(t, err)
+
+	p0 := torrentImpl.Piece(info.Piece(0))
+	_, err = p0.WriteAt([]byte("data"), 0)
+	require.NoError(t, err)
+	client.SetActiveRange(infoHash, 1, 0, 0)
+
+	// Hold the remaining capacity as an unpublished reservation.
+	state := p0.(*pieceImpl).torrent
+	_, err = client.allocateMemory(256, infoHash, state)
+	require.NoError(t, err)
+	refundReservation := sync.OnceFunc(func() {
+		client.mu.Lock()
+		client.releaseMemoryLocked(256, state)
+		client.mu.Unlock()
+		client.completeAllocation()
+	})
+	defer refundReservation()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, writeErr := torrentImpl.Piece(info.Piece(2)).WriteAt([]byte("data"), 0)
+		writeDone <- writeErr
+	}()
+
+	// The write must wait for the reservation instead of evicting the active piece.
+	require.Eventually(t, func() bool {
+		client.mu.RLock()
+		pd := client.pieces[pieceKey{infoHash: infoHash, index: 2}]
+		client.mu.RUnlock()
+		if pd == nil {
+			return false
+		}
+		pd.mu.RLock()
+		defer pd.mu.RUnlock()
+		return pd.allocating
+	}, time.Second, time.Millisecond)
+	select {
+	case err := <-writeDone:
+		t.Fatalf("write returned while reservation was unpublished: %v", err)
+	default:
+	}
+	assert.Contains(t, residentPieceIndexes(t, client, infoHash), 0)
+
+	refundReservation()
+	select {
+	case err := <-writeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("write did not resume after the reservation was refunded")
+	}
+	inMemory := residentPieceIndexes(t, client, infoHash)
+	assert.Contains(t, inMemory, 0, "active piece was evicted despite refunded capacity")
+	assert.Contains(t, inMemory, 2)
+}
+
 func TestClient_AllocateMemory_ActiveRangeEmergencyEviction(t *testing.T) {
 	client := newTestClient(256) // room for exactly 1 piece
 	info, infoHash := newTestInfo(256, 2)

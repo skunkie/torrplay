@@ -25,7 +25,9 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/go-chi/chi/v5"
+	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 	"github.com/oapi-codegen/testutil"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -148,8 +150,8 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 	require.NoError(t, err)
 
 	// Disable auth.
-	ctrl.settings.Auth.Enabled = new(false)
-	err = ctrl.db.UpdateSettings(database.FromAPISettings(ctrl.settings))
+	ctrl.settings.Load().Auth.Enabled = new(false)
+	err = ctrl.db.UpdateSettings(database.FromAPISettings(ctrl.settings.Load()))
 	require.NoError(t, err)
 
 	for _, opt := range opts {
@@ -321,7 +323,7 @@ func TestAddDuplicateTorrent(t *testing.T) {
 
 func TestAddTorrentHonorsRequestedFileStorage(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = new(t.TempDir())
+		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 
@@ -339,7 +341,7 @@ func TestAddTorrentHonorsRequestedFileStorage(t *testing.T) {
 
 func TestAddTorrentUsesExistingStorageBeforeConflict(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = new(t.TempDir())
+		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 
@@ -607,7 +609,7 @@ func TestQBittorrentAddTorrentFromURL(t *testing.T) {
 
 func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = new(t.TempDir())
+		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 
@@ -982,6 +984,35 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	assert.NotNil(t, updatedTorrent.UpdatedAt)
 }
 
+func TestLoggerAndSettingsReadsDoNotRaceSettingsUpdate(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Go(func() {
+		authErr := &openapi3filter.SecurityRequirementsError{}
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			// Both read the logger or settings without holding c.mu.
+			ctrl.cleanupExpiredTorrents()
+			ctrl.ErrorHandler(context.Background(), authErr, httptest.NewRecorder(), nil, nethttpmiddleware.ErrorHandlerOpts{})
+		}
+	})
+
+	// A log level change replaces both the settings and the logger.
+	for _, level := range []string{"DEBUG", "INFO"} {
+		rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]string{"log_level": level}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+		require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	}
+	close(done)
+	readers.Wait()
+}
+
 func TestUpdateSettings(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
@@ -1201,7 +1232,7 @@ func tempfile() string {
 
 func TestUpdateTorrentStorage(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = new(t.TempDir())
+		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 
@@ -1241,8 +1272,8 @@ func TestUpdateTorrentStorage(t *testing.T) {
 func TestController_TorrentInfoBytes(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = new(tmpDir)
-		err := c.db.UpdateSettings(database.FromAPISettings(c.settings))
+		c.settings.Load().FileStoragePath = new(tmpDir)
+		err := c.db.UpdateSettings(database.FromAPISettings(c.settings.Load()))
 		require.NoError(t, err)
 	})
 	defer cleanup()
@@ -1336,9 +1367,9 @@ func TestNewController(t *testing.T) {
 		require.NoError(t, err)
 		defer ctrl.Shutdown()
 
-		assert.Equal(t, "TorrPlay", *ctrl.settings.FriendlyName)
-		assert.Equal(t, 8090, *ctrl.settings.HTTPServerPort)
-		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
+		assert.Equal(t, "TorrPlay", *ctrl.settings.Load().FriendlyName)
+		assert.Equal(t, 8090, *ctrl.settings.Load().HTTPServerPort)
+		assert.Equal(t, 50, *ctrl.settings.Load().TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
 		require.NoError(t, err)
@@ -1379,9 +1410,9 @@ func TestNewController(t *testing.T) {
 		require.NoError(t, err)
 		defer ctrl.Shutdown()
 
-		assert.Equal(t, "CustomTorrPlay", *ctrl.settings.FriendlyName)
-		assert.Equal(t, 9999, *ctrl.settings.HTTPServerPort)
-		assert.Equal(t, 50, *ctrl.settings.TorrentClient.EstablishedConnsPerTorrent)
+		assert.Equal(t, "CustomTorrPlay", *ctrl.settings.Load().FriendlyName)
+		assert.Equal(t, 9999, *ctrl.settings.Load().HTTPServerPort)
+		assert.Equal(t, 50, *ctrl.settings.Load().TorrentClient.EstablishedConnsPerTorrent)
 
 		secretAfter, err := dbClient.GetJWTSecret()
 		require.NoError(t, err)
@@ -1513,8 +1544,8 @@ func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
 	<-to.GotInfo()
 
 	file := to.Files()[0]
-	ctrl.streamPool.SetReadaheadBudget(1024 * 1024)
-	_, release, err := ctrl.streamPool.Acquire(file, stream.MemoryStorage)
+	ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
+	_, release, err := ctrl.streamPool.Load().Acquire(file, stream.MemoryStorage)
 	require.NoError(t, err)
 	defer release()
 
@@ -1543,13 +1574,13 @@ func TestController_CleanupExpiredTorrents_ReleasesCompletedPreload(t *testing.T
 	}
 	ctrl.torrentTracker.mu.Unlock()
 
-	ctrl.streamPool.SetReadaheadBudget(1000)
-	require.Equal(t, int64(1000), ctrl.streamPool.ReservePreloadBudget(ih, 1000))
+	ctrl.streamPool.Load().SetReadaheadBudget(1000)
+	require.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(ih, "", false, 1000))
 	task := &preloadTask{
 		infoHash: ih,
 		cancel:   func() {},
 		clearProtection: func() {
-			ctrl.streamPool.ReleasePreloadBudget(ih)
+			ctrl.streamPool.Load().ReleasePreloadBudget(ih)
 		},
 		protected: true,
 	}
@@ -1564,13 +1595,13 @@ func TestController_CleanupExpiredTorrents_ReleasesCompletedPreload(t *testing.T
 	_, tracked := ctrl.torrentTracker.torrents[ih]
 	ctrl.torrentTracker.mu.RUnlock()
 	assert.False(t, tracked)
-	assert.Equal(t, int64(1000), ctrl.streamPool.ReservePreloadBudget(otherHash, 1000))
-	ctrl.streamPool.ReleasePreloadBudget(otherHash)
+	assert.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(otherHash, "", false, 1000))
+	ctrl.streamPool.Load().ReleasePreloadBudget(otherHash)
 }
 
 func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
-		c.settings.FileStoragePath = nil
+		c.settings.Load().FileStoragePath = nil
 	})
 	defer cleanup()
 
@@ -1598,7 +1629,7 @@ func TestUpdateTorrentUnlocksWhenStorageSwitchTimesOut(t *testing.T) {
 	runtimeConfig.gotInfoTimeout = 100 * time.Millisecond
 
 	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig, func(c *Controller) {
-		c.settings.FileStoragePath = new(t.TempDir())
+		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
 
@@ -1664,8 +1695,8 @@ func TestTorrentActiveField(t *testing.T) {
 	<-to.GotInfo()
 
 	file := to.Files()[0]
-	ctrl.streamPool.SetReadaheadBudget(1024 * 1024)
-	_, release, err := ctrl.streamPool.Acquire(file, stream.MemoryStorage)
+	ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
+	_, release, err := ctrl.streamPool.Load().Acquire(file, stream.MemoryStorage)
 	require.NoError(t, err)
 
 	// Now should be active
@@ -1728,7 +1759,8 @@ func TestSlogMiddlewareRedactsTokens(t *testing.T) {
 	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
 	logger := slog.New(handler)
 
-	c := &Controller{logger: logger}
+	c := &Controller{}
+	c.logger.Store(logger)
 
 	tests := []struct {
 		name          string

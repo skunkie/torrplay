@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -436,6 +437,33 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 	return stats, nil
 }
 
+// PiecesCached reports whether every listed piece of a managed torrent is
+// resident in memory and marked complete. Unlike TorrentStats, it inspects only
+// the listed pieces. It returns ErrTorrentNotManaged if the torrent is not
+// managed.
+func (c *Client) PiecesCached(infoHash metainfo.Hash, indexes []int) (bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	state, exists := c.torrents[infoHash]
+	if !exists {
+		return false, fmt.Errorf("%w: %s", ErrTorrentNotManaged, infoHash)
+	}
+	for _, index := range indexes {
+		pd, ok := c.pieces[pieceKey{infoHash: infoHash, index: index}]
+		if !ok || pd.torrent != state {
+			return false, nil
+		}
+		pd.mu.RLock()
+		cached := pd.data != nil && pd.complete
+		pd.mu.RUnlock()
+		if !cached {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // OpenTorrent implements the storage.Client interface. It is called when a new
 // torrent is added to the torrent client.
 func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash metainfo.Hash) (storage.TorrentImpl, error) {
@@ -615,7 +643,9 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 			}
 
 			// Only an absolute lack of non-active capacity may evict an active range.
-			if c.used+size > c.maxMemory {
+			// An unpublished reservation will soon publish or refund its space, so
+			// wait for it below rather than discard pieces a reader is consuming.
+			if c.used+size > c.maxMemory && c.pendingAllocations == 0 {
 				reuseSize := size
 				if reusable != nil {
 					reuseSize = 0
@@ -633,10 +663,11 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 			}
 
 			if c.used+size > c.maxMemory {
-				// Resident pieces have already been exhausted, so an unpublished
-				// reservation is the only reclaimable memory left. Wait for one to
-				// publish or refund instead of surfacing a transient WriteAt error,
-				// which the torrent engine treats as fatal.
+				// Unprotected pieces have already been exhausted, so an unpublished
+				// reservation is the only memory that may be reclaimed without
+				// evicting an active range. Wait for one to publish or refund instead
+				// of surfacing a transient WriteAt error, which the torrent engine
+				// treats as fatal.
 				if c.pendingAllocations > 0 {
 					c.allocationCond.Wait()
 					c.mu.Unlock()
@@ -823,31 +854,30 @@ func (c *Client) evictDownToInternalLocked(target int64, protection evictionProt
 	return reusable
 }
 
+// recordWrittenRange adds [start, end) to the piece's sorted, disjoint written
+// ranges, merging ranges it overlaps or touches. Ranges are updated in place,
+// so sequential writes extend one range without allocating.
 func (pd *pieceData) recordWrittenRange(start, end int64) {
 	if start >= end {
 		return
 	}
 
-	merged := byteRange{start: start, end: end}
-	ranges := make([]byteRange, 0, len(pd.writtenRanges)+1)
-	inserted := false
-	for _, current := range pd.writtenRanges {
-		switch {
-		case current.end < merged.start:
-			ranges = append(ranges, current)
-		case merged.end < current.start:
-			if !inserted {
-				ranges = append(ranges, merged)
-				inserted = true
-			}
-			ranges = append(ranges, current)
-		default:
-			merged.start = min(merged.start, current.start)
-			merged.end = max(merged.end, current.end)
-		}
+	ranges := pd.writtenRanges
+	// first is the first range that overlaps or touches the new one, and last
+	// is one past the final such range.
+	first := sort.Search(len(ranges), func(i int) bool { return ranges[i].end >= start })
+	last := first
+	for last < len(ranges) && ranges[last].start <= end {
+		last++
 	}
-	if !inserted {
-		ranges = append(ranges, merged)
+	if first == last {
+		ranges = slices.Insert(ranges, first, byteRange{start: start, end: end})
+	} else {
+		ranges[first] = byteRange{
+			start: min(start, ranges[first].start),
+			end:   max(end, ranges[last-1].end),
+		}
+		ranges = slices.Delete(ranges, first+1, last)
 	}
 
 	pd.writtenRanges = ranges

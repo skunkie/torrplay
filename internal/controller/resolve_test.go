@@ -29,7 +29,7 @@ func TestAddResolvedTorrent(t *testing.T) {
 	defer server.Close()
 	for _, saveStorage := range []api.TorrentStorage{api.Memory, api.File} {
 		t.Run("save_to_"+string(saveStorage), func(t *testing.T) {
-			ctrl, cleanup := newTestController(t, func(c *Controller) { c.settings.FileStoragePath = new(t.TempDir()) })
+			ctrl, cleanup := newTestController(t, func(c *Controller) { c.settings.Load().FileStoragePath = new(t.TempDir()) })
 			defer cleanup()
 			rr := testutil.NewRequest().Post("/api/v1/torrent-resolutions").WithJsonBody(api.TorrentResolutionRequest{URL: server.URL}).GoWithHTTPHandler(t, ctrl.router).Recorder
 			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -54,7 +54,7 @@ func TestResolveTorrent(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(fixture.Bytes()) }))
 	defer server.Close()
 	storageDir := t.TempDir()
-	ctrl, cleanup := newTestController(t, func(c *Controller) { c.settings.FileStoragePath = &storageDir })
+	ctrl, cleanup := newTestController(t, func(c *Controller) { c.settings.Load().FileStoragePath = &storageDir })
 	defer cleanup()
 	request := api.TorrentResolutionRequest{URL: server.URL}
 	var first *torrent.Torrent

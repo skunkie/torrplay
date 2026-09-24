@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -192,7 +193,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if utils.Val(req.Storage) == api.File && (c.settings.FileStoragePath == nil || *c.settings.FileStoragePath == "") {
+	if utils.Val(req.Storage) == api.File && utils.Val(c.settings.Load().FileStoragePath) == "" {
 		api.HTTPError(w, "file storage is not configured", http.StatusBadRequest)
 		return
 	}
@@ -229,7 +230,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 	if !c.hasTorrentReaders(to.InfoHash()) {
 		to.Drop()
 		<-to.Closed()
-		c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+		c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -302,7 +303,7 @@ func storageMemoryStats(s memstorage.MemoryStats) api.MemoryStats {
 }
 
 func (c *Controller) GetMemoryStats(w http.ResponseWriter, _ *http.Request) {
-	stats := c.storageClient.MemoryStats()
+	stats := c.storageClient.Load().MemoryStats()
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(storageMemoryStats(stats)); err != nil {
@@ -425,9 +426,9 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 
 func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
 	c.mu.RLock()
-	redactedSettings := *c.settings
-	if c.settings.Auth != nil {
-		redactedAuth := *c.settings.Auth
+	redactedSettings := *c.settings.Load()
+	if redactedSettings.Auth != nil {
+		redactedAuth := *redactedSettings.Auth
 		if redactedAuth.Password != nil {
 			redactedAuth.Password = new("********")
 		}
@@ -585,9 +586,7 @@ func (c *Controller) GetToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.mu.RLock()
-	settings := c.settings
-	c.mu.RUnlock()
+	settings := c.settings.Load()
 
 	if settings.Auth == nil || !utils.Val(settings.Auth.Enabled) {
 		api.HTTPError(w, "authentication not enabled", http.StatusServiceUnavailable)
@@ -638,7 +637,7 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 				api.HandleError(w, api.NewError(err.Error(), http.StatusBadRequest))
 				return
 			}
-			if to, ok := c.client.Torrent(ih); ok && len(magnetV2.Trackers) > 0 {
+			if to, ok := c.clientTorrent(ih); ok && len(magnetV2.Trackers) > 0 {
 				to.AddTrackers([][]string{magnetV2.Trackers})
 			}
 		}
@@ -882,7 +881,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err != nil {
 			c.mu.Lock()
-			c.settings = oldSettings
+			c.settings.Store(oldSettings)
 			c.mu.Unlock()
 		}
 	}()
@@ -1129,7 +1128,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			_ = os.Remove(tempFile.Name())
 
 			// Create the new piece completion database.
-			pc, err := piececompletion.New(p, c.logger)
+			pc, err := piececompletion.New(p, c.logger.Load())
 			if err != nil {
 				c.mu.Unlock()
 				api.HTTPError(w, fmt.Sprintf("failed to create piece completion database: %v", err), http.StatusInternalServerError)
@@ -1150,7 +1149,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	if saveSettings {
 		c.mu.Lock()
-		c.settings = &newSettings
+		c.settings.Store(&newSettings)
 		c.mu.Unlock()
 		err = c.db.UpdateSettings(database.FromAPISettings(&newSettings))
 		if err != nil {
@@ -1162,11 +1161,11 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	// Reconfigure components.
 	if reconfigureLogger {
 		reconfigureTorrentClient = true
-		c.mu.RLock()
-		newLogger := c.configureLogger(*c.settings.LogLevel, c.settings)
-		c.mu.RUnlock()
+		settings := c.settings.Load()
+		// configureLogger replaces c.logFile, so it needs the write lock.
 		c.mu.Lock()
-		c.logger = newLogger
+		newLogger := c.configureLogger(*settings.LogLevel, settings)
+		c.logger.Store(newLogger)
 		httpServer := c.httpServer
 		c.mu.Unlock()
 		if httpServer != nil {
@@ -1183,17 +1182,17 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
 		c.mu.Lock()
-		if *c.settings.EnableDownloader && *c.settings.FileStoragePath != "" {
-			c.downloader.Start()
+		if settings := c.settings.Load(); *settings.EnableDownloader && *settings.FileStoragePath != "" {
+			c.downloader.Load().Start()
 		} else {
-			c.downloader.Stop()
+			c.downloader.Load().Stop()
 		}
 		c.mu.Unlock()
 	}
 
 	if reconfigureDLNA {
-		if *c.settings.EnableDlna {
-			err = c.dlna.Reconfigure(*c.settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
+		if settings := c.settings.Load(); *settings.EnableDlna {
+			err = c.dlna.Reconfigure(*settings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
 		} else {
 			err = c.dlna.Stop()
 		}
@@ -1229,7 +1228,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			httpServer.SetRouter(newRouter)
 
 			if err := httpServer.Restart(); err != nil {
-				c.logger.Debug(fmt.Sprintf("failed to update settings, %v", err))
+				c.logger.Load().Debug(fmt.Sprintf("failed to update settings, %v", err))
 			}
 		}()
 	}
@@ -1373,15 +1372,24 @@ func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	return &s
 }
 
-// peerTransferRates sums the live per-peer transfer rates for a torrent's current connections.
+// peerTransferRates sums live payload rates across native peers and webseeds.
 func peerTransferRates(to *torrent.Torrent) (downloadRate, uploadRate float64) {
 	if to == nil {
 		return 0, 0
 	}
+	add := func(stats torrent.PeerStats) {
+		if !math.IsNaN(stats.DownloadRate) && !math.IsInf(stats.DownloadRate, 0) {
+			downloadRate += stats.DownloadRate
+		}
+		if !math.IsNaN(stats.LastWriteUploadRate) && !math.IsInf(stats.LastWriteUploadRate, 0) {
+			uploadRate += stats.LastWriteUploadRate
+		}
+	}
 	for _, peer := range to.PeerConns() {
-		stats := peer.Stats()
-		downloadRate += stats.DownloadRate
-		uploadRate += stats.LastWriteUploadRate
+		add(peer.Stats())
+	}
+	for _, peer := range to.WebseedPeerConns() {
+		add(peer.Stats())
 	}
 	return downloadRate, uploadRate
 }
@@ -1426,7 +1434,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.WrittenBytes = to.BytesCompleted()
 		resp.InMemory = 0
 		resp.InMemorySize = 0
-		memoryStats := c.storageClient.MemoryStats()
+		memoryStats := c.storageClient.Load().MemoryStats()
 		resp.MemoryStats = storageMemoryStats(memoryStats)
 		resp.MemoryUsagePercentage = 0
 
@@ -1444,7 +1452,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalPieces = to.NumPieces()
 		resp.TotalSize = to.Length()
 	} else {
-		storageStats, err := c.storageClient.TorrentStats(to.InfoHash())
+		storageStats, err := c.storageClient.Load().TorrentStats(to.InfoHash())
 		if err != nil {
 			storageStats = memstorage.TorrentStats{}
 		}
@@ -1473,7 +1481,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalSize = storageStats.TrackedBytes
 	}
 
-	if pool := c.streamPool; pool != nil {
+	if pool := c.streamPool.Load(); pool != nil {
 		readers := pool.ReaderPositions(to.InfoHash())
 		apiReaders := make([]api.ReaderInfo, len(readers))
 		for i, ri := range readers {
@@ -1527,7 +1535,7 @@ func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.Torren
 
 	if req.Poster != nil && *req.Poster != "" {
 		c.startPosterUpdate(t.Hash, *req.Poster)
-	} else if *c.settings.EnableDlna {
+	} else if *c.settings.Load().EnableDlna {
 		// If there's no poster, we can notify DLNA clients immediately.
 		c.dlna.IncrementSystemUpdateID()
 		c.dlna.SendUpdateNotification()
@@ -1558,15 +1566,15 @@ func (c *Controller) deleteTorrentLocked(ih metainfo.Hash) error {
 
 	if isDbTorrent {
 		if utils.Val(t.Storage) == api.File {
-			if runtime.GOOS != "windows" && c.settings.FileStoragePath != nil && *c.settings.FileStoragePath != "" {
-				torrentStoragePath := filepath.Join(*c.settings.FileStoragePath, t.Name)
+			if fileStoragePath := utils.Val(c.settings.Load().FileStoragePath); runtime.GOOS != "windows" && fileStoragePath != "" {
+				torrentStoragePath := filepath.Join(fileStoragePath, t.Name)
 				if err := os.RemoveAll(torrentStoragePath); err != nil {
-					c.logger.Error("failed to delete torrent file storage", "path", torrentStoragePath, "error", err)
+					c.logger.Load().Error("failed to delete torrent file storage", "path", torrentStoragePath, "error", err)
 				}
 			}
 			if c.pieceCompletion != nil {
 				if err := c.pieceCompletion.Delete(ih); err != nil {
-					c.logger.Error("failed to delete piece completion data", "hash", ih, "error", err)
+					c.logger.Load().Error("failed to delete piece completion data", "hash", ih, "error", err)
 				}
 			}
 		}
@@ -1575,7 +1583,7 @@ func (c *Controller) deleteTorrentLocked(ih metainfo.Hash) error {
 			return api.NewError(fmt.Sprintf("failed to delete torrent with hash %s", ih), http.StatusInternalServerError)
 		}
 
-		if *c.settings.EnableDlna {
+		if *c.settings.Load().EnableDlna {
 			c.dlna.IncrementSystemUpdateID()
 			c.dlna.SendUpdateNotification()
 		}
@@ -1590,7 +1598,7 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 
 	data, err := c.images.DownloadImageData(ctx, urlStr)
 	if err != nil {
-		c.logger.Debug("error downloading poster image", "error", err)
+		c.logger.Load().Debug("error downloading poster image", "error", err)
 		return
 	}
 
@@ -1602,14 +1610,14 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 
 	imageID, err := c.images.SaveData(data)
 	if err != nil {
-		c.logger.Debug("error saving poster image", "error", err)
+		c.logger.Load().Debug("error saving poster image", "error", err)
 		return
 	}
 
 	// Get the torrent to avoid overwriting recent user changes.
 	t, err := c.db.GetTorrent(ih)
 	if err != nil {
-		c.logger.Error("failed to get torrent", "hash", ih, "error", err)
+		c.logger.Load().Error("failed to get torrent", "hash", ih, "error", err)
 		return
 	}
 
@@ -1622,16 +1630,16 @@ func (c *Controller) handlePosterUpdate(ih metainfo.Hash, urlStr string) {
 	t.UpdatedAt = new(time.Now())
 
 	if err := c.db.UpdateTorrent(t); err != nil {
-		c.logger.Error("failed to update torrent poster", "hash", ih, "error", err)
+		c.logger.Load().Error("failed to update torrent poster", "hash", ih, "error", err)
 		return
 	}
 
-	if *c.settings.EnableDlna {
+	if *c.settings.Load().EnableDlna {
 		c.dlna.IncrementSystemUpdateID()
 		c.dlna.SendUpdateNotification()
 	}
 
-	c.logger.Debug("successfully updated torrent poster", "hash", ih)
+	c.logger.Load().Debug("successfully updated torrent poster", "hash", ih)
 }
 
 func (c *Controller) startPosterUpdate(ih metainfo.Hash, urlStr string) {
@@ -1692,16 +1700,36 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 // Idle readers are included because they can be resumed and should keep the
 // torrent alive — see stream.Pool.HasReaders for details.
 func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
-	isStreaming := c.streamPool != nil && c.streamPool.HasReaders(ih)
-	isDownloading := c.downloader != nil && c.downloader.IsActive(ih)
+	isStreaming, isDownloading := c.torrentActivity(ih)
 	return isStreaming || isDownloading
 }
 
-// loadTorrent is the single entry point for adding a torrent to the client.
-// It handles adding trackers and managing torrents\' lifetime in the torrent client.
+// torrentActivity reports whether the torrent has stream pool readers and
+// whether the background downloader is working on it. It takes no controller
+// lock, so callers may hold c.mu.
+func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloading bool) {
+	if pool := c.streamPool.Load(); pool != nil {
+		isStreaming = pool.HasReaders(ih)
+	}
+	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+		isDownloading = activeDownloader.IsActive(ih)
+	}
+	return isStreaming, isDownloading
+}
+
 func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.TorrentStorage) (*torrent.Torrent, error) {
 	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 && len(spec.InfoBytes) == 0 {
 		spec.InfoBytes = t.InfoBytes
+	}
+	c.mu.RLock()
+	client := c.client
+	fileStoragePath := utils.Val(c.settings.Load().FileStoragePath)
+	logger := c.logger.Load()
+	pieceCompletion := c.pieceCompletion
+	trackers := slices.Clone(c.trackers)
+	c.mu.RUnlock()
+	if client == nil {
+		return nil, errors.New("torrent client is unavailable")
 	}
 
 	c.torrentTracker.mu.RLock()
@@ -1709,7 +1737,7 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	c.torrentTracker.mu.RUnlock()
 
 	if ok && info.storageType == storageType {
-		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+		if to, ok := client.Torrent(spec.InfoHash); ok {
 			if len(spec.InfoBytes) > 0 {
 				if err := to.MergeSpec(spec); err != nil {
 					return nil, err
@@ -1724,7 +1752,7 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	}
 
 	if ok && info.storageType != storageType {
-		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+		if to, ok := client.Torrent(spec.InfoHash); ok {
 			if len(spec.InfoBytes) == 0 && to.Info() != nil {
 				spec.InfoBytes = to.Metainfo().InfoBytes
 			}
@@ -1733,28 +1761,27 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 		}
 	}
 
-	utils.AddTrackersToSpec(spec, c.trackers)
+	utils.AddTrackersToSpec(spec, trackers)
 
-	if storageType == api.File && c.settings.FileStoragePath != nil && *c.settings.FileStoragePath != "" {
-		fileStoragePath := *c.settings.FileStoragePath
+	if storageType == api.File && fileStoragePath != "" {
 		if _, err := os.Stat(fileStoragePath); os.IsNotExist(err) {
 			if err := os.MkdirAll(fileStoragePath, 0o755); err != nil {
-				c.logger.Warn("failed to create file storage directory, falling back to memory storage", "error", err)
+				logger.Warn("failed to create file storage directory, falling back to memory storage", "error", err)
 			}
 		}
 
 		if _, err := os.Stat(fileStoragePath); err == nil {
 			opts := storage.NewFileClientOpts{
 				ClientBaseDir:   fileStoragePath,
-				PieceCompletion: c.pieceCompletion,
+				PieceCompletion: pieceCompletion,
 				UsePartFiles:    generics.Option[bool]{Value: false, Ok: true},
-				Logger:          c.logger,
+				Logger:          logger,
 			}
 			spec.Storage = storage.NewFileOpts(opts)
 		}
 	}
 
-	to, _, err := c.client.AddTorrentSpec(spec)
+	to, _, err := client.AddTorrentSpec(spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add torrent spec to client: %w", err)
 	}
@@ -1804,6 +1831,12 @@ func calcReadaheadPct(maxMemory int64) int {
 // streamFile is the internal implementation for streaming a torrent file.
 // It can identify the file to stream by either a file path (string) or a file index (int).
 func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdentifier any, magnet *api.Magnet) {
+	requestGeneration := c.torrentGeneration.Load()
+	if c.torrentClientUnavailable.Load() {
+		api.HTTPError(w, "torrent client is reconfiguring", http.StatusServiceUnavailable)
+		return
+	}
+
 	to, err := c.resolveTorrentForRequest(magnet, ih)
 	if err != nil {
 		api.HandleError(w, err)
@@ -1848,13 +1881,13 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	t, err := c.db.GetTorrent(ih)
 	if err != nil {
 		if !errors.Is(err, database.ErrTorrentNotFound) {
-			c.logger.Error("failed to get torrent from database for streaming", "err", err, "hash", ih)
+			c.logger.Load().Error("failed to get torrent from database for streaming", "err", err, "hash", ih)
 		}
 		c.torrentTracker.mu.RLock()
 		if info, ok := c.torrentTracker.torrents[ih]; ok {
 			isFileStorage = info.storageType == api.File
 		} else if !errors.Is(err, database.ErrTorrentNotFound) {
-			c.logger.Warn("torrent not found in tracker fallback either, defaulting to memory storage", "hash", ih)
+			c.logger.Load().Warn("torrent not found in tracker fallback either, defaulting to memory storage", "hash", ih)
 		}
 		c.torrentTracker.mu.RUnlock()
 	} else {
@@ -1869,15 +1902,13 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 				},
 			})
 			if err != nil {
-				c.logger.Error("failed to update torrent", "err", err, "hash", ih)
+				c.logger.Load().Error("failed to update torrent", "err", err, "hash", ih)
 			}
 		}()
 	}
 
-	c.mu.RLock()
-	pool := c.streamPool
-	c.mu.RUnlock()
-	if pool == nil {
+	pool, current := c.streamPoolForGeneration(to, requestGeneration)
+	if !current {
 		api.HTTPError(w, "stream pool is unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -1886,13 +1917,19 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	if isFileStorage {
 		mode = stream.FileStorage
 	}
-	// Actual playback supersedes any speculative preload for this torrent.
-	// Cancel it before acquiring the playback reader so its workers and cache
-	// leases cannot compete with the stream under memory pressure.
-	if _, ok := c.preloads.Load(ih); ok {
-		c.cancelPreload(ih)
+	// Live playback pauses active preload workers because both claim pieces at
+	// the highest priority. Unrelated ready memory preloads release their
+	// speculative leases; a ready preload for this file transfers its lease to
+	// the playback session, which spans the player's separate range requests.
+	// New preload requests stay queued until the session ends. Hold preloadsMu
+	// through acquisition so dispatch cannot race reader registration.
+	c.preloadsMu.Lock()
+	session := c.beginPlaybackLocked(ih, file.Path())
+	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
+	if err != nil {
+		c.endPlaybackRequestLocked(session)
 	}
-	reader, release, err := pool.Acquire(file, mode)
+	c.preloadsMu.Unlock()
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, stream.ErrPoolClosed) {
@@ -1901,18 +1938,24 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), status)
 		return
 	}
-	defer release()
+	defer func() {
+		release()
+		c.preloadsMu.Lock()
+		c.endPlaybackRequestLocked(session)
+		c.preloadsMu.Unlock()
+	}()
 
 	dlna.AddHeader(w, r)
 
 	c.metrics.IncStreamingTorrents()
-	if c.downloader != nil {
-		c.downloader.AddStreaming(ih)
+	activeDownloader := c.downloader.Load()
+	if activeDownloader != nil {
+		activeDownloader.AddStreaming(ih)
 	}
 	defer func() {
 		c.metrics.DecStreamingTorrents()
-		if c.downloader != nil {
-			c.downloader.RemoveStreaming(ih)
+		if activeDownloader != nil {
+			activeDownloader.RemoveStreaming(ih)
 		}
 	}()
 
@@ -1922,6 +1965,23 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	_ = rc.SetWriteDeadline(time.Time{})
 
 	http.ServeContent(w, r, path.Base(file.Path()), time.Time{}, reader)
+}
+
+func (c *Controller) streamPoolForGeneration(to *torrent.Torrent, generation uint64) (*stream.Pool, bool) {
+	if to == nil || c.torrentClientUnavailable.Load() {
+		return nil, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pool := c.streamPool.Load()
+	if c.torrentClientUnavailable.Load() || c.client == nil || pool == nil || generation != c.torrentGeneration.Load() {
+		return nil, false
+	}
+	current, ok := c.client.Torrent(to.InfoHash())
+	if !ok || current != to {
+		return nil, false
+	}
+	return pool, true
 }
 
 func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) error {
@@ -1934,10 +1994,9 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 		return api.NewError(err.Error(), st)
 	}
 
-	c.mu.RLock()
-	fileStoragePath := c.settings.FileStoragePath
-	dlnaEnabled := *c.settings.EnableDlna
-	c.mu.RUnlock()
+	settings := c.settings.Load()
+	fileStoragePath := settings.FileStoragePath
+	dlnaEnabled := *settings.EnableDlna
 
 	var (
 		needsUpdate bool
@@ -1989,7 +2048,7 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 		if utils.Val(t.Storage) == api.File {
 			infoBytes = t.InfoBytes
 			if len(infoBytes) == 0 {
-				if clientTo, ok := c.client.Torrent(ih); ok && clientTo.Info() != nil {
+				if clientTo, ok := c.clientTorrent(ih); ok && clientTo.Info() != nil {
 					infoBytes = clientTo.Metainfo().InfoBytes
 				}
 			}
@@ -2036,7 +2095,7 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 	}
 
 	if needsDrop {
-		if to, ok := c.client.Torrent(ih); ok {
+		if to, ok := c.clientTorrent(ih); ok {
 			to.Drop()
 			<-to.Closed()
 		}
@@ -2046,12 +2105,12 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 		if runtime.GOOS != "windows" && fileStoragePath != nil && *fileStoragePath != "" {
 			torrentStoragePath := filepath.Join(*fileStoragePath, t.Name)
 			if err := os.RemoveAll(torrentStoragePath); err != nil {
-				c.logger.Error("failed to delete torrent file storage", "path", torrentStoragePath, "error", err)
+				c.logger.Load().Error("failed to delete torrent file storage", "path", torrentStoragePath, "error", err)
 			}
 		}
 		if c.pieceCompletion != nil {
 			if err := c.pieceCompletion.Delete(ih); err != nil {
-				c.logger.Error("failed to delete piece completion data", "hash", ih, "error", err)
+				c.logger.Load().Error("failed to delete piece completion data", "hash", ih, "error", err)
 			}
 		}
 	}

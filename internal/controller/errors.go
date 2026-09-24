@@ -53,7 +53,7 @@ func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseW
 			authHeader := fmt.Sprintf(`%s realm=%q`, authType, realm)
 			w.Header().Set("WWW-Authenticate", authHeader)
 		}
-		if utils.Val(c.settings.LogLevel) == slog.LevelDebug {
+		if utils.Val(c.settings.Load().LogLevel) == slog.LevelDebug {
 			api.HTTPError(w, err.Error(), http.StatusUnauthorized)
 			return
 		}

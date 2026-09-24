@@ -6,7 +6,9 @@ package stream
 
 import (
 	"context"
+	"crypto/sha1"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -142,7 +144,7 @@ func addTestTorrentFromMetaInfo(t *testing.T, c *torrent.Client, mi *metainfo.Me
 	return to, files[0]
 }
 
-func TestPool_AcquireAndRelease(t *testing.T) {
+func TestPoolReaderAcquisitionCycle(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, f := addTestTorrent(t, c)
 
@@ -179,223 +181,616 @@ func TestPool_AcquireAndRelease(t *testing.T) {
 	pool.Close()
 }
 
-func TestPool_AcquireReuseIdleReader(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
+func TestPool_Acquire(t *testing.T) {
+	t.Run("reuses idle reader", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addTestTorrent(t, c)
 
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
 
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
 
-	_, release1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	release1()
+		reader1, release1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		release1()
 
-	// Second acquire should reuse the idle reader.
-	_, release2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		// Second acquire should reuse the idle reader.
+		_, release2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
 
-	// Verify only one reader exists.
-	pool.mu.Lock()
-	count := 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash {
-			count++
+		// Verify only one reader exists.
+		pool.mu.Lock()
+		count := 0
+		for _, sr := range pool.readers {
+			if sr.infoHash == infoHash {
+				count++
+			}
 		}
+		pool.mu.Unlock()
+
+		if count != 1 {
+			t.Fatalf("expected 1 reader (reused), got %d", count)
+		}
+
+		buf := make([]byte, 1)
+		if _, err := reader1.Read(buf); !errors.Is(err, io.ErrClosedPipe) {
+			t.Fatalf("expected released wrapper to be closed after reuse, got %v", err)
+		}
+
+		release2()
+		pool.Close()
+	})
+
+	t.Run("does not reuse reader from replaced torrent", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		metaInfo := createTestMetaInfo(t)
+		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+		pool := New(Config{
+			Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleCloseTimeout:  -1,
+			IdleParkTimeout:   30 * time.Second,
+			MaxReadersPerFile: -1,
+		})
+		t.Cleanup(pool.Close)
+		require.True(t, pool.SetReadaheadBudget(1024*1024))
+
+		_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
+		require.NoError(t, err)
+
+		pool.mu.Lock()
+		var oldReaderID uint64
+		for _, sr := range pool.readers {
+			oldReaderID = sr.readerID
+		}
+		pool.mu.Unlock()
+		require.NotZero(t, oldReaderID)
+
+		oldTorrent.Drop()
+		<-oldTorrent.Closed()
+		newTorrent, newFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+		require.NotSame(t, oldTorrent, newTorrent)
+
+		// The old reader remains active while the replacement gets its own reader.
+		// Releasing it afterward must close it instead of admitting it to the idle
+		// pool, without requiring another acquisition to trigger cleanup.
+		_, releaseNew, err := pool.Acquire(newFile, MemoryStorage)
+		require.NoError(t, err)
+		releaseNew()
+		releaseOld()
+
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		require.Len(t, pool.readers, 1)
+		for _, sr := range pool.readers {
+			assert.NotEqual(t, oldReaderID, sr.readerID)
+			assert.Same(t, newTorrent, sr.file.Torrent())
+		}
+	})
+
+	t.Run("sets active range", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrent(t, c)
+		totalBudget := int64(1024 * 1024)
+
+		reg := &testRegistry{}
+
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+			Registry:        reg,
+		})
+
+		_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		if reg.setCalls.Load() != 1 {
+			t.Fatalf("expected 1 SetActiveRange call, got %d", reg.setCalls.Load())
+		}
+
+		// Verify the registry captured the last range values.
+		snap := reg.lastRangeSnapshot()
+		if snap.start > snap.end {
+			t.Fatalf("expected start <= end, got start=%d end=%d", snap.start, snap.end)
+		}
+
+		release()
+		if reg.clearCalls.Load() != 1 {
+			t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clearCalls.Load())
+		}
+
+		pool.Close()
+	})
+
+	t.Run("file storage", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrent(t, c)
+		totalBudget := int64(1024 * 1024)
+
+		pool := New(Config{
+			Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout:    30 * time.Second,
+			FileReadaheadBytes: 50 * 1024 * 1024,
+		})
+
+		reader, release := acquireTestReader(t, pool, f, FileStorage, totalBudget)
+		if reader == nil {
+			t.Fatal("expected non-nil reader for file storage")
+		}
+
+		release()
+		pool.Close()
+	})
+
+	t.Run("file storage readahead", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addTestTorrent(t, c)
+
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
+		wantReadahead := int64(75 * 1024 * 1024)
+
+		pool := New(Config{
+			Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout:    30 * time.Second,
+			FileReadaheadBytes: wantReadahead,
+		})
+
+		reader, release := acquireTestReader(t, pool, f, FileStorage, totalBudget)
+		if reader == nil {
+			t.Fatal("expected non-nil reader for file storage")
+		}
+
+		// Verify readahead was set to the file storage value, not divided by pool.
+		pool.mu.Lock()
+		for _, sr := range pool.readers {
+			if sr.infoHash == infoHash && sr.isFileStorage {
+				if sr.readahead != wantReadahead {
+					t.Fatalf("expected file storage readahead=%d, got %d", wantReadahead, sr.readahead)
+				}
+			}
+		}
+		pool.mu.Unlock()
+
+		release()
+		pool.Close()
+	})
+
+	t.Run("while closed", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrent(t, c)
+
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
+
+		pool.Close()
+
+		reader, release, err := pool.Acquire(f, MemoryStorage)
+		if !errors.Is(err, ErrPoolClosed) {
+			t.Fatalf("expected ErrPoolClosed, got %v", err)
+		}
+		if reader != nil || release != nil {
+			t.Fatal("expected no reader or release function from closed pool")
+		}
+
+		pool.mu.Lock()
+		count := len(pool.readers)
+		pool.mu.Unlock()
+
+		if count != 0 {
+			t.Fatalf("expected 0 tracked readers, got %d", count)
+		}
+	})
+
+	t.Run("rejects invalid storage mode", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, file := addTestTorrent(t, c)
+		pool := New(Config{})
+		t.Cleanup(pool.Close)
+
+		reader, release, err := pool.Acquire(file, StorageMode(255))
+		if !errors.Is(err, ErrInvalidStorageMode) {
+			t.Fatalf("expected ErrInvalidStorageMode, got %v", err)
+		}
+		if reader != nil || release != nil {
+			t.Fatal("expected no reader or release function")
+		}
+	})
+
+	t.Run("rejects invalid file", func(t *testing.T) {
+		pool := New(Config{})
+		t.Cleanup(pool.Close)
+
+		reader, release, err := pool.Acquire(nil, MemoryStorage)
+		if !errors.Is(err, ErrInvalidFile) {
+			t.Fatalf("expected ErrInvalidFile, got %v", err)
+		}
+		if reader != nil || release != nil {
+			t.Fatal("expected no reader or release function")
+		}
+	})
+
+	t.Run("concurrent acquires", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addMultiPieceTorrent(t, c)
+
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
+		iterations := 50
+
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
+
+		var wg sync.WaitGroup
+		var successCount atomic.Int32
+		for range iterations {
+			wg.Go(func() {
+				reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+				if reader == nil {
+					t.Error("expected non-nil reader")
+					return
+				}
+				successCount.Add(1)
+				release()
+			})
+		}
+		wg.Wait()
+
+		// All 50 Acquire calls should succeed (return non-nil reader).
+		if successCount.Load() != int32(iterations) {
+			t.Fatalf("expected %d successful Acquire calls, got %d", iterations, successCount.Load())
+		}
+
+		// After all goroutines finish, readers should be idle (reused or separate).
+		pool.mu.Lock()
+		count := 0
+		for _, sr := range pool.readers {
+			if sr.infoHash == infoHash && !sr.active {
+				count++
+			}
+		}
+		pool.mu.Unlock()
+
+		if count < 1 {
+			t.Fatalf("expected at least 1 idle reader, got %d", count)
+		}
+
+		pool.Close()
+	})
+}
+
+func TestPoolStaleReaderCannotMoveReusedReader(t *testing.T) {
+	c := newTestTorrentClient(t)
+	_, f := addTestTorrent(t, c)
+
+	pool := New(Config{
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		IdleParkTimeout: 30 * time.Second,
+	})
+	t.Cleanup(pool.Close)
+
+	stale, releaseStale := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
+	releaseStale()
+	_, releaseCurrent := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
+	defer releaseCurrent()
+
+	pool.mu.Lock()
+	var sr *streamReader
+	for _, reader := range pool.readers {
+		sr = reader
 	}
 	pool.mu.Unlock()
+	require.NotNil(t, sr)
 
-	if count != 1 {
-		t.Fatalf("expected 1 reader (reused), got %d", count)
-	}
-
-	release2()
-	pool.Close()
-}
-
-func TestPool_ReaderPositions_Integration(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
-
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
-
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
-
-	result := pool.ReaderPositions(infoHash)
-	if len(result) != 0 {
-		t.Fatalf("expected 0 readers, got %d", len(result))
-	}
-
-	_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-
-	result = pool.ReaderPositions(infoHash)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 reader position, got %d", len(result))
-	}
-
-	// Position should be within file bounds.
-	if result[0].Start > result[0].End {
-		t.Fatalf("expected Start <= End, got %d > %d", result[0].Start, result[0].End)
-	}
-
-	release()
-	pool.Close()
-}
-
-func TestPool_ReaderPositions_MultipleReaders(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
-
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
-
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
-
-	_, release1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	_, release2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-
-	result := pool.ReaderPositions(infoHash)
-	if len(result) != 2 {
-		t.Fatalf("expected 2 reader positions, got %d", len(result))
-	}
-
-	release1()
-	release2()
-	pool.Close()
-}
-
-func TestPool_ReaderPositions_WrongInfoHash(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrent(t, c)
-	totalBudget := int64(1024 * 1024)
-
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
-
-	_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-
-	// Query with a different hash.
-	wrongHash := metainfo.Hash{}
-	result := pool.ReaderPositions(wrongHash)
-	if len(result) != 0 {
-		t.Fatalf("expected 0 readers for wrong hash, got %d", len(result))
-	}
-
-	release()
-	pool.Close()
-}
-
-func TestPool_ActiveRangeSetOnAcquire(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrent(t, c)
-	totalBudget := int64(1024 * 1024)
-
-	reg := &testRegistry{}
-
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-		Registry:        reg,
-	})
-
-	_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if reg.setCalls.Load() != 1 {
-		t.Fatalf("expected 1 SetActiveRange call, got %d", reg.setCalls.Load())
-	}
-
-	// Verify the registry captured the last range values.
-	snap := reg.lastRangeSnapshot()
-	if snap.start > snap.end {
-		t.Fatalf("expected start <= end, got start=%d end=%d", snap.start, snap.end)
-	}
-
-	release()
-	if reg.clearCalls.Load() != 1 {
-		t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clearCalls.Load())
-	}
-
-	pool.Close()
-}
-
-func TestPool_PreloadReaderUsesBoundedReadaheadWithoutSpeculativeProtection(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-	reg := &testRegistry{}
-	pool := New(Config{
-		Logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		Registry: reg,
-	})
-	pool.SetReadaheadBudget(1024 * 1024)
-
-	const preloadRange = int64(256)
-	_, release, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, preloadRange)
+	// A caller that keeps its reader after release must neither read nor move
+	// the torrent reader that the new lease now owns.
+	_, err := stale.Seek(f.Length()/2, io.SeekStart)
 	require.NoError(t, err)
-	defer release()
-	defer pool.Close()
+	_, err = stale.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.ErrClosedPipe)
 
+	pos, err := sr.reader.Seek(0, io.SeekCurrent)
+	require.NoError(t, err)
+	assert.Zero(t, pos)
 	pool.mu.Lock()
-	var key readerKey
-	var preloadReader *streamReader
-	for candidateKey, sr := range pool.readers {
-		key = candidateKey
-		preloadReader = sr
-		assert.True(t, sr.isPreload)
-		assert.Equal(t, preloadRange, sr.readahead)
-	}
+	assert.Zero(t, sr.lastOffset)
 	pool.mu.Unlock()
-	require.NotNil(t, preloadReader)
-
-	// Rebalancing playback readers must not erase the preload's reserved,
-	// range-sized scheduling window.
-	pool.SetReadaheadBudget(2 * 1024 * 1024)
-	pool.mu.Lock()
-	assert.Equal(t, preloadRange, preloadReader.readahead)
-	pool.mu.Unlock()
-
-	// Every piece in the preload range is claimed at Now immediately, independent
-	// of playback's moving priority-window fractions.
-	preloadReader.priorityMu.Lock()
-	assert.Equal(t, []int{0, 1, 2, 3}, preloadReader.prioritizedPieces)
-	pool.priorityMu.Lock()
-	for _, index := range preloadReader.prioritizedPieces {
-		claim := pool.priorityClaims[priorityPieceKey{torrent: f.Torrent(), index: index}]
-		require.NotNil(t, claim)
-		assert.Equal(t, torrent.PiecePriorityNow, claim.owners[preloadReader])
-	}
-	pool.priorityMu.Unlock()
-	preloadReader.priorityMu.Unlock()
-
-	// Reader movement shrinks readahead but keeps the complete static priority
-	// claim until release. Cache protection remains controller-owned.
-	pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, 64)
-	pool.mu.Lock()
-	assert.Equal(t, preloadRange-64, preloadReader.readahead)
-	pool.mu.Unlock()
-	pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, preloadRange)
-	preloadReader.priorityMu.Lock()
-	assert.Equal(t, []int{0, 1, 2, 3}, preloadReader.prioritizedPieces)
-	preloadReader.priorityMu.Unlock()
-	assert.Zero(t, reg.setCalls.Load(), "controller owns preload range protection")
-	assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
-
-	release()
-	pool.priorityMu.Lock()
-	assert.Empty(t, pool.priorityClaims)
-	pool.priorityMu.Unlock()
 }
 
-func TestPreloadPriorityPlanIncludesEveryIntersectingPiece(t *testing.T) {
+func TestPool_AcquirePreloadContext(t *testing.T) {
+	t.Run("purges reader from replaced torrent", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		metaInfo := createTestMetaInfo(t)
+		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+		pool := New(Config{
+			Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleCloseTimeout:  -1,
+			IdleParkTimeout:   30 * time.Second,
+			MaxReadersPerFile: -1,
+		})
+		t.Cleanup(pool.Close)
+		require.True(t, pool.SetReadaheadBudget(1024*1024))
+
+		_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
+		require.NoError(t, err)
+		releaseOld()
+
+		oldTorrent.Drop()
+		<-oldTorrent.Closed()
+		newTorrent, newFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+		require.NotSame(t, oldTorrent, newTorrent)
+
+		_, releasePreload, err := pool.AcquirePreloadContext(
+			context.Background(), newFile, MemoryStorage, 0, newFile.Length(),
+		)
+		require.NoError(t, err)
+
+		pool.mu.Lock()
+		require.Len(t, pool.readers, 1)
+		for _, sr := range pool.readers {
+			assert.True(t, sr.isPreload)
+			assert.Same(t, newTorrent, sr.file.Torrent())
+		}
+		pool.mu.Unlock()
+
+		releasePreload()
+		assert.False(t, pool.HasReaders(newTorrent.InfoHash()))
+	})
+
+	t.Run("uses bounded readahead without speculative protection", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
+		reg := &testRegistry{}
+		pool := New(Config{
+			Logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			Registry: reg,
+		})
+		pool.SetReadaheadBudget(1024 * 1024)
+
+		const preloadRange = int64(256)
+		_, release, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, preloadRange)
+		require.NoError(t, err)
+		defer release()
+		defer pool.Close()
+
+		pool.mu.Lock()
+		var key readerKey
+		var preloadReader *streamReader
+		for candidateKey, sr := range pool.readers {
+			key = candidateKey
+			preloadReader = sr
+			assert.True(t, sr.isPreload)
+			assert.Equal(t, preloadRange, sr.readahead)
+			assert.Equal(t, preloadRange, sr.wrapper.fillLimit)
+		}
+		pool.mu.Unlock()
+		require.NotNil(t, preloadReader)
+
+		// Rebalancing playback readers must not erase the preload's reserved,
+		// range-sized scheduling window.
+		pool.SetReadaheadBudget(2 * 1024 * 1024)
+		pool.mu.Lock()
+		assert.Equal(t, preloadRange, preloadReader.readahead)
+		pool.mu.Unlock()
+
+		// Every piece in the preload range is claimed at Now immediately, independent
+		// of playback's moving priority-window fractions.
+		preloadReader.priorityMu.Lock()
+		assert.Equal(t, []int{0, 1, 2, 3}, preloadReader.prioritizedPieces)
+		pool.priorityMu.Lock()
+		for _, index := range preloadReader.prioritizedPieces {
+			claim := pool.priorityClaims[priorityPieceKey{torrent: f.Torrent(), index: index}]
+			require.NotNil(t, claim)
+			assert.Equal(t, torrent.PiecePriorityNow, claim.owners[preloadReader])
+		}
+		pool.priorityMu.Unlock()
+		preloadReader.priorityMu.Unlock()
+
+		// Reader movement shrinks readahead but keeps the complete static priority
+		// claim until release. Cache protection remains controller-owned.
+		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, 64)
+		pool.mu.Lock()
+		assert.Equal(t, preloadRange-64, preloadReader.readahead)
+		pool.mu.Unlock()
+		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, preloadRange)
+		preloadReader.priorityMu.Lock()
+		assert.Equal(t, []int{0, 1, 2, 3}, preloadReader.prioritizedPieces)
+		preloadReader.priorityMu.Unlock()
+		assert.Zero(t, reg.setCalls.Load(), "controller owns preload range protection")
+		assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
+
+		release()
+		pool.priorityMu.Lock()
+		assert.Empty(t, pool.priorityClaims)
+		pool.priorityMu.Unlock()
+	})
+
+	t.Run("does not consume idle playback reader", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
+		pool := New(Config{
+			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		})
+		defer pool.Close()
+		pool.SetReadaheadBudget(1024 * 1024)
+
+		_, playbackRelease, err := pool.AcquireContext(context.Background(), f, MemoryStorage)
+		require.NoError(t, err)
+		playbackRelease()
+
+		pool.mu.Lock()
+		require.Len(t, pool.readers, 1)
+		var playbackKey readerKey
+		for key := range pool.readers {
+			playbackKey = key
+		}
+		pool.mu.Unlock()
+
+		_, preloadRelease, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, 256)
+		require.NoError(t, err)
+
+		pool.mu.Lock()
+		assert.Len(t, pool.readers, 2, "preload must not take over the parked playback reader")
+		parked, ok := pool.readers[playbackKey]
+		require.True(t, ok)
+		assert.False(t, parked.isPreload)
+		assert.False(t, parked.active)
+		pool.mu.Unlock()
+
+		preloadRelease()
+
+		// The preload reader is closed and removed; the parked playback reader
+		// survives so resumed playback reuses a warm reader.
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		assert.Len(t, pool.readers, 1)
+		survivor, ok := pool.readers[playbackKey]
+		require.True(t, ok)
+		assert.False(t, survivor.isPreload)
+		assert.NotNil(t, survivor.reader)
+	})
+
+	t.Run("file storage uses requested readahead", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
+		pool := New(Config{
+			Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			FileReadaheadBytes: 50 * 1024 * 1024,
+		})
+		defer pool.Close()
+
+		const preloadRange = int64(192)
+		_, release, err := pool.AcquirePreloadContext(context.Background(), f, FileStorage, 64, 64+preloadRange)
+		require.NoError(t, err)
+		defer release()
+
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		for _, sr := range pool.readers {
+			assert.True(t, sr.isPreload)
+			assert.Equal(t, preloadRange, sr.readahead)
+		}
+	})
+}
+
+func TestPool_ReaderPositions(t *testing.T) {
+	t.Run("single reader", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addTestTorrent(t, c)
+
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
+
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
+
+		result := pool.ReaderPositions(infoHash)
+		if len(result) != 0 {
+			t.Fatalf("expected 0 readers, got %d", len(result))
+		}
+
+		_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+
+		result = pool.ReaderPositions(infoHash)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 reader position, got %d", len(result))
+		}
+
+		// Position should be within file bounds.
+		if result[0].Start > result[0].End {
+			t.Fatalf("expected Start <= End, got %d > %d", result[0].Start, result[0].End)
+		}
+
+		release()
+		pool.Close()
+	})
+
+	t.Run("multiple readers", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addTestTorrent(t, c)
+
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
+
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
+
+		_, release1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		_, release2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+
+		result := pool.ReaderPositions(infoHash)
+		if len(result) != 2 {
+			t.Fatalf("expected 2 reader positions, got %d", len(result))
+		}
+
+		release1()
+		release2()
+		pool.Close()
+	})
+
+	t.Run("wrong info hash", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, f := addTestTorrent(t, c)
+		totalBudget := int64(1024 * 1024)
+
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
+
+		_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+
+		// Query with a different hash.
+		wrongHash := metainfo.Hash{}
+		result := pool.ReaderPositions(wrongHash)
+		if len(result) != 0 {
+			t.Fatalf("expected 0 readers for wrong hash, got %d", len(result))
+		}
+
+		release()
+		pool.Close()
+	})
+
+	t.Run("empty pool", func(t *testing.T) {
+		p := newTestPool(t, Config{Logger: testLogger()})
+		infoHash := metainfo.Hash{}
+
+		result := p.ReaderPositions(infoHash)
+		if len(result) != 0 {
+			t.Fatalf("expected 0 readers, got %d", len(result))
+		}
+	})
+
+	t.Run("nil file guards", func(t *testing.T) {
+		p := newTestPool(t, Config{Logger: testLogger()})
+		infoHash := metainfo.Hash{1}
+
+		// Add reader with nil file.
+		p.readers[readerKey{infoHash: infoHash, filePath: "f1", readerID: 1}] = &streamReader{
+			file: nil,
+		}
+		// Add reader with file that has nil torrent.
+		p.readers[readerKey{infoHash: infoHash, filePath: "f2", readerID: 2}] = &streamReader{
+			file: &torrent.File{},
+		}
+
+		// Should not panic, and returns empty slice.
+		result := p.ReaderPositions(infoHash)
+		if len(result) != 0 {
+			t.Fatalf("expected 0 valid readers, got %d", len(result))
+		}
+	})
+}
+
+// TestPreloadPriorityPlan verifies that preloadPriorityPlan includes every intersecting piece.
+func TestPreloadPriorityPlan(t *testing.T) {
 	c := newTestTorrentClient(t)
 	_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
 
@@ -421,73 +816,6 @@ func TestPreloadPriorityPlanIncludesEveryIntersectingPiece(t *testing.T) {
 			}
 			assert.Equal(t, tt.want, indexes)
 		})
-	}
-}
-
-func TestPool_PreloadDoesNotConsumeIdlePlaybackReader(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-	pool := New(Config{
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-	})
-	defer pool.Close()
-	pool.SetReadaheadBudget(1024 * 1024)
-
-	_, playbackRelease, err := pool.AcquireContext(context.Background(), f, MemoryStorage)
-	require.NoError(t, err)
-	playbackRelease()
-
-	pool.mu.Lock()
-	require.Len(t, pool.readers, 1)
-	var playbackKey readerKey
-	for key := range pool.readers {
-		playbackKey = key
-	}
-	pool.mu.Unlock()
-
-	_, preloadRelease, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, 256)
-	require.NoError(t, err)
-
-	pool.mu.Lock()
-	assert.Len(t, pool.readers, 2, "preload must not take over the parked playback reader")
-	parked, ok := pool.readers[playbackKey]
-	require.True(t, ok)
-	assert.False(t, parked.isPreload)
-	assert.False(t, parked.active)
-	pool.mu.Unlock()
-
-	preloadRelease()
-
-	// The preload reader is closed and removed; the parked playback reader
-	// survives so resumed playback reuses a warm reader.
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	assert.Len(t, pool.readers, 1)
-	survivor, ok := pool.readers[playbackKey]
-	require.True(t, ok)
-	assert.False(t, survivor.isPreload)
-	assert.NotNil(t, survivor.reader)
-}
-
-func TestPool_FileStoragePreloadUsesRequestedReadahead(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-	pool := New(Config{
-		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		FileReadaheadBytes: 50 * 1024 * 1024,
-	})
-	defer pool.Close()
-
-	const preloadRange = int64(192)
-	_, release, err := pool.AcquirePreloadContext(context.Background(), f, FileStorage, 64, 64+preloadRange)
-	require.NoError(t, err)
-	defer release()
-
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	for _, sr := range pool.readers {
-		assert.True(t, sr.isPreload)
-		assert.Equal(t, preloadRange, sr.readahead)
 	}
 }
 
@@ -537,107 +865,6 @@ func (r *testRegistry) lastRangeSnapshot() struct {
 	return r.lastRange
 }
 
-func TestPool_ParkIdleReaders_RemovesAfterCloseTimeout(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
-
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
-
-	pool := New(Config{
-		Logger:           slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout:  1 * time.Millisecond,
-		IdleCloseTimeout: 10 * time.Millisecond,
-	})
-
-	_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	release()
-
-	// Wait for CloseTimeout to pass.
-	time.Sleep(20 * time.Millisecond)
-
-	// Trigger the GC manually.
-	pool.parkIdleReaders()
-
-	pool.mu.Lock()
-	count := 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash {
-			count++
-		}
-	}
-	pool.mu.Unlock()
-
-	if count != 0 {
-		t.Fatalf("expected 0 readers after CloseTimeout, got %d", count)
-	}
-
-	pool.Close()
-}
-
-func TestPool_AcquireWithFileStorage(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrent(t, c)
-	totalBudget := int64(1024 * 1024)
-
-	pool := New(Config{
-		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout:    30 * time.Second,
-		FileReadaheadBytes: 50 * 1024 * 1024,
-	})
-
-	reader, release := acquireTestReader(t, pool, f, FileStorage, totalBudget)
-	if reader == nil {
-		t.Fatal("expected non-nil reader for file storage")
-	}
-
-	release()
-	pool.Close()
-}
-
-func TestPool_AcquireWhileClosed(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrent(t, c)
-
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
-
-	pool.Close()
-
-	reader, release, err := pool.Acquire(f, MemoryStorage)
-	if !errors.Is(err, ErrPoolClosed) {
-		t.Fatalf("expected ErrPoolClosed, got %v", err)
-	}
-	if reader != nil || release != nil {
-		t.Fatal("expected no reader or release function from closed pool")
-	}
-
-	pool.mu.Lock()
-	count := len(pool.readers)
-	pool.mu.Unlock()
-
-	if count != 0 {
-		t.Fatalf("expected 0 tracked readers, got %d", count)
-	}
-}
-
-func TestPool_AcquireRejectsInvalidStorageMode(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, file := addTestTorrent(t, c)
-	pool := New(Config{})
-	t.Cleanup(pool.Close)
-
-	reader, release, err := pool.Acquire(file, StorageMode(255))
-	if !errors.Is(err, ErrInvalidStorageMode) {
-		t.Fatalf("expected ErrInvalidStorageMode, got %v", err)
-	}
-	if reader != nil || release != nil {
-		t.Fatal("expected no reader or release function")
-	}
-}
-
 // createMultiPieceMetaInfo builds a metainfo with 10 pieces of 64 bytes each.
 func createMultiPieceMetaInfo(t *testing.T) *metainfo.MetaInfo {
 	t.Helper()
@@ -685,336 +912,249 @@ func addMultiPieceTorrent(t *testing.T, c *torrent.Client) (*torrent.Torrent, *t
 	return to, files[0]
 }
 
-// TestPool_MaxReadersPerFile_ViaAcquire verifies the reuse-and-cap behavior when
-// Acquire is called multiple times for the same (info hash, file path).
-//
-// NOTE: This test does NOT exercise the eviction branch (evictOldestIdleLocked)
-// because the reuse loop at the top of Acquire always returns an idle reader
-// before the cap-check/eviction block is reached. For a single (info hash, file path),
-// evictOldestIdleLocked is effectively unreachable through the public Acquire API —
-// any idle reader is always reusable, so the loop intercepts early. The eviction
-// path is currently exercised only by direct unit tests of evictOldestIdleLocked
-// itself and by cross-key contention scenarios (not shown here). If that is
-// intentional design, document it in Pool.Acquire; otherwise the reuse loop may
-// need to consider the cap before returning an idle reader.
-func TestPool_MaxReadersPerFile_ViaAcquire(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
+func TestComputeRange(t *testing.T) {
+	t.Run("file start", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addMultiPieceTorrent(t, c)
 
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
 
-	pool := New(Config{
-		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout:   30 * time.Second,
-		MaxReadersPerFile: 2,
-	})
-
-	// Acquire reader 1 — it becomes active.
-	r1, rel1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if r1 == nil {
-		t.Fatal("expected non-nil reader 1")
-	}
-
-	// Acquire reader 2 — since r1 is active (not idle), reuse finds no idle reader,
-	// so a new reader is created. r1 stays active, r2 becomes active.
-	r2, rel2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if r2 == nil {
-		t.Fatal("expected non-nil reader 2")
-	}
-
-	// Both are still active. Now release both — both go idle.
-	rel1()
-	rel2()
-
-	// Pool should have exactly 2 idle readers.
-	pool.mu.Lock()
-	idleCount := 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash && !sr.active {
-			idleCount++
-		}
-	}
-	pool.mu.Unlock()
-
-	if idleCount != 2 {
-		t.Fatalf("expected 2 idle readers after releasing both, got %d", idleCount)
-	}
-
-	// Acquire reader 3 — reuse loop finds an idle reader and returns it as active.
-	// No eviction because an idle reader was available for reuse.
-	r3, rel3 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if r3 == nil {
-		t.Fatal("expected non-nil reader 3")
-	}
-
-	// 2 readers still tracked in the pool (reuse returned one idle reader as active).
-	pool.mu.Lock()
-	count := 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash {
-			count++
-		}
-	}
-	pool.mu.Unlock()
-
-	if count != 2 {
-		t.Fatalf("expected 2 readers after reuse, got %d", count)
-	}
-
-	// 1 active (r3, which reused one of the idle readers), 1 idle remaining.
-	pool.mu.Lock()
-	activeCount := 0
-	idleCount = 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash {
-			if sr.active {
-				activeCount++
-			} else {
-				idleCount++
-			}
-		}
-	}
-	pool.mu.Unlock()
-
-	if activeCount != 1 {
-		t.Fatalf("expected 1 active reader, got %d", activeCount)
-	}
-
-	rel3()
-	pool.Close()
-}
-
-func TestPool_MaxReadersPerFile_NoEvictionWhenAllActive(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
-
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
-
-	pool := New(Config{
-		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout:   30 * time.Second,
-		MaxReadersPerFile: 2,
-	})
-
-	// Acquire 2 readers without releasing — both are active.
-	r1, rel1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if r1 == nil {
-		t.Fatal("expected non-nil reader 1")
-	}
-	r2, rel2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if r2 == nil {
-		t.Fatal("expected non-nil reader 2")
-	}
-
-	// Acquire a third reader — no idle readers to evict,
-	// so cap is soft and third reader is still created.
-	r3, rel3 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if r3 == nil {
-		t.Fatal("expected non-nil reader 3 (soft cap)")
-	}
-
-	// All 3 should still be tracked (soft cap).
-	pool.mu.Lock()
-	count := 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash {
-			count++
-		}
-	}
-	pool.mu.Unlock()
-
-	if count != 3 {
-		t.Fatalf("expected 3 readers (soft cap), got %d", count)
-	}
-
-	rel1()
-	rel2()
-	rel3()
-	pool.Close()
-}
-
-func TestPool_ConcurrentAcquire(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addMultiPieceTorrent(t, c)
-
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
-	iterations := 50
-
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
-
-	var wg sync.WaitGroup
-	var successCount atomic.Int32
-	for range iterations {
-		wg.Go(func() {
-			reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-			if reader == nil {
-				t.Error("expected non-nil reader")
-				return
-			}
-			successCount.Add(1)
-			release()
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
 		})
-	}
-	wg.Wait()
 
-	// All 50 Acquire calls should succeed (return non-nil reader).
-	if successCount.Load() != int32(iterations) {
-		t.Fatalf("expected %d successful Acquire calls, got %d", iterations, successCount.Load())
-	}
-
-	// After all goroutines finish, readers should be idle (reused or separate).
-	pool.mu.Lock()
-	count := 0
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash && !sr.active {
-			count++
+		reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		if reader == nil {
+			t.Fatal("expected non-nil reader")
 		}
-	}
-	pool.mu.Unlock()
 
-	if count < 1 {
-		t.Fatalf("expected at least 1 idle reader, got %d", count)
-	}
+		positions := pool.ReaderPositions(infoHash)
+		if len(positions) != 1 {
+			t.Fatalf("expected 1 reader position, got %d", len(positions))
+		}
 
-	pool.Close()
-}
+		ri := positions[0]
+		if ri.Start > ri.End {
+			t.Fatalf("expected Start <= End, got Start=%d End=%d", ri.Start, ri.End)
+		}
+		if ri.Position < 0 {
+			t.Fatalf("expected Position >= 0, got %d", ri.Position)
+		}
 
-func TestComputeRange_Integration(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addMultiPieceTorrent(t, c)
+		fileInfo := to.Info()
+		if fileInfo == nil {
+			t.Fatal("expected torrent info")
+		}
 
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
+		// At offset 0, positionPiece = 0, trailing = readaheadPieces/4,
+		// start = max(0, 0-trailing), and end = readaheadPieces.
+		// readaheadPieces = readahead / pieceLength, and the 1 MiB budget has one active reader.
+		// readaheadPieces = 1048576 / 64 = 16384, trailing = 4096.
+		// start = max(0, 0 - 4096) = 0, end = 0 + 16384 = 16384, but end clamped to the
+		// final inclusive piece index (EndPieceIndex-1 = 8)
+		// position = 0 + beginPiece = 0
+		wantEnd := f.EndPieceIndex() - 1
+		if ri.End != wantEnd {
+			t.Fatalf("expected End=%d (last inclusive piece), got %d", wantEnd, ri.End)
+		}
+		if ri.Start != 0 {
+			t.Fatalf("expected Start=0, got %d", ri.Start)
+		}
+		if ri.Position != 0 {
+			t.Fatalf("expected Position=0, got %d", ri.Position)
+		}
 
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
+		release()
+		pool.Close()
 	})
 
-	reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if reader == nil {
-		t.Fatal("expected non-nil reader")
-	}
+	t.Run("mid file", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addMultiPieceTorrent(t, c)
 
-	positions := pool.ReaderPositions(infoHash)
-	if len(positions) != 1 {
-		t.Fatalf("expected 1 reader position, got %d", len(positions))
-	}
+		infoHash := to.InfoHash()
+		totalBudget := int64(1024 * 1024)
 
-	ri := positions[0]
-	if ri.Start > ri.End {
-		t.Fatalf("expected Start <= End, got Start=%d End=%d", ri.Start, ri.End)
-	}
-	if ri.Position < 0 {
-		t.Fatalf("expected Position >= 0, got %d", ri.Position)
-	}
+		pool := New(Config{
+			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			IdleParkTimeout: 30 * time.Second,
+		})
 
-	fileInfo := to.Info()
-	if fileInfo == nil {
-		t.Fatal("expected torrent info")
-	}
+		reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		if reader == nil {
+			t.Fatal("expected non-nil reader")
+		}
 
-	// At offset 0, positionPiece = 0, trailing = readaheadPieces/4,
-	// start = max(0, 0-trailing), and end = readaheadPieces.
-	// readaheadPieces = readahead / pieceLength, and the 1 MiB budget has one active reader.
-	// readaheadPieces = 1048576 / 64 = 16384, trailing = 4096.
-	// start = max(0, 0 - 4096) = 0, end = 0 + 16384 = 16384, but end clamped to the
-	// final inclusive piece index (EndPieceIndex-1 = 8)
-	// position = 0 + beginPiece = 0
-	wantEnd := f.EndPieceIndex() - 1
-	if ri.End != wantEnd {
-		t.Fatalf("expected End=%d (last inclusive piece), got %d", wantEnd, ri.End)
-	}
-	if ri.Start != 0 {
-		t.Fatalf("expected Start=0, got %d", ri.Start)
-	}
-	if ri.Position != 0 {
-		t.Fatalf("expected Position=0, got %d", ri.Position)
-	}
+		// Manually set lastOffset to 320 (middle of file = 5 pieces × 64 bytes).
+		// lastOffset is only updated by the onOffsetChange callback from ReadAt,
+		// but since the torrent has no peer data, we set it directly to exercise
+		// computeRange at a non-zero offset.
+		pool.mu.Lock()
+		var found *streamReader
+		for _, sr := range pool.readers {
+			if sr.infoHash == infoHash && sr.file == f {
+				found = sr
+				break
+			}
+		}
+		if found == nil {
+			t.Fatal("expected to find reader in pool")
+		}
+		found.lastOffset = 320
+		pool.mu.Unlock()
 
-	release()
-	pool.Close()
+		// After lastOffset = 320:
+		//   pieceIndex = 320 / 64 = 5, beginPiece = 5
+		//   readahead = 1 MiB / 1 active reader, so readaheadPieces = 1048576 / 64 = 16384.
+		//   trailing = readaheadPieces / 4 = 4096.
+		//   start = max(0, 5 - 4096) = 0
+		//   end is clamped to the final inclusive file piece (EndPieceIndex-1)
+		//   position = beginPiece = 5
+		positions := pool.ReaderPositions(infoHash)
+		if len(positions) != 1 {
+			t.Fatalf("expected 1 reader position, got %d", len(positions))
+		}
+
+		ri := positions[0]
+		if ri.Start > ri.End {
+			t.Fatalf("expected Start <= End, got Start=%d End=%d", ri.Start, ri.End)
+		}
+
+		// Start must be 0 (trailing extends past piece 0).
+		if ri.Start != 0 {
+			t.Fatalf("expected Start=0, got %d", ri.Start)
+		}
+
+		// End must be clamped to the final inclusive file piece.
+		wantEnd := f.EndPieceIndex() - 1
+		if ri.End != wantEnd {
+			t.Fatalf("expected End=%d (last inclusive piece), got %d", wantEnd, ri.End)
+		}
+
+		// Position must reflect piece 5 (offset 320 / 64 bytes per piece).
+		if ri.Position != 5 {
+			t.Fatalf("expected Position=5 (piece for offset 320), got %d", ri.Position)
+		}
+
+		release()
+		pool.Close()
+	})
 }
 
-func TestComputeRange_Integration_MidFile(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addMultiPieceTorrent(t, c)
+// protectionRegistry records the ranges each reader currently protects.
+type protectionRegistry struct {
+	mu         sync.Mutex
+	ranges     map[uint64]activeRange
+	boundaries map[uint64]testFileBoundary
+}
 
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
+func newProtectionRegistry() *protectionRegistry {
+	return &protectionRegistry{ranges: make(map[uint64]activeRange), boundaries: make(map[uint64]testFileBoundary)}
+}
 
-	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
-	})
+func (r *protectionRegistry) SetActiveRange(_ metainfo.Hash, readerID uint64, start, end int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ranges[readerID] = activeRange{startPiece: start, endPiece: end}
+}
 
-	reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-	if reader == nil {
-		t.Fatal("expected non-nil reader")
-	}
+func (r *protectionRegistry) ClearActiveRange(_ metainfo.Hash, readerID uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.ranges, readerID)
+}
 
-	// Manually set lastOffset to 320 (middle of file = 5 pieces × 64 bytes).
-	// lastOffset is only updated by the onOffsetChange callback from ReadAt,
-	// but since the torrent has no peer data, we set it directly to exercise
-	// computeRange at a non-zero offset.
-	pool.mu.Lock()
-	var found *streamReader
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash && sr.file == f {
-			found = sr
-			break
+func (r *protectionRegistry) SetFileBoundaries(_ metainfo.Hash, readerID uint64, headStart, headEnd, tailStart, tailEnd int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.boundaries[readerID] = testFileBoundary{headStart: headStart, headEnd: headEnd, tailStart: tailStart, tailEnd: tailEnd}
+}
+
+func (r *protectionRegistry) ClearFileBoundaries(_ metainfo.Hash, readerID uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.boundaries, readerID)
+}
+
+// protectedPieces returns the distinct pieces protected by any reader.
+func (r *protectionRegistry) protectedPieces() map[int]struct{} {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pieces := make(map[int]struct{})
+	add := func(start, end int) {
+		for index := start; index <= end; index++ {
+			pieces[index] = struct{}{}
 		}
 	}
-	if found == nil {
-		t.Fatal("expected to find reader in pool")
+	for _, protected := range r.ranges {
+		add(protected.startPiece, protected.endPiece)
 	}
-	found.lastOffset = 320
-	pool.mu.Unlock()
-
-	// After lastOffset = 320:
-	//   pieceIndex = 320 / 64 = 5, beginPiece = 5
-	//   readahead = 1 MiB / 1 active reader, so readaheadPieces = 1048576 / 64 = 16384.
-	//   trailing = readaheadPieces / 4 = 4096.
-	//   start = max(0, 5 - 4096) = 0
-	//   end is clamped to the final inclusive file piece (EndPieceIndex-1)
-	//   position = beginPiece = 5
-	positions := pool.ReaderPositions(infoHash)
-	if len(positions) != 1 {
-		t.Fatalf("expected 1 reader position, got %d", len(positions))
+	for _, boundary := range r.boundaries {
+		add(boundary.headStart, boundary.headEnd)
+		add(boundary.tailStart, boundary.tailEnd)
 	}
-
-	ri := positions[0]
-	if ri.Start > ri.End {
-		t.Fatalf("expected Start <= End, got Start=%d End=%d", ri.Start, ri.End)
-	}
-
-	// Start must be 0 (trailing extends past piece 0).
-	if ri.Start != 0 {
-		t.Fatalf("expected Start=0, got %d", ri.Start)
-	}
-
-	// End must be clamped to the final inclusive file piece.
-	wantEnd := f.EndPieceIndex() - 1
-	if ri.End != wantEnd {
-		t.Fatalf("expected End=%d (last inclusive piece), got %d", wantEnd, ri.End)
-	}
-
-	// Position must reflect piece 5 (offset 320 / 64 bytes per piece).
-	if ri.Position != 5 {
-		t.Fatalf("expected Position=5 (piece for offset 320), got %d", ri.Position)
-	}
-
-	release()
-	pool.Close()
+	return pieces
 }
 
-func TestPool_MisalignedFileOffsets(t *testing.T) {
+func TestPoolProtectedPiecesFitReadaheadBudget(t *testing.T) {
+	const budget = int64(32 << 20) // default 64 MiB memory limit at 50 %
+	for _, pieceLength := range []int64{1 << 20, 4 << 20, 16 << 20} {
+		for _, readers := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%dMiB pieces %d readers", pieceLength>>20, readers), func(t *testing.T) {
+				length := int64(8<<30) + 12345
+				info := metainfo.Info{
+					Name:        "movie.mkv",
+					PieceLength: pieceLength,
+					Length:      length,
+					Pieces:      make([]byte, (length+pieceLength-1)/pieceLength*sha1.Size),
+				}
+				infoBytes, err := bencode.Marshal(info)
+				require.NoError(t, err)
+				c := newTestTorrentClient(t)
+				_, file := addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
+
+				reg := newProtectionRegistry()
+				pool := New(Config{Registry: reg, Logger: testLogger()})
+				defer pool.Close()
+				require.True(t, pool.SetReadaheadBudget(budget))
+
+				for range readers {
+					_, release, err := pool.Acquire(file, MemoryStorage)
+					require.NoError(t, err)
+					t.Cleanup(release)
+				}
+				// Place the readers apart so their ranges do not overlap, then
+				// re-register protection at those positions.
+				pool.mu.Lock()
+				offset := int64(1 << 30)
+				for _, sr := range pool.readers {
+					sr.lastOffset = offset
+					offset += 1 << 30
+				}
+				pool.mu.Unlock()
+				require.True(t, pool.SetReadaheadBudget(budget))
+
+				pieces := reg.protectedPieces()
+				reg.mu.Lock()
+				registered := len(reg.ranges)
+				reg.mu.Unlock()
+				require.Equal(t, readers, registered)
+				protected := int64(len(pieces)) * pieceLength
+				assert.LessOrEqual(t, protected, budget, "protected %d pieces of %d MiB", len(pieces), pieceLength>>20)
+
+				pool.mu.Lock()
+				for _, sr := range pool.readers {
+					assert.Zero(t, sr.readahead%pieceLength, "readahead must be whole pieces")
+				}
+				pool.mu.Unlock()
+			})
+		}
+	}
+}
+
+func TestPoolMisalignedFileOffsets(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, _ := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
 	file := to.Files()[1]
@@ -1022,7 +1162,8 @@ func TestPool_MisalignedFileOffsets(t *testing.T) {
 	reg := &stubRegistry{}
 	pool := New(Config{Registry: reg, Logger: testLogger()})
 	defer pool.Close()
-	pool.SetReadaheadBudget(64)
+	// Two 64-byte pieces: the position piece and one piece of readahead.
+	pool.SetReadaheadBudget(128)
 
 	_, release, err := pool.Acquire(file, MemoryStorage)
 	require.NoError(t, err)
@@ -1046,7 +1187,7 @@ func TestPool_MisalignedFileOffsets(t *testing.T) {
 	assert.Equal(t, 3, plan[1].index)
 }
 
-func TestPool_PriorityClaims_OverlappingReaders(t *testing.T) {
+func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, file := addMultiPieceTorrent(t, c)
 	p := New(Config{Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))})
@@ -1113,38 +1254,4 @@ func TestPool_PriorityClaims_OverlappingReaders(t *testing.T) {
 	if stillClaimed {
 		t.Fatal("expected final owner release to remove the piece claim")
 	}
-}
-
-func TestPool_AcquireWithFileStorage_Readahead(t *testing.T) {
-	c := newTestTorrentClient(t)
-	to, f := addTestTorrent(t, c)
-
-	infoHash := to.InfoHash()
-	totalBudget := int64(1024 * 1024)
-	wantReadahead := int64(75 * 1024 * 1024)
-
-	pool := New(Config{
-		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout:    30 * time.Second,
-		FileReadaheadBytes: wantReadahead,
-	})
-
-	reader, release := acquireTestReader(t, pool, f, FileStorage, totalBudget)
-	if reader == nil {
-		t.Fatal("expected non-nil reader for file storage")
-	}
-
-	// Verify readahead was set to the file storage value, not divided by pool.
-	pool.mu.Lock()
-	for _, sr := range pool.readers {
-		if sr.infoHash == infoHash && sr.isFileStorage {
-			if sr.readahead != wantReadahead {
-				t.Fatalf("expected file storage readahead=%d, got %d", wantReadahead, sr.readahead)
-			}
-		}
-	}
-	pool.mu.Unlock()
-
-	release()
-	pool.Close()
 }

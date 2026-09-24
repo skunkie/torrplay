@@ -98,6 +98,8 @@
 //   - Client.TorrentStats provides detailed per-torrent and per-piece statistics.
 //
 // TorrentStats also provides derived completion and memory-usage fractions.
+// Client.PiecesCached checks only a given set of pieces, for callers that poll
+// whether a small protected range is still resident and complete.
 //
 // # Eviction Protection
 //

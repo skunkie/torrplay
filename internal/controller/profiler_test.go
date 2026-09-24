@@ -22,7 +22,7 @@ import (
 
 func TestIntegrationProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
 	ctrl, _ := newTestController(t, func(c *Controller) {
-		c.settings.LogLevel = utils.Ptr(slog.LevelDebug)
+		c.settings.Load().LogLevel = utils.Ptr(slog.LevelDebug)
 		c.profilerAddr = "127.0.0.1:0"
 	})
 	ctrl.reconcileProfiler()

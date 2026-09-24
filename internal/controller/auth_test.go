@@ -41,8 +41,8 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 	require.NoError(t, err)
 
 	if updateSettings != nil {
-		updateSettings(c.settings)
-		err = dbClient.UpdateSettings(database.FromAPISettings(c.settings))
+		updateSettings(c.settings.Load())
+		err = dbClient.UpdateSettings(database.FromAPISettings(c.settings.Load()))
 		require.NoError(t, err)
 	}
 
@@ -243,7 +243,7 @@ func TestDLNAPlaybackToken(t *testing.T) {
 	for _, authType := range []api.AuthType{api.Bearer, api.Basic} {
 		t.Run(string(authType), func(t *testing.T) {
 			controller.mu.Lock()
-			controller.settings.Auth = &api.Auth{
+			controller.settings.Load().Auth = &api.Auth{
 				Enabled:  new(true),
 				Type:     utils.Ptr(authType),
 				Username: new("admin"),
@@ -264,7 +264,7 @@ func TestDLNAPlaybackToken(t *testing.T) {
 	}
 
 	controller.mu.Lock()
-	controller.settings.Auth.Enabled = new(false)
+	controller.settings.Load().Auth.Enabled = new(false)
 	controller.mu.Unlock()
 	token, err = controller.dlnaPlaybackToken()
 	require.NoError(t, err)
@@ -489,12 +489,12 @@ func TestStremioAuthenticationFollowsCurrentSettings(t *testing.T) {
 	assert.False(t, controller.validateStremioToken("invalid"))
 
 	controller.mu.Lock()
-	controller.settings.Auth.Enabled = new(false)
+	controller.settings.Load().Auth.Enabled = new(false)
 	controller.mu.Unlock()
 	assert.True(t, controller.validateStremioToken(""))
 
 	controller.mu.Lock()
-	controller.settings.Auth.Enabled = new(true)
+	controller.settings.Load().Auth.Enabled = new(true)
 	controller.mu.Unlock()
 	assert.False(t, controller.validateStremioToken(""))
 }
@@ -602,7 +602,7 @@ func TestBasicAuthWWWAuthenticateSuppression(t *testing.T) {
 
 	t.Run("Bearer auth retains Bearer challenge even with XMLHttpRequest", func(t *testing.T) {
 		controller.mu.Lock()
-		controller.settings.Auth.Type = utils.Ptr(api.Bearer)
+		controller.settings.Load().Auth.Type = utils.Ptr(api.Bearer)
 		controller.mu.Unlock()
 
 		rr := testutil.NewRequest().

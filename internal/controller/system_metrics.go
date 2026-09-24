@@ -18,8 +18,8 @@ func (c *Controller) GetSystemMetrics(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	var activeTorrents int
-	if c.client != nil {
-		activeTorrents = len(c.client.Torrents())
+	if client := c.currentClient(); client != nil {
+		activeTorrents = len(client.Torrents())
 	}
 
 	metrics := api.SystemMetrics{

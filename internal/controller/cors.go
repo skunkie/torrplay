@@ -20,7 +20,7 @@ func corsOptions() cors.Options {
 		AllowedHeaders: []string{
 			"Accept", "Accept-Ranges", "Accept-Language", "Access-Control-Request-Private-Network",
 			"Authorization", "Content-Language", "Content-Type", "Content-Length", "Origin", "Range",
-			"X-Requested-With",
+			"X-Http-Method-Override", "X-Requested-With",
 		},
 		ExposedHeaders: []string{"Content-Range"},
 		MaxAge:         600,
@@ -52,9 +52,7 @@ func (c *Controller) isTrustedOrigin(origin string) bool {
 		}
 	}
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, allowed := range utils.Val(c.settings.CorsAllowedOrigins) {
+	for _, allowed := range utils.Val(c.settings.Load().CorsAllowedOrigins) {
 		if configured, valid := normalizeOrigin(allowed); valid && configured == normalized {
 			return true
 		}

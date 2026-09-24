@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { cancelPreload, getPreload, getTorrentStreamUrl, startPreload } from '@/lib/api/torrents';
-import { type Torrent, type TorrentFile } from '@/lib/types/api';
+import { type PreloadResponse, type Torrent, type TorrentFile } from '@/lib/types/api';
 import { getInitialVideoFile, getSubtitleTracksForVideo, getVideoFiles, getVideoType } from '@/lib/video-utils';
 
 import { TorrentPlayerDialogLayout } from './torrent-player-dialog-layout';
@@ -17,6 +17,12 @@ interface TorrentPlayerDialogProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
   enablePreload?: boolean
+}
+
+// isInactivePreloadStatus reports whether the server has stopped preloading, so
+// the player should stop polling and play without waiting.
+function isInactivePreloadStatus(status: PreloadResponse['status']): boolean {
+  return status === 'failed' || status === 'idle' || status === 'superseded';
 }
 
 function computeVideoFiles(torrent: Torrent | null): { videoFiles: TorrentFile[], selectedFile: TorrentFile | null } {
@@ -72,6 +78,11 @@ export const TorrentPlayerDialog = ({
     if (hash) {
       cancelPreload(hash).catch(() => {});
     }
+  }, [stopPreloadPolling]);
+
+  const finishInactivePreload = useCallback(() => {
+    stopPreloadPolling();
+    activePreloadHashRef.current = null;
   }, [stopPreloadPolling]);
 
   if (open && !prevOpenRef.current) {
@@ -153,8 +164,8 @@ export const TorrentPlayerDialog = ({
         setActivePeers(resp.activePeers || 0);
         setTotalPeers(resp.totalPeers || 0);
 
-        if (resp.status === 'idle') {
-          cancelActivePreload();
+        if (isInactivePreloadStatus(resp.status)) {
+          finishInactivePreload();
           preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
           return;
@@ -188,8 +199,8 @@ export const TorrentPlayerDialog = ({
             setActivePeers(statusResp.activePeers || 0);
             setTotalPeers(statusResp.totalPeers || 0);
 
-            if (statusResp.status === 'idle') {
-              cancelActivePreload();
+            if (isInactivePreloadStatus(statusResp.status)) {
+              finishInactivePreload();
               preloadedFileRef.current = currentSelectedFile.path;
               setIsPreloading(false);
               return;
@@ -237,7 +248,7 @@ export const TorrentPlayerDialog = ({
       isMounted = false;
       stopPreloadPolling();
     };
-  }, [cancelActivePreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
+  }, [cancelActivePreload, finishInactivePreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
 
   // Clean up when dialog closes
   useEffect(() => {

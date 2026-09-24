@@ -29,7 +29,9 @@
 // (1/4 behind, full readahead ahead) through the ActiveRangeRegistry interface. Pieces
 // inside this window are protected from LRU eviction. When the reader is
 // released, the active range is cleared immediately so those pieces become
-// eviction candidates again.
+// eviction candidates again. A seek is reported when the next read starts, so
+// the destination is protected before the read can block, while positions that
+// are never read, such as the size probe of http.ServeContent, are skipped.
 //
 // # Piece-Priority Bumping
 //
@@ -53,9 +55,31 @@
 // # Readahead Rebalancing
 //
 // When a reader is acquired, released, or parked, the pool redistributes the total
-// memory readahead budget among active memory-storage readers. File-storage
-// readers retain their configured FileReadaheadBytes. This ensures no single
-// reader monopolizes the torrent client's download capacity while others starve.
+// memory readahead budget among active memory-storage readers. Storage protects
+// whole pieces, so the division is made in pieces: head and tail boundaries use
+// at most half of the budget and shrink, or are dropped, until their pieces fit,
+// and each reader's readahead is the largest whole number of pieces whose active
+// range fits its share. With large pieces and a small budget, a reader may protect
+// only the piece it is reading. A file whose held preload reservation covers
+// both its head and tail gets no reader boundaries, because the preload already
+// protects them within that reservation. File-storage
+// readers retain their configured FileReadaheadBytes while active. Competing idle
+// readers are parked immediately whenever playback or preload work is active, so
+// released HTTP range requests cannot keep downloading outside the shared budget.
+// The last idle reader may remain warm until its normal park timeout. This ensures
+// no stale reader monopolizes the torrent client's download capacity while active
+// work starves.
+//
+// # Preload Reservations
+//
+// Preloads share the readahead budget with playback. ReservePreloadBudget
+// admits a preload of one file per torrent and may grant less than requested;
+// PreloadCapacity reports the preload share of the budget, and the rest is
+// always kept for playback readers so a new stream is never starved by held
+// preloads. ReleasePreloadBudget returns the reservation to active readers.
+// AcquirePreloadContext acquires a reader bounded to a byte range whose pieces
+// are claimed at PiecePriorityNow until release. SetReadaheadBudget refuses a
+// new budget whose preload share cannot hold the existing reservations.
 //
 // # Idle GC
 //
@@ -95,7 +119,9 @@
 //			Registry:           nil, // pass a storage.Client here to enable eviction protection
 //		})
 //		defer pool.Close()
-//		pool.SetReadaheadBudget(256 << 20)
+//		if !pool.SetReadaheadBudget(256 << 20) {
+//			panic("readahead budget conflicts with active preload reservations")
+//		}
 //
 //		// Acquire returns the bounded io.ReadSeeker expected by http.ServeContent.
 //		// reader, release, err := pool.Acquire(file, stream.MemoryStorage)

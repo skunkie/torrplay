@@ -758,7 +758,7 @@ describe('TorrentPlayerDialog', () => {
       expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
     });
 
-    it('cancels server preload when polling reports that the task stopped', async () => {
+    it('stops polling without clearing status when playback supersedes the task', async () => {
       vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
         fileIndex: 0,
         targetBytes: 1000,
@@ -774,7 +774,7 @@ describe('TorrentPlayerDialog', () => {
         targetBytes: 0,
         completedBytes: 0,
         progress: 0,
-        status: 'idle',
+        status: 'superseded',
         activePeers: 0,
         downloadRate: 0,
         totalPeers: 0,
@@ -791,9 +791,50 @@ describe('TorrentPlayerDialog', () => {
       );
 
       await waitFor(() => {
-        expect(cancelSpy).toHaveBeenCalledWith(mockTorrentSingleVideo.hash);
         expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
       });
+      expect(cancelSpy).not.toHaveBeenCalled();
+    });
+
+    it('stops polling when the preload fails', async () => {
+      vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 200,
+        progress: 0.2,
+        status: 'preloading',
+        activePeers: 1,
+        downloadRate: 256,
+        totalPeers: 3,
+      });
+      const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue({
+        fileIndex: -1,
+        targetBytes: 1000,
+        completedBytes: 200,
+        progress: 0.2,
+        status: 'failed',
+        activePeers: 0,
+        downloadRate: 0,
+        totalPeers: 0,
+      });
+      const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+      });
+      const pollsAfterFailure = getPreloadSpy.mock.calls.length;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      expect(getPreloadSpy).toHaveBeenCalledTimes(pollsAfterFailure);
+      expect(cancelSpy).not.toHaveBeenCalled();
     });
 
     it('cancels preload when exiting the player', async () => {

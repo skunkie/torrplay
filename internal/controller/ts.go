@@ -75,9 +75,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		c.mu.RLock()
-		pool := c.streamPool
-		c.mu.RUnlock()
+		pool := c.streamPool.Load()
 
 		var fileReaders []api.TSReaderInfo
 		if pool != nil {
@@ -118,7 +116,7 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := c.storageClient.TorrentStats(ih)
+	info, err := c.storageClient.Load().TorrentStats(ih)
 	if err != nil || info.TotalPieces == 0 || len(info.Pieces) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(struct{}{}); err != nil {
@@ -127,10 +125,8 @@ func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c.mu.RLock()
-	pool := c.streamPool
-	capacity := utils.Val(c.settings.MaxMemory)
-	c.mu.RUnlock()
+	pool := c.streamPool.Load()
+	capacity := utils.Val(c.settings.Load().MaxMemory)
 
 	var apiReaders []api.TSReaderInfo
 	if pool != nil {
@@ -240,10 +236,7 @@ func (c *Controller) TSPlay(w http.ResponseWriter, r *http.Request, ih metainfo.
 }
 
 func (c *Controller) TSSettings(w http.ResponseWriter, _ *http.Request) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	resp := api.TSSettings{CacheSize: c.settings.MaxMemory}
+	resp := api.TSSettings{CacheSize: c.settings.Load().MaxMemory}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -458,7 +451,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 			if !c.hasTorrentReaders(to.InfoHash()) {
 				to.Drop()
 				<-to.Closed()
-				c.logger.Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+				c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
 			}
 		}
 
@@ -704,19 +697,40 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 		resp.LoadedSize = stats.CompletedSize
 		resp.PreloadSize = stats.CompletedSize
 		resp.PreloadedBytes = stats.CompletedSize
+		c.preloadsMu.Lock()
+		preload := c.currentPreloadLocked(to.InfoHash())
+		if preload == nil {
+			preload = c.playbackLeaseLocked(to.InfoHash())
+		}
+		snapshotValue, snapshotted := c.preloadSnapshots.Load(to.InfoHash())
+		c.preloadsMu.Unlock()
 
-		if to.Info() == nil {
+		switch {
+		case to.Info() == nil:
 			resp.Stat = tsStatGettingInfo
 			resp.StatString = "Torrent getting info"
-		} else if val, preloading := c.preloads.Load(to.InfoHash()); preloading {
+		case preload != nil && preload.ready.Load():
+			// TorrServer reports a finished preload as a working torrent.
+			resp.TorrentSize = to.Length()
+			resp.Stat = tsStatWorking
+			resp.StatString = "Torrent working"
+			resp.PreloadSize = preload.targetBytes
+			resp.PreloadedBytes = preload.targetBytes
+		case preload != nil:
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatPreload
 			resp.StatString = "Torrent preload"
-			if p, ok := val.(*preloadTask); ok && p != nil {
-				resp.PreloadSize = p.targetBytes
-				resp.PreloadedBytes = p.progressBytes()
+			resp.PreloadSize = preload.targetBytes
+			resp.PreloadedBytes = preload.progressBytes()
+		case snapshotted:
+			resp.TorrentSize = to.Length()
+			resp.Stat = tsStatWorking
+			resp.StatString = "Torrent working"
+			if snapshot, isSnapshot := snapshotValue.(*preloadStatusSnapshot); isSnapshot && snapshot != nil {
+				resp.PreloadSize = snapshot.targetBytes
+				resp.PreloadedBytes = snapshot.completedBytes
 			}
-		} else {
+		default:
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatWorking
 			resp.StatString = "Torrent working"
