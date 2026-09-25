@@ -61,7 +61,10 @@ const (
 	posterCleanupInterval     = 6 * time.Hour
 	profilerAddress           = "127.0.0.1:6060"
 	profilerShutdownTimeout   = 5 * time.Second
-	torrentTrackerTTL         = 3 * time.Hour
+	// torrentTrackerTTL is how long an unused torrent stays loaded, seeding
+	// to its peers, before it is dropped. Cleanup runs every five minutes, so
+	// a torrent is dropped 30 to 35 minutes after its last use.
+	torrentTrackerTTL = 30 * time.Minute
 )
 
 var _ api.ServerInterface = (*Controller)(nil)

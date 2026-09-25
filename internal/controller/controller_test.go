@@ -105,6 +105,8 @@ func primeSampleMetadata(t *testing.T, ctrl *Controller, ih metainfo.Hash) {
 	require.NoError(t, err)
 }
 
+type testControllerOpt func(*Controller)
+
 func testControllerRuntimeConfig() controllerRuntimeConfig {
 	return controllerRuntimeConfig{
 		fetchTrackers: func(context.Context, *httpclient.Client) ([][]string, error) {
@@ -117,13 +119,13 @@ func testControllerRuntimeConfig() controllerRuntimeConfig {
 			config.DisableWebtorrent = true
 			config.DisableWebseeds = true
 			config.NoDefaultPortForwarding = true
+			config.DisableTCP = true
+			config.DisableUTP = true
 		},
-		clientCloseDelay: 0,
 		gotInfoTimeout:   100 * time.Millisecond,
+		clientCloseDelay: 0,
 	}
 }
-
-type testControllerOpt func(*Controller)
 
 func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, func()) {
 	t.Helper()
@@ -141,12 +143,12 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 	imagesSvc, err := images.NewBBoltDBService(postersDBPath)
 	require.NoError(t, err)
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-
 	metricsSvc := metrics.New()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+
 	ctrl, err := newController(".", "127.0.0.1", port, dbClient, imagesSvc, metricsSvc, runtimeConfig)
 	require.NoError(t, err)
 
@@ -285,6 +287,8 @@ func TestAddNonExistentTorrent(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
+
 	magnet := "magnet:?xt=urn:btih:0000000000000000000000000000000000000001"
 	body, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
 	require.NoError(t, err)
@@ -384,6 +388,7 @@ func TestGetTorrent(t *testing.T) {
 	assert.NotNil(t, result.Name)
 	assert.NotNil(t, result.PieceCount)
 	assert.NotNil(t, result.TotalSize)
+	assert.NotNil(t, result.Active)
 }
 
 func TestGetTorrentWithMagnetBootstrapsWithoutPersisting(t *testing.T) {
@@ -634,6 +639,8 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 func TestTorrentMetadataFetchTimesOut(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
+
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
 
 	rr := doGet(t, ctrl.router, "/api/v1/torrents/0000000000000000000000000000000000000001")
 	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
@@ -1270,7 +1277,7 @@ func TestUpdateTorrentStorage(t *testing.T) {
 	assert.Equal(t, api.Memory, *updatedTorrent.Storage)
 }
 
-func TestController_TorrentInfoBytes(t *testing.T) {
+func TestFileStorageMigrationPreservesInfoBytes(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
 		c.settings.Load().FileStoragePath = new(tmpDir)
@@ -1278,8 +1285,6 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 		require.NoError(t, err)
 	})
 	defer cleanup()
-
-	primeSampleMetadata(t, ctrl, sintelHash)
 
 	body, writer := createMultipartForm(t, map[string]string{
 		"storage": string(api.File),
@@ -1346,6 +1351,7 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	}, time.Second, time.Millisecond, "InfoBytes should be saved after updating torrent to file storage")
 }
 
+// TestNewController verifies that a new controller bootstraps its settings.
 func TestNewController(t *testing.T) {
 	t.Run("with pre-existing secrets on empty DB", func(t *testing.T) {
 		dbPath := tempfile()
@@ -1364,7 +1370,7 @@ func TestNewController(t *testing.T) {
 		assert.NotEmpty(t, udnBefore)
 
 		metricsSvc := metrics.New()
-		ctrl, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+		ctrl, err := newController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc, testControllerRuntimeConfig())
 		require.NoError(t, err)
 		defer ctrl.Shutdown()
 
@@ -1407,7 +1413,7 @@ func TestNewController(t *testing.T) {
 		require.NoError(t, err)
 
 		metricsSvc := metrics.New()
-		ctrl, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+		ctrl, err := newController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc, testControllerRuntimeConfig())
 		require.NoError(t, err)
 		defer ctrl.Shutdown()
 
@@ -1585,6 +1591,7 @@ func TestUpdateSettingsSerializesConcurrentPatches(t *testing.T) {
 	assert.Equal(t, utils.Val(persisted.Auth.Username), utils.Val(ctrl.settings.Load().Auth.Username))
 }
 
+// TestController_Shutdown verifies that Shutdown is idempotent.
 func TestController_Shutdown(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
@@ -1596,6 +1603,7 @@ func TestController_Shutdown(t *testing.T) {
 	})
 }
 
+// TestController_StopPosterWorkers verifies that stopped poster workers reject late registration.
 func TestController_StopPosterWorkers(t *testing.T) {
 	ctrl := &Controller{}
 	workerStarted := make(chan struct{})
@@ -1643,85 +1651,107 @@ func TestController_StopPosterWorkers(t *testing.T) {
 	}
 }
 
-func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
+func TestController_CleanupExpiredTorrents(t *testing.T) {
+	t.Run("skips active torrents", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
 
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	primeSampleMetadata(t, ctrl, ih)
-	magnet := samples[ih]
-	req := api.TorrentAdd{Magnet: &magnet}
-	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
-	require.Equal(t, http.StatusCreated, rr.Code)
+		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+		primeSampleMetadata(t, ctrl, ih)
+		magnet := samples[ih]
+		req := api.TorrentAdd{Magnet: &magnet}
+		rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+		require.Equal(t, http.StatusCreated, rr.Code)
 
-	// Mark the torrent expired in the tracker
-	ctrl.torrentTracker.mu.Lock()
-	ctrl.torrentTracker.torrents[ih] = torrentInfo{
-		lastUsedAt:  time.Now().Add(-4 * time.Hour),
-		storageType: api.Memory,
-	}
-	ctrl.torrentTracker.mu.Unlock()
+		// Mark the torrent expired in the tracker
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{
+			lastUsedAt:  time.Now().Add(-4 * time.Hour),
+			storageType: api.Memory,
+		}
+		ctrl.torrentTracker.mu.Unlock()
 
-	// Simulate an active streaming reader in streamPool
-	primeSampleMetadata(t, ctrl, ih)
-	to, err := ctrl.addTorrentByHash(ih)
-	require.NoError(t, err)
-	<-to.GotInfo()
+		// Simulate an active streaming reader in streamPool
+		primeSampleMetadata(t, ctrl, ih)
+		to, err := ctrl.addTorrentByHash(ih)
+		require.NoError(t, err)
+		<-to.GotInfo()
 
-	file := to.Files()[0]
-	ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
-	_, release, err := ctrl.streamPool.Load().Acquire(file, stream.MemoryStorage)
-	require.NoError(t, err)
-	defer release()
+		file := to.Files()[0]
+		ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
+		_, release, err := ctrl.streamPool.Load().Acquire(file, stream.MemoryStorage)
+		require.NoError(t, err)
+		defer release()
 
-	// Trigger cleanup
-	ctrl.cleanupExpiredTorrents()
+		// Trigger cleanup
+		ctrl.cleanupExpiredTorrents()
 
-	// The torrent should NOT have been removed because of the active reader
-	ctrl.torrentTracker.mu.RLock()
-	info, exists := ctrl.torrentTracker.torrents[ih]
-	ctrl.torrentTracker.mu.RUnlock()
+		// The torrent should NOT have been removed because of the active reader
+		ctrl.torrentTracker.mu.RLock()
+		info, exists := ctrl.torrentTracker.torrents[ih]
+		ctrl.torrentTracker.mu.RUnlock()
 
-	assert.True(t, exists, "active torrent should not be dropped during cleanup")
-	assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
-}
+		assert.True(t, exists, "active torrent should not be dropped during cleanup")
+		assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
+	})
 
-func TestController_CleanupExpiredTorrents_ReleasesCompletedPreload(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
+	t.Run("drops torrents idle past TTL", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
 
-	ih := metainfo.Hash{1}
-	otherHash := metainfo.Hash{2}
-	ctrl.torrentTracker.mu.Lock()
-	ctrl.torrentTracker.torrents[ih] = torrentInfo{
-		lastUsedAt:  time.Now().Add(-4 * time.Hour),
-		storageType: api.Memory,
-	}
-	ctrl.torrentTracker.mu.Unlock()
+		idle, recent := metainfo.Hash{1}, metainfo.Hash{2}
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[idle] = torrentInfo{lastUsedAt: time.Now().Add(-31 * time.Minute), storageType: api.Memory}
+		ctrl.torrentTracker.torrents[recent] = torrentInfo{lastUsedAt: time.Now().Add(-29 * time.Minute), storageType: api.Memory}
+		ctrl.torrentTracker.mu.Unlock()
 
-	ctrl.streamPool.Load().SetReadaheadBudget(1000)
-	require.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(ih, "", false, 1000))
-	task := &preloadTask{
-		infoHash: ih,
-		cancel:   func() {},
-		clearProtection: func() {
-			ctrl.streamPool.Load().ReleasePreloadBudget(ih)
-		},
-		protected: true,
-	}
-	task.ready.Store(true)
-	ctrl.preloads.Store(ih, task)
+		ctrl.cleanupExpiredTorrents()
 
-	ctrl.cleanupExpiredTorrents()
+		ctrl.torrentTracker.mu.RLock()
+		_, idleTracked := ctrl.torrentTracker.torrents[idle]
+		_, recentTracked := ctrl.torrentTracker.torrents[recent]
+		ctrl.torrentTracker.mu.RUnlock()
+		assert.False(t, idleTracked, "a torrent unused for over thirty minutes must be dropped")
+		assert.True(t, recentTracked, "a torrent used within thirty minutes must stay loaded")
+	})
 
-	_, preloading := ctrl.preloads.Load(ih)
-	assert.False(t, preloading)
-	ctrl.torrentTracker.mu.RLock()
-	_, tracked := ctrl.torrentTracker.torrents[ih]
-	ctrl.torrentTracker.mu.RUnlock()
-	assert.False(t, tracked)
-	assert.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(otherHash, "", false, 1000))
-	ctrl.streamPool.Load().ReleasePreloadBudget(otherHash)
+	t.Run("releases completed preload", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+
+		ih := metainfo.Hash{1}
+		otherHash := metainfo.Hash{2}
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{
+			lastUsedAt:  time.Now().Add(-4 * time.Hour),
+			storageType: api.Memory,
+		}
+		ctrl.torrentTracker.mu.Unlock()
+
+		ctrl.streamPool.Load().SetReadaheadBudget(1000)
+		require.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(ih, "", false, 1000))
+		task := &preloadTask{
+			infoHash: ih,
+			cancel:   func() {},
+			clearProtection: func() {
+				ctrl.streamPool.Load().ReleasePreloadBudget(ih)
+			},
+			protected: true,
+		}
+		task.ready.Store(true)
+		ctrl.preloads.Store(ih, task)
+
+		ctrl.cleanupExpiredTorrents()
+
+		_, preloading := ctrl.preloads.Load(ih)
+		assert.False(t, preloading)
+		ctrl.torrentTracker.mu.RLock()
+		_, tracked := ctrl.torrentTracker.torrents[ih]
+		ctrl.torrentTracker.mu.RUnlock()
+		assert.False(t, tracked)
+		assert.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(otherHash, "", false, 1000))
+		ctrl.streamPool.Load().ReleasePreloadBudget(otherHash)
+	})
 }
 
 func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
@@ -1750,13 +1780,11 @@ func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
 }
 
 func TestUpdateTorrentUnlocksWhenStorageSwitchTimesOut(t *testing.T) {
-	runtimeConfig := testControllerRuntimeConfig()
-	runtimeConfig.gotInfoTimeout = 100 * time.Millisecond
-
-	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig, func(c *Controller) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
 		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
 
 	// Add a dummy torrent directly into the database with an unresolvable magnet link (empty InfoBytes)
 	deadHash := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
