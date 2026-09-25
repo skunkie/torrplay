@@ -782,6 +782,26 @@ func TestClassifyTorrent(t *testing.T) {
 	})
 }
 
+func TestIsPath(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected bool
+	}{
+		{"/stremio", true},
+		{"/stremio/", true},
+		{"/stremio/token/manifest.json", true},
+		{"/stremiofoo/bar", false},
+		{"/api/v1/torrents", false},
+		{"", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			assert.Equal(t, tc.expected, IsPath(tc.input))
+		})
+	}
+}
+
 func TestMetricsPath(t *testing.T) {
 	tests := []struct {
 		input    string

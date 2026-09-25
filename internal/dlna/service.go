@@ -28,6 +28,14 @@ import (
 
 const notifyInterval = 30 * time.Second
 
+// metricsServices maps a lowercase fragment of each registered UPnP service's
+// control, event, and SCPD paths to its metrics label.
+var metricsServices = []struct{ match, label string }{
+	{"connectionmanager", "ConnectionManager"},
+	{"contentdirectory", "ContentDirectory"},
+	{"mediareceiverregistrar", "X_MS_MediaReceiverRegistrar"},
+}
+
 type serviceDatabase interface {
 	torrentReader
 	GetDLNAUDN() (string, error)
@@ -236,4 +244,27 @@ func (s *Service) Stop() error {
 	s.logger.Info("DLNA service stopped")
 
 	return nil
+}
+
+// MetricsPath collapses a request path under basePath into a bounded metrics
+// label: the device description, the icons, or one label per UPnP service.
+// Renderers address a service by several spellings, and the handler accepts
+// any path ending in part of a service URN, so raw paths are unbounded.
+func MetricsPath(basePath, p string) string {
+	base := strings.TrimRight(basePath, "/")
+	rest := strings.ToLower(strings.Trim(strings.TrimPrefix(p, base), "/"))
+	switch rest {
+	case "", "description.xml", "rootdesc.xml", "desc.xml", "device.xml":
+		return base + "/"
+	}
+	if strings.HasPrefix(rest, "icons/") {
+		return base + "/icons"
+	}
+	for _, service := range metricsServices {
+		if strings.Contains(rest, service.match) {
+			return base + "/" + service.label
+		}
+	}
+
+	return base + "/*"
 }

@@ -806,6 +806,11 @@ func isStremioResource(part string) bool {
 	}
 }
 
+// IsPath reports whether p is a path under the /stremio mount.
+func IsPath(p string) bool {
+	return p == "/stremio" || strings.HasPrefix(p, "/stremio/")
+}
+
 // MetricsPath collapses a Stremio URL into a bounded metrics label. Stremio
 // paths embed tokens, infohashes, file indexes and file names, so using them
 // verbatim as a Prometheus label would create one series per streamed file.
@@ -843,16 +848,11 @@ func RedactPathToken(p string) string {
 // stremioPathParts splits a Stremio request path into its segments, reporting
 // false for paths that are not served by this addon.
 func stremioPathParts(p string) ([]string, bool) {
-	if !strings.HasPrefix(p, "/stremio") {
+	if !IsPath(p) {
 		return nil, false
 	}
 
-	reqPath := strings.TrimPrefix(p, "/stremio")
-	if reqPath != "" && !strings.HasPrefix(reqPath, "/") {
-		return nil, false
-	}
-
-	cleanPath := strings.Trim(reqPath, "/")
+	cleanPath := strings.Trim(strings.TrimPrefix(p, "/stremio"), "/")
 	if cleanPath == "" {
 		return nil, false
 	}

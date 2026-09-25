@@ -65,6 +65,8 @@ const (
 	// to its peers, before it is dropped. Cleanup runs every five minutes, so
 	// a torrent is dropped 30 to 35 minutes after its last use.
 	torrentTrackerTTL = 30 * time.Minute
+	// unmatchedRoutePath labels HTTP metrics for requests matching no route.
+	unmatchedRoutePath = "unmatched"
 )
 
 var _ api.ServerInterface = (*Controller)(nil)
@@ -608,18 +610,7 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 			start := time.Now()
 
 			defer func() {
-				// Use chi.RouteContext to get the route pattern.
-				routeCtx := chi.RouteContext(r.Context())
-				routePath := routeCtx.RoutePattern()
-				// Sometimes path is empty, for example for static files.
-				// In that case, we can use r.URL.Path.
-				if routePath == "" || strings.HasSuffix(routePath, "/*") {
-					routePath = r.URL.Path
-				}
-				// Stremio paths carry tokens, hashes and file names; collapse
-				// them to a bounded label instead of one series per file.
-				routePath = stremio.MetricsPath(routePath)
-
+				routePath := c.metricsRoutePath(r)
 				duration := time.Since(start)
 				statusCode := strconv.Itoa(ww.Status())
 				method := r.Method
@@ -637,6 +628,33 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 
 			next.ServeHTTP(ww, r)
 		})
+	}
+}
+
+// metricsRoutePath returns a bounded path label for HTTP metrics: the matched
+// route pattern, so a mounted handler such as /posters/* gets one series
+// rather than one per file.
+func (c *Controller) metricsRoutePath(r *http.Request) string {
+	if stremio.IsPath(r.URL.Path) {
+		// Stremio paths carry tokens, hashes and file names; keep one label
+		// per addon resource.
+		return stremio.MetricsPath(r.URL.Path)
+	}
+
+	pattern := chi.RouteContext(r.Context()).RoutePattern()
+	switch {
+	case pattern == "" || pattern == "/*":
+		// Requests that no route handles share one label, so probing
+		// arbitrary paths cannot add series. The API routes are registered
+		// under router.Route("/"), whose catch-all reports "/*" for any path
+		// no route handles; a real top-level "/*" route would need its own
+		// label here.
+		return unmatchedRoutePath
+	case c.dlnaPath != "" && pattern == strings.TrimRight(c.dlnaPath, "/")+"/*":
+		// Keep the device description, icons, and each UPnP service apart.
+		return dlna.MetricsPath(c.dlnaPath, r.URL.Path)
+	default:
+		return pattern
 	}
 }
 

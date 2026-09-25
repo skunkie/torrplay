@@ -343,6 +343,29 @@ func TestService_SendUpdateNotification(t *testing.T) {
 }
 
 // TestDeviceIcons verifies that deviceIcons rejects a missing directory.
+func TestMetricsPath(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"/upnp", "/upnp/"},
+		{"/upnp/", "/upnp/"},
+		{"/upnp/rootDesc.xml", "/upnp/"},
+		{"/upnp/icons/icon-48.png", "/upnp/icons"},
+		{"/upnp/urn:schemas-upnp-org:service:ContentDirectory:1", "/upnp/ContentDirectory"},
+		{"/upnp/ContentDirectory:1", "/upnp/ContentDirectory"},
+		{"/upnp/urn%3Aupnp-org%3AserviceId%3AConnectionManager", "/upnp/ConnectionManager"},
+		{"/upnp/urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1", "/upnp/X_MS_MediaReceiverRegistrar"},
+		{"/upnp/wp-login.php", "/upnp/*"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			assert.Equal(t, tc.expected, MetricsPath("/upnp/", tc.input))
+		})
+	}
+}
+
 func TestDeviceIcons(t *testing.T) {
 	baseURL, _ := url.Parse("http://127.0.0.1:8080")
 	_, err := deviceIcons(iconsFS, "nonexistent-dir", baseURL)
