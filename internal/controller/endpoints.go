@@ -2040,13 +2040,13 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 
 	dlna.AddHeader(w, r)
 
-	c.metrics.IncStreamingTorrents()
+	c.metrics.IncStreamRequests()
 	activeDownloader := c.downloader.Load()
 	if activeDownloader != nil {
 		activeDownloader.AddStreaming(ih)
 	}
 	defer func() {
-		c.metrics.DecStreamingTorrents()
+		c.metrics.DecStreamRequests()
 		if activeDownloader != nil {
 			activeDownloader.RemoveStreaming(ih)
 		}

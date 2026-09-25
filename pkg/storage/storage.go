@@ -66,6 +66,8 @@ type Client struct {
 	activeRanges map[activeRangeKey]activeRange
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
+	// counters accumulates storage events for Counters.
+	counters clientCounters
 	// closed is protected by mu and rejects new work before closeCh is signaled.
 	closed bool
 	// evictedPending holds pieces evicted, or found missing when marked
@@ -94,6 +96,65 @@ type Client struct {
 	torrents map[metainfo.Hash]*torrentState
 	// used is the total memory currently consumed by piece data.
 	used int64
+}
+
+// Counters holds cumulative storage event counts since the client was
+// created. Pieces removed because their torrent or the client closed are not
+// counted as evictions.
+type Counters struct {
+	// ActiveRangeEvictions counts pieces evicted despite active-range
+	// protection, as a last resort under memory pressure.
+	ActiveRangeEvictions int64
+	// BoundaryEvictions counts pieces evicted despite file-boundary
+	// protection.
+	BoundaryEvictions int64
+	// CompletionMisses counts pieces already gone when the torrent engine
+	// marked them complete.
+	CompletionMisses int64
+	// EvictedCompletePieces counts evicted pieces that were marked complete.
+	EvictedCompletePieces int64
+	// EvictedIncompleteBytes counts bytes already written into incomplete
+	// pieces when they were evicted, which must be downloaded again.
+	EvictedIncompleteBytes int64
+	// EvictedIncompletePieces counts evicted pieces not yet marked complete,
+	// including fully written pieces still awaiting their hash check.
+	EvictedIncompletePieces int64
+	// IncompleteHashes counts self-hashes refused because chunks were lost to
+	// eviction.
+	IncompleteHashes int64
+	// IncompleteReads counts reads refused because they covered bytes that
+	// were never written.
+	IncompleteReads int64
+	// ReadMisses counts reads of pieces that were no longer in memory.
+	ReadMisses int64
+}
+
+// Add returns the field-wise sum of c and other.
+func (c Counters) Add(other Counters) Counters {
+	return Counters{
+		ActiveRangeEvictions:    c.ActiveRangeEvictions + other.ActiveRangeEvictions,
+		BoundaryEvictions:       c.BoundaryEvictions + other.BoundaryEvictions,
+		CompletionMisses:        c.CompletionMisses + other.CompletionMisses,
+		EvictedCompletePieces:   c.EvictedCompletePieces + other.EvictedCompletePieces,
+		EvictedIncompleteBytes:  c.EvictedIncompleteBytes + other.EvictedIncompleteBytes,
+		EvictedIncompletePieces: c.EvictedIncompletePieces + other.EvictedIncompletePieces,
+		IncompleteHashes:        c.IncompleteHashes + other.IncompleteHashes,
+		IncompleteReads:         c.IncompleteReads + other.IncompleteReads,
+		ReadMisses:              c.ReadMisses + other.ReadMisses,
+	}
+}
+
+// clientCounters is the lock-free backing store for Counters.
+type clientCounters struct {
+	activeRangeEvictions    atomic.Int64
+	boundaryEvictions       atomic.Int64
+	completionMisses        atomic.Int64
+	evictedCompletePieces   atomic.Int64
+	evictedIncompleteBytes  atomic.Int64
+	evictedIncompletePieces atomic.Int64
+	incompleteHashes        atomic.Int64
+	incompleteReads         atomic.Int64
+	readMisses              atomic.Int64
 }
 
 // MemoryStats contains global storage memory statistics.
@@ -397,6 +458,21 @@ func (c *Client) EvictTo(targetBytes int64) (int64, error) {
 		return reclaimed, fmt.Errorf("%w: target=%d used=%d", ErrEvictionTargetNotReached, targetBytes, c.used)
 	}
 	return reclaimed, nil
+}
+
+// Counters returns a snapshot of the cumulative storage event counts.
+func (c *Client) Counters() Counters {
+	return Counters{
+		ActiveRangeEvictions:    c.counters.activeRangeEvictions.Load(),
+		BoundaryEvictions:       c.counters.boundaryEvictions.Load(),
+		CompletionMisses:        c.counters.completionMisses.Load(),
+		EvictedCompletePieces:   c.counters.evictedCompletePieces.Load(),
+		EvictedIncompleteBytes:  c.counters.evictedIncompleteBytes.Load(),
+		EvictedIncompletePieces: c.counters.evictedIncompletePieces.Load(),
+		IncompleteHashes:        c.counters.incompleteHashes.Load(),
+		IncompleteReads:         c.counters.incompleteReads.Load(),
+		ReadMisses:              c.counters.readMisses.Load(),
+	}
 }
 
 // MemoryStats returns current global memory usage statistics.
@@ -965,6 +1041,7 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 			}
 
 			c.queueEvictionLocked(key)
+			c.countEvictionLocked(pd, protection, inActiveRange, inFileBoundary)
 			size := int64(dataLen)
 			detached := c.evictPieceLocked(key, pd)
 			if reusable == nil && size == reuseSize {
@@ -982,6 +1059,26 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 		e = next
 	}
 	return reusable
+}
+
+// countEvictionLocked records an eviction in the storage counters. c.mu must
+// be held; it acquires pd.mu.
+func (c *Client) countEvictionLocked(pd *pieceData, protection evictionProtection, inActiveRange, inFileBoundary bool) {
+	pd.mu.RLock()
+	complete, written := pd.complete, pd.writtenBytes
+	pd.mu.RUnlock()
+	if complete {
+		c.counters.evictedCompletePieces.Add(1)
+	} else {
+		c.counters.evictedIncompletePieces.Add(1)
+		c.counters.evictedIncompleteBytes.Add(written)
+	}
+	switch {
+	case inActiveRange && protection == protectNone:
+		c.counters.activeRangeEvictions.Add(1)
+	case inFileBoundary && protection != protectActiveAndBoundaries:
+		c.counters.boundaryEvictions.Add(1)
+	}
 }
 
 // recordWrittenRange adds [start, end) to the piece's sorted, disjoint written
@@ -1223,6 +1320,7 @@ func (p *pieceImpl) reportMissingOnComplete() {
 	if current, exists := c.torrents[p.infoHash]; !exists || current != p.torrent {
 		return
 	}
+	c.counters.completionMisses.Add(1)
 	c.queueEvictionLocked(p.key())
 }
 
@@ -1249,6 +1347,9 @@ func (p *pieceImpl) MarkNotComplete() error {
 func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 	pd, err := p.getPieceData()
 	if err != nil {
+		if errors.Is(err, ErrPieceNotAvailable) {
+			p.client.counters.readMisses.Add(1)
+		}
 		return 0, ErrPieceNotAvailable
 	}
 
@@ -1257,6 +1358,7 @@ func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 	// Check if piece data is available in memory.
 	if pd.data == nil {
 		pd.mu.RUnlock()
+		p.client.counters.readMisses.Add(1)
 		return 0, ErrPieceNotAvailable
 	}
 
@@ -1287,6 +1389,7 @@ func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 	// so no caller mistakes them for piece data.
 	if !pd.rangeWritten(off, end) {
 		pd.mu.RUnlock()
+		p.client.counters.incompleteReads.Add(1)
 		return 0, ErrPieceIncomplete
 	}
 
@@ -1320,6 +1423,7 @@ func (p *pieceImpl) SelfHash() (metainfo.Hash, error) {
 	// data. anacrolix bans the sole contributor of a piece that fails its
 	// hash without a storage error, so report the gap as one instead.
 	if pd.writtenBytes < int64(len(pd.data)) {
+		p.client.counters.incompleteHashes.Add(1)
 		return metainfo.Hash{}, ErrPieceIncomplete
 	}
 

@@ -62,6 +62,18 @@ const (
 	FileStorage
 )
 
+// String returns "memory" or "file", or "unknown" for an invalid mode.
+func (m StorageMode) String() string {
+	switch m {
+	case MemoryStorage:
+		return "memory"
+	case FileStorage:
+		return "file"
+	default:
+		return "unknown"
+	}
+}
+
 // ReleaseFunc returns an acquired reader to the pool. It is safe to call more
 // than once.
 type ReleaseFunc func()
@@ -114,6 +126,11 @@ type Config struct {
 	// the remaining fraction receives PiecePriorityHigh. Values above 1 are clamped to 1.
 	// Defaults to 0.3 (30 % get Now, 70 % get High).
 	PriorityNowFraction float64
+	// ReadObserver, when set, is called after every Read of a playback reader
+	// with the reader's storage mode and how long the Read took, including
+	// any wait for torrent data. Preload reads are not reported. It runs on
+	// the reading goroutine, so it must return quickly.
+	ReadObserver func(mode StorageMode, duration time.Duration)
 	// Registry tracks active read ranges for piece eviction protection.
 	// Nil disables active-range tracking.
 	Registry ActiveRangeRegistry
@@ -351,12 +368,18 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 // for concurrent use.
 type seekNotifyingReader struct {
 	io.ReadSeeker
+	// observeRead, when set, receives the duration of each Read.
+	observeRead func(time.Duration)
 	onSeek      func(int64)
 	seekPending bool
 	seekTarget  int64
 }
 
 func (r *seekNotifyingReader) Read(p []byte) (int, error) {
+	if r.observeRead != nil {
+		start := time.Now()
+		defer func() { r.observeRead(time.Since(start)) }()
+	}
 	if r.seekPending {
 		r.seekPending = false
 		if r.onSeek != nil {
@@ -629,8 +652,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 			once.Do(func() { p.release(infoHash, file.Path(), sr.readerID) })
 		}
 
-		sectionReader := io.NewSectionReader(sr.wrapper, 0, file.Length())
-		return &seekNotifyingReader{ReadSeeker: sectionReader, onSeek: sr.wrapper.notifyOffsetChange}, release, nil
+		return p.newReadSeeker(sr.wrapper, file.Length(), mode, isPreload), release, nil
 	}
 
 	// No idle reader found for reuse. All existing readers for this file are active.
@@ -706,8 +728,17 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		once.Do(func() { p.release(infoHash, file.Path(), readerID) })
 	}
 
-	sectionReader := io.NewSectionReader(wrapper, 0, file.Length())
-	return &seekNotifyingReader{ReadSeeker: sectionReader, onSeek: wrapper.notifyOffsetChange}, release, nil
+	return p.newReadSeeker(wrapper, file.Length(), mode, isPreload), release, nil
+}
+
+// newReadSeeker returns the bounded view of wrapper handed to callers. Reads
+// of playback readers are timed for Config.ReadObserver.
+func (p *Pool) newReadSeeker(wrapper *readAtWrapper, length int64, mode StorageMode, isPreload bool) io.ReadSeeker {
+	r := &seekNotifyingReader{ReadSeeker: io.NewSectionReader(wrapper, 0, length), onSeek: wrapper.notifyOffsetChange}
+	if observe := p.cfg.ReadObserver; observe != nil && !isPreload {
+		r.observeRead = func(d time.Duration) { observe(mode, d) }
+	}
+	return r
 }
 
 func preloadReadaheadFunc(end int64) torrent.ReadaheadFunc {

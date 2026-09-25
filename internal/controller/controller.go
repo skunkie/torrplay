@@ -115,6 +115,7 @@ type Controller struct {
 	dlna                 *dlna.Service
 	dlnaPath             string
 	downloader           atomic.Pointer[downloader.Downloader]
+	engineTotals         engineTotals
 	httpAddr             string
 	httpClient           *httpclient.Client
 	httpServer           *httpserver.Server
@@ -255,6 +256,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	c.pieceCompletion = pc
 
 	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger.Load(), c.dlnaPlaybackToken)
+	c.metrics.SetEngineStatsSource(c.engineStats)
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.
@@ -385,9 +387,6 @@ func (c *Controller) buildRouter() *chi.Mux {
 	// Posters routes.
 	postersHandler := http.StripPrefix(c.postersPath, c.images)
 	router.Mount(c.postersPath, postersHandler)
-
-	// Metrics routes.
-	router.Method(http.MethodGet, "/metrics", c.metrics.Handler())
 
 	// Swagger routes.
 	router.Get("/swagger/openapi.json", func(w http.ResponseWriter, _ *http.Request) {
@@ -992,6 +991,9 @@ func (c *Controller) configureTorrentClient() error {
 		return fmt.Errorf("failed to initiate torrent client: %w", err)
 	}
 
+	observeFileRead := c.metrics.StreamReadObserver(stream.FileStorage.String())
+	observeMemoryRead := c.metrics.StreamReadObserver(stream.MemoryStorage.String())
+
 	// Create new stream pool.
 	// Registry: storageClient protects actively-read pieces from eviction
 	// by registering readahead windows with the storage layer.
@@ -1009,6 +1011,13 @@ func (c *Controller) configureTorrentClient() error {
 			}
 			return float64(stats.UsedBytes) / float64(stats.LimitBytes)
 		},
+		ReadObserver: func(mode stream.StorageMode, duration time.Duration) {
+			if mode == stream.FileStorage {
+				observeFileRead(duration)
+				return
+			}
+			observeMemoryRead(duration)
+		},
 		Registry: storageClient,
 	})
 	readaheadBudget := *currentSettings.MaxMemory * int64(calcReadaheadPct(*currentSettings.MaxMemory)) / 100
@@ -1020,8 +1029,11 @@ func (c *Controller) configureTorrentClient() error {
 	// Evicted pieces must stop counting as downloaded, or a torrent read in
 	// full looks complete to the client, which then drops its peers.
 	storageClient.SetEvictionHandler(memstorage.ClientEvictionHandler(client))
+	// The replaced client and storage are closed, so their counters are final.
+	retired := engineTotalsOf(oldClient, oldStorageClient)
 
 	c.mu.Lock()
+	c.engineTotals.add(retired)
 	c.client = client
 	c.storageClient.Store(storageClient)
 	c.streamPool.Store(pool)

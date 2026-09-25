@@ -700,6 +700,25 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /metrics:
+    get:
+      tags:
+        - System
+      summary: Get Prometheus metrics.
+      description: Returns process, HTTP, and streaming engine metrics in the Prometheus text exposition format for scraping.
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Metrics retrieved successfully.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   # qBittorrent Compatibility Endpoints
   /api/v2/torrents/add:
     post:

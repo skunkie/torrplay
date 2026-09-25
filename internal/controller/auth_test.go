@@ -613,3 +613,70 @@ func TestBasicAuthWWWAuthenticateSuppression(t *testing.T) {
 		assert.Equal(t, `Bearer realm="TorrPlay"`, rr.Header().Get("WWW-Authenticate"))
 	})
 }
+
+func TestMetricsEndpointRequiresAuthentication(t *testing.T) {
+	scrape := func(t *testing.T, controller *Controller, setAuth func(*http.Request)) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
+		if setAuth != nil {
+			setAuth(req)
+		}
+		rr := httptest.NewRecorder()
+		controller.router.ServeHTTP(rr, req)
+		return rr
+	}
+	bearer := func(token string) func(*http.Request) {
+		return func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+token) }
+	}
+
+	t.Run("auth disabled", func(t *testing.T) {
+		controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+			s.Auth = &api.Auth{Enabled: new(false)}
+		})
+		defer cleanup()
+
+		rr := scrape(t, controller, nil)
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Contains(t, rr.Body.String(), "torrplay_storage_memory_limit_bytes")
+	})
+
+	t.Run("basic auth", func(t *testing.T) {
+		controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+			s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Basic), Username: new("admin"), Password: new("password")}
+		})
+		defer cleanup()
+
+		rr := scrape(t, controller, nil)
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+		assert.Equal(t, `Basic realm="TorrPlay"`, rr.Header().Get("WWW-Authenticate"))
+		assert.NotContains(t, rr.Body.String(), "torrplay_")
+
+		rr = scrape(t, controller, func(r *http.Request) { r.SetBasicAuth("admin", "wrong") })
+		assert.Equal(t, http.StatusUnauthorized, rr.Code)
+
+		rr = scrape(t, controller, func(r *http.Request) { r.SetBasicAuth("admin", "password") })
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Contains(t, rr.Body.String(), "torrplay_storage_memory_limit_bytes")
+	})
+
+	t.Run("bearer auth", func(t *testing.T) {
+		controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+			s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Bearer), Username: new("admin"), Password: new("password")}
+		})
+		defer cleanup()
+		secret, err := controller.db.GetJWTSecret()
+		require.NoError(t, err)
+		token, err := auth.GenerateToken("testuser", []byte(secret))
+		require.NoError(t, err)
+		playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
+		require.NoError(t, err)
+
+		assert.Equal(t, http.StatusUnauthorized, scrape(t, controller, nil).Code)
+		assert.Equal(t, http.StatusUnauthorized, scrape(t, controller, bearer(playbackToken)).Code,
+			"playback-scoped tokens must not grant metrics access")
+
+		rr := scrape(t, controller, bearer(token))
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Contains(t, rr.Body.String(), "torrplay_storage_memory_limit_bytes")
+	})
+}
