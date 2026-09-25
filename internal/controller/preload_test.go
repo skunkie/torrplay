@@ -138,7 +138,7 @@ func TestTorrentPreloadEndpoints(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
-func TestTorrentPreload_DbTorrentActivation(t *testing.T) {
+func TestTorrentPreloadActivatesStoredTorrent(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
@@ -186,38 +186,40 @@ func TestTorrentPreload_DbTorrentActivation(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
-func TestPreloadTaskProgressBytesNeverDecreases(t *testing.T) {
-	task := &preloadTask{targetBytes: 1000}
+func TestPreloadTask_ProgressBytes(t *testing.T) {
+	t.Run("never decreases", func(t *testing.T) {
+		task := &preloadTask{targetBytes: 1000}
 
-	task.bytesRead.Store(600)
-	assert.Equal(t, int64(600), task.progressBytes())
-	task.bytesRead.Store(800)
-	assert.Equal(t, int64(800), task.progressBytes())
-	task.bytesRead.Store(1200)
-	assert.Equal(t, int64(1000), task.progressBytes())
-}
+		task.bytesRead.Store(600)
+		assert.Equal(t, int64(600), task.progressBytes())
+		task.bytesRead.Store(800)
+		assert.Equal(t, int64(800), task.progressBytes())
+		task.bytesRead.Store(1200)
+		assert.Equal(t, int64(1000), task.progressBytes())
+	})
 
-func TestPreloadTaskProgressBytesCountsCompletedPieces(t *testing.T) {
-	completed := int64(0)
-	task := &preloadTask{targetBytes: 1000, completedBytes: func() int64 { return completed }}
+	t.Run("counts completed pieces", func(t *testing.T) {
+		completed := int64(0)
+		task := &preloadTask{targetBytes: 1000, completedBytes: func() int64 { return completed }}
 
-	task.bytesRead.Store(100)
-	assert.Equal(t, int64(100), task.progressBytes(), "no piece complete yet")
-	completed = 700
-	assert.Equal(t, int64(700), task.progressBytes(), "complete pieces count before the reader reaches them")
-	completed = 1200
-	assert.Equal(t, int64(1000), task.progressBytes())
-}
+		task.bytesRead.Store(100)
+		assert.Equal(t, int64(100), task.progressBytes(), "no piece complete yet")
+		completed = 700
+		assert.Equal(t, int64(700), task.progressBytes(), "complete pieces count before the reader reaches them")
+		completed = 1200
+		assert.Equal(t, int64(1000), task.progressBytes())
+	})
 
-func TestPreloadTaskProgressBytesHoldsHighWaterMark(t *testing.T) {
-	completed := int64(700)
-	task := &preloadTask{targetBytes: 1000, completedBytes: func() int64 { return completed }}
+	t.Run("holds high-water mark", func(t *testing.T) {
+		completed := int64(700)
+		task := &preloadTask{targetBytes: 1000, completedBytes: func() int64 { return completed }}
 
-	assert.Equal(t, int64(700), task.progressBytes())
-	completed = 200
-	assert.Equal(t, int64(700), task.progressBytes(), "evicted pieces must not lower reported progress")
-	task.bytesRead.Store(900)
-	assert.Equal(t, int64(900), task.progressBytes())
+		assert.Equal(t, int64(700), task.progressBytes())
+		completed = 200
+		assert.Equal(t, int64(700), task.progressBytes(), "evicted pieces must not lower reported progress")
+		task.bytesRead.Store(900)
+		assert.Equal(t, int64(900), task.progressBytes())
+	})
 }
 
 func TestCompletedRangeBytes(t *testing.T) {
@@ -398,9 +400,9 @@ func TestFailedClientReconfigureKeepsTorrentClientUnavailable(t *testing.T) {
 
 	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
 	failNext.Store(true)
-	// A memory limit change rebuilds the torrent client.
+	// A torrent client setting change rebuilds the torrent client.
 	rr := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"max_memory":134217728}`))
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/settings", strings.NewReader(`{"torrent_client":{"seed":true}}`))
 	req.Header.Set("Content-Type", "application/json")
 	ctrl.router.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
@@ -1619,7 +1621,8 @@ func TestFinishPreload(t *testing.T) {
 	})
 }
 
-func TestReadPreloadRangeRequiresEntireRange(t *testing.T) {
+// TestReadPreloadRange verifies that readPreloadRange requires the entire range.
+func TestReadPreloadRange(t *testing.T) {
 	var bytesRead atomic.Int64
 	err := readPreloadRange(context.Background(), bytes.NewReader([]byte("data")), 0, 8, &bytesRead)
 

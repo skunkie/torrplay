@@ -1020,8 +1020,7 @@ func (c *Controller) configureTorrentClient() error {
 		},
 		Registry: storageClient,
 	})
-	readaheadBudget := *currentSettings.MaxMemory * int64(calcReadaheadPct(*currentSettings.MaxMemory)) / 100
-	if !pool.SetReadaheadBudget(readaheadBudget) {
+	if !pool.SetReadaheadBudget(readaheadBudget(*currentSettings.MaxMemory)) {
 		pool.Close()
 		_ = client.Close()
 		return errors.New("failed to set initial stream readahead budget")

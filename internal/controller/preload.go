@@ -1163,6 +1163,38 @@ func (c *Controller) evictReadyPreloadLocked(except *preloadTask) bool {
 	return true
 }
 
+// releaseOnePreloadReservationLocked gives up one preload memory reservation
+// so the stream readahead budget can shrink. It releases the cheapest first:
+// a ready preload nobody is playing, then a running preload, and last the
+// lease a playback session holds. It returns false when no reservation is
+// left. The caller must hold preloadsMu.
+func (c *Controller) releaseOnePreloadReservationLocked() bool {
+	if c.evictReadyPreloadLocked(nil) {
+		return true
+	}
+	var running *preloadTask
+	c.preloads.Range(func(_, val any) bool {
+		if p, ok := val.(*preloadTask); ok && p != nil && p.active && p.releaseBudget != nil {
+			running = p
+			return false
+		}
+		return true
+	})
+	if running != nil {
+		c.preloads.CompareAndDelete(running.infoHash, running)
+		c.releasePreloadLocked(running, false)
+		c.snapshotPreloadLocked(running, api.Superseded)
+		return true
+	}
+	for _, session := range c.playbackSessions {
+		if session.lease != nil {
+			c.releasePlaybackLeaseLocked(session)
+			return true
+		}
+	}
+	return false
+}
+
 // preparePreloadsForPlaybackLocked retires the preload for the file that is
 // about to play, stops unrelated workers that are still downloading, and
 // releases the cache held by ready memory preloads. Stopped workers are

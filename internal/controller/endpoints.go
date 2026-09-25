@@ -867,7 +867,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	c.settingsUpdateMu.Lock()
 	defer c.settingsUpdateMu.Unlock()
 
-	var reconfigureDLNA, reconfigureLogger, reconfigureProfiler, reconfigureTorrentClient, restartHTTPServer, saveSettings bool
+	var reconfigureDLNA, reconfigureLogger, reconfigureProfiler, reconfigureTorrentClient, resizeMemory, restartHTTPServer, saveSettings bool
 
 	dbOldSettings, err := c.db.GetSettings()
 	if err != nil {
@@ -1062,7 +1062,8 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.MaxMemory, newSettings.MaxMemory) {
-		reconfigureTorrentClient = true
+		// Applied in place unless the torrent client is rebuilt anyway.
+		resizeMemory = true
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.TorrentClient, newSettings.TorrentClient) {
@@ -1177,9 +1178,18 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			fail(fmt.Sprintf("failed to reconfigure torrent client, %v", err))
 			return
 		}
-	} else if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
-		c.applyDownloaderSettings()
-		applied.downloader = true
+	} else {
+		if resizeMemory {
+			applied.memoryLimit = true
+			if err := c.applyMemoryLimit(); err != nil {
+				fail(fmt.Sprintf("failed to resize memory storage, %v", err))
+				return
+			}
+		}
+		if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
+			c.applyDownloaderSettings()
+			applied.downloader = true
+		}
 	}
 
 	if reconfigureDLNA {
@@ -1231,6 +1241,7 @@ type appliedSettings struct {
 	downloader      bool
 	logStoreSize    bool
 	logger          bool
+	memoryLimit     bool
 	pieceCompletion bool
 	torrentClient   bool
 }
@@ -1272,6 +1283,36 @@ func (c *Controller) applyLoggerSettings() {
 	c.dlna.SetLogger(newLogger)
 }
 
+// applyMemoryLimit resizes memory storage and the stream readahead budget to
+// the current settings without replacing the torrent client, so streams and
+// cached pieces survive. When preload reservations exceed a smaller budget,
+// they are released one at a time until the budget fits.
+func (c *Controller) applyMemoryLimit() error {
+	c.torrentConfigMu.Lock()
+	defer c.torrentConfigMu.Unlock()
+
+	storageClient := c.storageClient.Load()
+	pool := c.streamPool.Load()
+	if storageClient == nil || pool == nil || c.torrentClientUnavailable.Load() {
+		return errors.New("torrent client is unavailable")
+	}
+	maxMemory := *c.settings.Load().MaxMemory
+	// Shrink the protected readahead first so eviction can reclaim what it
+	// no longer covers.
+	budget := readaheadBudget(maxMemory)
+	// Hold preloadsMu so dispatch cannot reserve released memory again.
+	c.preloadsMu.Lock()
+	for !pool.SetReadaheadBudget(budget) {
+		if !c.releaseOnePreloadReservationLocked() {
+			c.preloadsMu.Unlock()
+			return errors.New("preload reservations exceed the new readahead budget")
+		}
+	}
+	c.dispatchPreloadsLocked()
+	c.preloadsMu.Unlock()
+	return storageClient.SetMaxMemory(maxMemory)
+}
+
 // rollbackSettings restores the previous settings in memory and in the
 // database after a failed update, then reapplies them to the components the
 // update changed. The logger and piece completion database are restored before
@@ -1293,6 +1334,11 @@ func (c *Controller) rollbackSettings(old *api.Settings, applied appliedSettings
 	}
 	if applied.downloader {
 		c.applyDownloaderSettings()
+	}
+	if applied.memoryLimit {
+		if err := c.applyMemoryLimit(); err != nil {
+			c.logger.Load().Error("failed to restore memory limit", "err", err)
+		}
 	}
 	if applied.logger {
 		c.applyLoggerSettings()
@@ -1897,6 +1943,11 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 		return nil, fmt.Errorf("failed to parse magnet URI: %w", err)
 	}
 	return c.loadTorrentSpec(spec, storageType)
+}
+
+// readaheadBudget returns the streaming readahead budget for a memory limit.
+func readaheadBudget(maxMemory int64) int64 {
+	return maxMemory * int64(calcReadaheadPct(maxMemory)) / 100
 }
 
 // calcReadaheadPct computes the percentage of maxMemory allocated for streaming readahead.
