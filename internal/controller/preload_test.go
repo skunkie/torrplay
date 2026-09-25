@@ -15,6 +15,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -497,6 +500,59 @@ func TestStreamRejectedWhileTorrentClientUnavailable(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
 }
 
+// TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock verifies that
+// playback lets preload workers it cancelled exit before acquiring its
+// reader, and waits without holding preloadsMu, which exiting workers take.
+func TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+	ih := to.InfoHash()
+	pool := ctrl.streamPool.Load()
+
+	// A cancelled preload worker that has not exited yet.
+	exiting := &preloadTask{active: true, cancel: func() {}, done: make(chan struct{}), infoHash: metainfo.Hash{9}}
+	// Let the worker exit even when an assertion fails, or controller
+	// cleanup would wait for it forever.
+	defer exiting.doneOnce.Do(func() { close(exiting.done) })
+	ctrl.preloadsMu.Lock()
+	ctrl.preloadWorkers = append(ctrl.preloadWorkers, exiting)
+	ctrl.preloadsMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/stream/%s?index=0", ih), http.NoBody).WithContext(ctx)
+		ctrl.router.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+
+	// The request opens its playback session, then waits with preloadsMu
+	// free and without a reader.
+	require.Eventually(t, func() bool {
+		ctrl.preloadsMu.Lock()
+		defer ctrl.preloadsMu.Unlock()
+		return ctrl.preloadPlaybackCount == 1
+	}, 5*time.Second, time.Millisecond, "playback session was not opened")
+	require.Never(t, func() bool { return pool.HasReaders(ih) }, 100*time.Millisecond, time.Millisecond,
+		"playback acquired its reader before the cancelled worker exited")
+
+	// Once the worker exits, playback acquires its reader.
+	exiting.doneOnce.Do(func() { close(exiting.done) })
+	ctrl.finishPreload(exiting, false, false)
+	require.Eventually(t, func() bool { return pool.HasReaders(ih) }, 5*time.Second, time.Millisecond,
+		"playback did not acquire its reader after the worker exited")
+
+	cancel()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stream request did not end after its context was cancelled")
+	}
+}
+
 func TestTorrentActivityReadsDoNotRaceClientReconfigure(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
@@ -781,7 +837,7 @@ func TestPreloadSchedulerLimitsConcurrencyAndReleasesCapacity(t *testing.T) {
 	default:
 	}
 	ctrl.preloadsMu.Lock()
-	assert.Equal(t, maxConcurrentPreloads, ctrl.preloadActiveTasks)
+	assert.Len(t, ctrl.preloadWorkers, maxConcurrentPreloads)
 	ctrl.preloadsMu.Unlock()
 
 	close(first.complete)
@@ -804,7 +860,7 @@ func TestPreloadSchedulerLimitsConcurrencyAndReleasesCapacity(t *testing.T) {
 	assert.Equal(t, int32(1), first.budgetReleases.Load(), "clearing protection must return the reservation")
 	ctrl.cancelAllPreloads()
 	ctrl.preloadsMu.Lock()
-	assert.Zero(t, ctrl.preloadActiveTasks)
+	assert.Empty(t, ctrl.preloadWorkers)
 	ctrl.preloadsMu.Unlock()
 }
 
@@ -847,7 +903,7 @@ func TestPreloadSchedulerResumesAfterPlayback(t *testing.T) {
 	}, time.Second, time.Millisecond)
 }
 
-func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing.T) {
+func TestPreparePreloadsForPlaybackCancelsWorkersAndReleasesReadyMemory(t *testing.T) {
 	ctrl := &Controller{preloadPlaybackCount: 1}
 
 	readyCtx, readyCancel := context.WithCancel(context.Background())
@@ -887,7 +943,7 @@ func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing
 		protected:   true,
 	}
 	active.bytesRead.Store(1024)
-	ctrl.preloadActiveTasks = 1
+	ctrl.preloadWorkers = []*preloadTask{active}
 	ctrl.preloads.Store(active.infoHash, active)
 	go func() {
 		<-activeCtx.Done()
@@ -902,7 +958,7 @@ func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing
 	assert.False(t, ok)
 	_, ok = ctrl.preloads.Load(active.infoHash)
 	assert.False(t, ok)
-	assert.Zero(t, ctrl.preloadActiveTasks)
+	assert.Len(t, ctrl.preloadWorkers, 1, "the cancelled worker keeps its slot until it exits")
 	assert.Error(t, activeCtx.Err())
 	assert.Equal(t, int32(1), readyBudgetReleases.Load())
 	assert.Equal(t, int32(1), readyProtectionClears.Load())
@@ -918,6 +974,11 @@ func TestPreparePreloadsForPlaybackStopsWorkersAndReleasesReadyMemory(t *testing
 	assert.Equal(t, int64(1024), activeSnapshot.completedBytes)
 	assert.Equal(t, active.targetBytes, activeSnapshot.targetBytes)
 	assert.Equal(t, float32(0.25), activeSnapshot.progress)
+
+	// The worker frees its slot when it exits.
+	<-active.done
+	ctrl.finishPreload(active, false, false)
+	assert.Empty(t, ctrl.preloadWorkers)
 }
 
 func TestPreparePreloadsForPlaybackRequeuesInterruptedWorker(t *testing.T) {
@@ -953,7 +1014,7 @@ func TestPreparePreloadsForPlaybackRequeuesInterruptedWorker(t *testing.T) {
 	if len(ctrl.preloadQueue) > 0 {
 		queueHead = ctrl.preloadQueue[0]
 	}
-	activeTasks := ctrl.preloadActiveTasks
+	activeTasks := len(ctrl.preloadWorkers)
 	ctrl.preloadsMu.Unlock()
 	defer func() {
 		ctrl.preloadsMu.Lock()
@@ -969,14 +1030,21 @@ func TestPreparePreloadsForPlaybackRequeuesInterruptedWorker(t *testing.T) {
 	assert.True(t, queued)
 	assert.False(t, active)
 	assert.Same(t, replacement, queueHead)
-	assert.Zero(t, activeTasks)
+	assert.Equal(t, 1, activeTasks, "the cancelled worker keeps its slot until it exits")
 	assert.Equal(t, int64(1234), replacement.progressBytes(), "re-queued progress must not fall back")
 
+	// Playback cancels the worker without waiting; it exits on its own and
+	// frees its slot.
 	assert.ErrorIs(t, interrupted.ctx.Err(), context.Canceled)
+	require.Eventually(t, func() bool {
+		ctrl.preloadsMu.Lock()
+		defer ctrl.preloadsMu.Unlock()
+		return len(ctrl.preloadWorkers) == 0
+	}, 10*time.Second, time.Millisecond, "interrupted worker did not exit")
 	select {
 	case <-interrupted.done:
 	default:
-		t.Fatal("interrupted worker was not stopped before playback")
+		t.Fatal("interrupted worker exited without closing done")
 	}
 	_, snapshotted := ctrl.preloadSnapshots.Load(ih)
 	assert.False(t, snapshotted, "re-queued preload must not report Superseded")
@@ -1078,6 +1146,205 @@ func TestCancelPreloadReleasesPlaybackLease(t *testing.T) {
 	ctrl.closePlaybackSessionLocked(session)
 	ctrl.preloadsMu.Unlock()
 	assert.Equal(t, int32(1), budgetReleases.Load(), "a released lease must not be released twice")
+}
+
+// TestController_CancelPreload verifies that cancelling a running preload
+// releases its memory at once without waiting for the worker, which exits on
+// its own and then frees its slot.
+func TestController_CancelPreload(t *testing.T) {
+	ctrl := &Controller{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var budgetReleases atomic.Int32
+	running := &preloadTask{
+		active:        true,
+		cancel:        cancel,
+		ctx:           ctx,
+		done:          make(chan struct{}),
+		infoHash:      metainfo.Hash{1},
+		releaseBudget: func() { budgetReleases.Add(1) },
+	}
+	ctrl.preloadWorkers = []*preloadTask{running}
+	ctrl.preloads.Store(running.infoHash, running)
+
+	returned := make(chan struct{})
+	go func() {
+		ctrl.cancelPreload(running.infoHash)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelPreload waited for the running worker")
+	}
+
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	assert.Equal(t, int32(1), budgetReleases.Load())
+	assert.Len(t, ctrl.preloadWorkers, 1, "the worker keeps its slot until it exits")
+
+	running.doneOnce.Do(func() { close(running.done) })
+	ctrl.finishPreload(running, false, false)
+	assert.Empty(t, ctrl.preloadWorkers)
+	assert.Equal(t, int32(1), budgetReleases.Load(), "the worker's exit must not release the budget twice")
+}
+
+// TestController_CancelAllPreloads verifies that cancelAllPreloads waits for
+// every running worker to exit, including one cancelled earlier, and does so
+// without holding preloadsMu, which the exiting workers take.
+func TestController_CancelAllPreloads(t *testing.T) {
+	ctrl := &Controller{}
+	newWorker := func(hash metainfo.Hash) *preloadTask {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		return &preloadTask{active: true, cancel: cancel, ctx: ctx, done: make(chan struct{}), infoHash: hash}
+	}
+	// exit ends a worker the way runPreload does: it closes done, then takes
+	// preloadsMu in finishPreload.
+	exit := func(worker *preloadTask) {
+		worker.doneOnce.Do(func() { close(worker.done) })
+		ctrl.finishPreload(worker, false, false)
+	}
+	registered := newWorker(metainfo.Hash{1})
+	cancelled := newWorker(metainfo.Hash{2})
+	ctrl.preloadWorkers = []*preloadTask{registered, cancelled}
+	ctrl.preloads.Store(registered.infoHash, registered)
+	ctrl.preloads.Store(cancelled.infoHash, cancelled)
+	ctrl.cancelPreload(cancelled.infoHash)
+
+	returned := make(chan struct{})
+	go func() {
+		ctrl.cancelAllPreloads()
+		close(returned)
+	}()
+	require.Eventually(t, func() bool { return registered.ctx.Err() != nil }, 5*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool {
+		if !ctrl.preloadsMu.TryLock() {
+			return false
+		}
+		ctrl.preloadsMu.Unlock()
+		return true
+	}, 5*time.Second, time.Millisecond, "cancelAllPreloads held preloadsMu while waiting")
+
+	exit(registered)
+	require.Never(t, func() bool {
+		select {
+		case <-returned:
+			return true
+		default:
+			return false
+		}
+	}, 50*time.Millisecond, time.Millisecond, "cancelAllPreloads returned before the earlier cancelled worker exited")
+
+	exit(cancelled)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelAllPreloads did not return after every worker exited")
+	}
+	assert.Empty(t, ctrl.preloadWorkers)
+}
+
+func TestWaitForPreloadWorkers(t *testing.T) {
+	t.Run("returns once every worker exits", func(t *testing.T) {
+		first, second := make(chan struct{}), make(chan struct{})
+		returned := make(chan struct{})
+		go func() {
+			waitForPreloadWorkers(context.Background(), []<-chan struct{}{first, second})
+			close(returned)
+		}()
+
+		close(first)
+		require.Never(t, func() bool {
+			select {
+			case <-returned:
+				return true
+			default:
+				return false
+			}
+		}, 50*time.Millisecond, time.Millisecond, "returned before every worker exited")
+		close(second)
+		require.Eventually(t, func() bool {
+			select {
+			case <-returned:
+				return true
+			default:
+				return false
+			}
+		}, 5*time.Second, time.Millisecond)
+	})
+
+	t.Run("returns when the context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		returned := make(chan struct{})
+		go func() {
+			waitForPreloadWorkers(ctx, []<-chan struct{}{make(chan struct{})})
+			close(returned)
+		}()
+
+		select {
+		case <-returned:
+		case <-time.After(time.Second):
+			t.Fatal("waited past the end of the context")
+		}
+	})
+}
+
+// TestController_GetPreloadStatus verifies how the status of a running
+// preload is reported. Its progress reads piece states under the torrent
+// client lock, so it must be computed without holding preloadsMu.
+func TestController_GetPreloadStatus(t *testing.T) {
+	newRunning := func(completedBytes func() int64) *preloadTask {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		return &preloadTask{
+			cancel:         cancel,
+			completedBytes: completedBytes,
+			ctx:            ctx,
+			fileIndex:      2,
+			filePath:       "movie.mkv",
+			infoHash:       metainfo.Hash{1},
+			targetBytes:    2048,
+		}
+	}
+
+	t.Run("computes progress without holding preloadsMu", func(t *testing.T) {
+		ctrl := &Controller{}
+		var lockHeld atomic.Bool
+		running := newRunning(func() int64 {
+			if ctrl.preloadsMu.TryLock() {
+				ctrl.preloadsMu.Unlock()
+			} else {
+				lockHeld.Store(true)
+			}
+			return 512
+		})
+		ctrl.preloads.Store(running.infoHash, running)
+
+		status := ctrl.getPreloadStatus(running.infoHash)
+
+		assert.False(t, lockHeld.Load(), "progress was computed while holding preloadsMu")
+		assert.Equal(t, api.Preloading, status.Status)
+		assert.Equal(t, int64(512), status.CompletedBytes)
+		assert.Equal(t, int64(2048), status.TargetBytes)
+		assert.InDelta(t, 0.25, status.Progress, 0.001)
+		assert.Equal(t, 2, status.FileIndex)
+	})
+
+	t.Run("reports the current state when the preload ends during the poll", func(t *testing.T) {
+		ctrl := &Controller{}
+		var running *preloadTask
+		running = newRunning(func() int64 {
+			ctrl.cancelPreload(running.infoHash)
+			return 512
+		})
+		ctrl.preloads.Store(running.infoHash, running)
+
+		status := ctrl.getPreloadStatus(running.infoHash)
+
+		assert.Equal(t, api.Idle, status.Status)
+		assert.Zero(t, status.CompletedBytes)
+	})
 }
 
 func TestDroppedTorrentDoesNotReportFailedPreload(t *testing.T) {
@@ -1364,7 +1631,7 @@ func TestPreloadSchedulerSkipsCancelledQueuedTask(t *testing.T) {
 	ctrl.cancelPreload(queued.infoHash)
 	ctrl.preloadsMu.Lock()
 	ctrl.dispatchPreloadsLocked()
-	assert.Zero(t, ctrl.preloadActiveTasks)
+	assert.Empty(t, ctrl.preloadWorkers)
 	assert.Empty(t, ctrl.preloadQueue)
 	ctrl.preloadsMu.Unlock()
 }
@@ -1536,7 +1803,7 @@ func TestPreloadSchedulerDropsUnreservableTask(t *testing.T) {
 	}
 	ctrl.dispatchPreloadsLocked()
 	assert.Empty(t, ctrl.preloadQueue, "an unreservable task must not block the queue")
-	assert.Equal(t, 1, ctrl.preloadActiveTasks)
+	assert.Len(t, ctrl.preloadWorkers, 1)
 	ctrl.preloadsMu.Unlock()
 
 	select {
@@ -1740,6 +2007,71 @@ func TestDeleteTorrentClearsCompletedPreload(t *testing.T) {
 	assert.False(t, exists)
 	_, exists = ctrl.preloadSnapshots.Load(ih)
 	assert.False(t, exists)
+}
+
+// TestDeleteTorrentWithRunningPreloadRemovesFileStorage verifies that deleting
+// a torrent cancels its running preload without waiting for the worker, closes
+// the torrent, and removes its file storage.
+func TestDeleteTorrentWithRunningPreloadRemovesFileStorage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("deleting a torrent keeps its file storage on Windows")
+	}
+	storageDir := t.TempDir()
+	ctrl, cleanup := newTestController(t, func(c *Controller) { c.settings.Load().FileStoragePath = &storageDir })
+	defer cleanup()
+
+	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+	ih := to.InfoHash()
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{Torrent: api.Torrent{
+		Hash:    ih,
+		Magnet:  utils.MagnetURIFromHash(ih),
+		Name:    to.Name(),
+		Storage: utils.Ptr(api.File),
+	}}))
+	torrentDir := filepath.Join(storageDir, to.Name())
+	require.NoError(t, os.MkdirAll(torrentDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(torrentDir, "piece"), []byte("data"), 0o600))
+
+	// The torrent has no peers, so the dispatched worker blocks reading.
+	preload := ctrl.startPreload(to, to.Files()[0], 0)
+	require.NotNil(t, preload)
+	ctrl.preloadsMu.Lock()
+	running := slices.Contains(ctrl.preloadWorkers, preload)
+	ctrl.preloadsMu.Unlock()
+	require.True(t, running, "preload must be running before the delete")
+
+	deleted := make(chan error, 1)
+	go func() {
+		ctrl.mu.Lock()
+		defer ctrl.mu.Unlock()
+		deleted <- ctrl.deleteTorrentLocked(ih)
+	}()
+	select {
+	case err := <-deleted:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("deleting the torrent did not return")
+	}
+
+	require.ErrorIs(t, preload.ctx.Err(), context.Canceled)
+	select {
+	case <-to.Closed():
+	default:
+		t.Fatal("the torrent was not closed")
+	}
+	assert.NoDirExists(t, torrentDir)
+	_, err := ctrl.db.GetTorrent(ih)
+	require.ErrorIs(t, err, database.ErrTorrentNotFound)
+
+	// The worker exits on its own, and its closed-torrent read error is not
+	// reported as a failed preload.
+	require.Eventually(t, func() bool {
+		ctrl.preloadsMu.Lock()
+		defer ctrl.preloadsMu.Unlock()
+		return !slices.Contains(ctrl.preloadWorkers, preload)
+	}, 10*time.Second, time.Millisecond, "the cancelled worker did not exit")
+	_, snapshotted := ctrl.preloadSnapshots.Load(ih)
+	assert.False(t, snapshotted, "the cancelled preload must not report a status")
 }
 
 func TestReadyPreloadExpires(t *testing.T) {

@@ -2065,10 +2065,17 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	// the highest priority. Unrelated ready memory preloads release their
 	// speculative leases; a ready preload for this file transfers its lease to
 	// the playback session, which spans the player's separate range requests.
-	// New preload requests stay queued until the session ends. Hold preloadsMu
-	// through acquisition so dispatch cannot race reader registration.
+	// New preload requests stay queued until the session ends. Acquire the
+	// reader under preloadsMu so dispatch cannot race reader registration.
 	c.preloadsMu.Lock()
 	session := c.beginPlaybackLocked(ih, file.Path())
+	stopping := c.preloadWorkerDonesLocked()
+	c.preloadsMu.Unlock()
+	// Let the preload workers playback just cancelled exit before its reader
+	// competes with their piece claims. Wait without preloadsMu, which the
+	// exiting workers take; the open session keeps dispatch paused meanwhile.
+	waitForPreloadWorkers(r.Context(), stopping)
+	c.preloadsMu.Lock()
 	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
 	if err != nil {
 		c.endPlaybackRequestLocked(session)

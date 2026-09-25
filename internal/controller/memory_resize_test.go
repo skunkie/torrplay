@@ -130,7 +130,7 @@ func TestReleaseOnePreloadReservationLockedReleasesCheapestFirst(t *testing.T) {
 	ctrl.preloads.Store(ready.infoHash, ready)
 	running := newTask("running", metainfo.Hash{2})
 	running.active = true
-	ctrl.preloadActiveTasks = 1
+	ctrl.preloadWorkers = []*preloadTask{running}
 	ctrl.preloads.Store(running.infoHash, running)
 	lease := newTask("lease", metainfo.Hash{3})
 	lease.ready.Store(true)
@@ -145,7 +145,7 @@ func TestReleaseOnePreloadReservationLockedReleasesCheapestFirst(t *testing.T) {
 	assert.False(t, ctrl.releaseOnePreloadReservationLocked(), "nothing is left to release")
 	assert.Equal(t, []string{"ready", "running", "lease"}, released)
 	assert.Nil(t, session.lease)
-	assert.Zero(t, ctrl.preloadActiveTasks)
+	assert.Len(t, ctrl.preloadWorkers, 1, "the cancelled worker keeps its slot until it exits")
 }
 
 func TestUpdateSettingsMemoryShrinkReleasesOnlyPreloadsThatDoNotFit(t *testing.T) {

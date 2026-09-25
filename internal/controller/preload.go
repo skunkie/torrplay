@@ -57,6 +57,11 @@ const (
 	// IDs; changes to either allocation scheme must preserve that separation.
 	preloadHeadReaderID uint64 = 1<<63 - 1
 	preloadTailReaderID uint64 = preloadHeadReaderID - 1
+
+	// preloadWorkerExitTimeout bounds how long playback waits for the preload
+	// workers it cancelled to exit before its reader starts competing with
+	// them for pieces. Cancelled workers normally exit within milliseconds.
+	preloadWorkerExitTimeout = 5 * time.Second
 )
 
 type preloadTask struct {
@@ -143,6 +148,9 @@ type playbackSession struct {
 	requests        int
 }
 
+// progressBytes returns the preload's progress, counting pieces of the range
+// that completed ahead of the reader. It queries the torrent's piece states
+// under the torrent client lock, so callers must not hold preloadsMu.
 func (p *preloadTask) progressBytes() int64 {
 	current := p.bytesRead.Load()
 	if p.completedBytes != nil {
@@ -158,6 +166,14 @@ func (p *preloadTask) progressBytes() int64 {
 			return current
 		}
 	}
+}
+
+// reportedProgressBytes returns the progress already known without querying
+// the torrent: the bytes read and the highest progress reported so far. It is
+// safe to call while holding preloadsMu.
+func (p *preloadTask) reportedProgressBytes() int64 {
+	current := max(min(p.bytesRead.Load(), p.targetBytes), p.progressFloor)
+	return max(current, p.progressHigh.Load())
 }
 
 func (p *preloadTask) isCacheResident() bool {
@@ -351,30 +367,53 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 	}
 
 	c.preloadsMu.Lock()
-	defer c.preloadsMu.Unlock()
-
-	if p := c.currentPreloadLocked(ih); p != nil {
-		if p.ready.Load() {
-			return readyPreloadResponse(base, p)
-		}
-
-		currentBytes := p.progressBytes()
-
-		progress := float32(0)
-		if p.targetBytes > 0 {
-			progress = min(1.0, float32(currentBytes)/float32(p.targetBytes))
-		}
-		resp := base
-		resp.CompletedBytes = currentBytes
-		resp.FileIndex = p.fileIndex
-		resp.FilePath = &p.filePath
-		resp.Progress = progress
-		resp.Status = api.Preloading
-		resp.TargetBytes = p.targetBytes
+	resp, running := c.preloadStatusLocked(ih, base, completedLength, fullyComplete)
+	c.preloadsMu.Unlock()
+	if running == nil {
 		return resp
 	}
+
+	// Progress reads piece states under the torrent client lock, so it is
+	// computed after preloadsMu is released: a busy client must not stall
+	// playback and other status requests waiting on preloadsMu.
+	currentBytes := running.progressBytes()
+	if running.ctx != nil && running.ctx.Err() != nil {
+		// The task finished or was cancelled meanwhile, so it may no longer
+		// be the current preload. Report the current state instead, taking
+		// any running task's progress from what is already known.
+		c.preloadsMu.Lock()
+		resp, running = c.preloadStatusLocked(ih, base, completedLength, fullyComplete)
+		c.preloadsMu.Unlock()
+		if running == nil {
+			return resp
+		}
+		currentBytes = running.reportedProgressBytes()
+	}
+	resp.CompletedBytes = currentBytes
+	if running.targetBytes > 0 {
+		resp.Progress = min(1.0, float32(currentBytes)/float32(running.targetBytes))
+	}
+	return resp
+}
+
+// preloadStatusLocked builds the preload status from base. For a preload
+// still running, it returns the task with the response lacking progress,
+// which the caller computes without holding preloadsMu.
+func (c *Controller) preloadStatusLocked(ih metainfo.Hash, base api.PreloadResponse, completedLength int64, fullyComplete bool) (api.PreloadResponse, *preloadTask) {
+	if p := c.currentPreloadLocked(ih); p != nil {
+		if p.ready.Load() {
+			return readyPreloadResponse(base, p), nil
+		}
+
+		resp := base
+		resp.FileIndex = p.fileIndex
+		resp.FilePath = &p.filePath
+		resp.Status = api.Preloading
+		resp.TargetBytes = p.targetBytes
+		return resp, p
+	}
 	if lease := c.playbackLeaseLocked(ih); lease != nil {
-		return readyPreloadResponse(base, lease)
+		return readyPreloadResponse(base, lease), nil
 	}
 	if val, ok := c.preloadSnapshots.Load(ih); ok {
 		if snapshot, isSnapshot := val.(*preloadStatusSnapshot); isSnapshot && snapshot != nil {
@@ -384,14 +423,14 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 				resp.Progress = 1
 				resp.Status = api.Ready
 				resp.TargetBytes = completedLength
-				return resp
+				return resp, nil
 			}
 			resp := base
 			resp.CompletedBytes = snapshot.completedBytes
 			resp.Progress = snapshot.progress
 			resp.Status = snapshot.status
 			resp.TargetBytes = snapshot.targetBytes
-			return resp
+			return resp, nil
 		}
 	}
 
@@ -401,10 +440,10 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 		resp.Progress = 1.0
 		resp.Status = api.Ready
 		resp.TargetBytes = completedLength
-		return resp
+		return resp, nil
 	}
 
-	return base
+	return base, nil
 }
 
 // readyPreloadResponse reports a completed preload, including one that playback
@@ -654,7 +693,7 @@ func (c *Controller) dispatchPreloadsLocked() {
 	if c.preloadPlaybackCount > 0 {
 		return
 	}
-	for c.preloadActiveTasks < maxConcurrentPreloads && len(c.preloadQueue) > 0 {
+	for len(c.preloadWorkers) < maxConcurrentPreloads && len(c.preloadQueue) > 0 {
 		preload := c.preloadQueue[0]
 		current, ok := c.preloads.Load(preload.infoHash)
 		if !ok || current != preload || preload.ctx.Err() != nil {
@@ -669,7 +708,7 @@ func (c *Controller) dispatchPreloadsLocked() {
 			reserved = preload.reserveBudget()
 		}
 		if !reserved {
-			if c.preloadActiveTasks > 0 {
+			if len(c.preloadWorkers) > 0 {
 				// A running preload holds the pool reservation; retry in FIFO
 				// order once it releases.
 				c.preloadQueue = append([]*preloadTask{preload}, c.preloadQueue...)
@@ -684,7 +723,7 @@ func (c *Controller) dispatchPreloadsLocked() {
 
 		preload.queued = false
 		preload.active = true
-		c.preloadActiveTasks++
+		c.preloadWorkers = append(c.preloadWorkers, preload)
 		if preload.setProtection != nil {
 			preload.setProtection()
 			preload.protected = true
@@ -1013,7 +1052,7 @@ func (c *Controller) snapshotPreloadLocked(preload *preloadTask, status api.Prel
 		return
 	}
 	c.clearPreloadSnapshotLocked(preload.infoHash)
-	completedBytes := preload.progressBytes()
+	completedBytes := preload.reportedProgressBytes()
 	progress := float32(0)
 	if preload.targetBytes > 0 {
 		progress = min(1, float32(completedBytes)/float32(preload.targetBytes))
@@ -1061,6 +1100,13 @@ func (c *Controller) schedulePreloadExpiryLocked(preload *preloadTask) {
 	})
 }
 
+// releasePreloadLocked retires a task that the caller has already removed
+// from c.preloads. Its memory reservation and cache protection are released
+// immediately. A running worker is only cancelled, not awaited: it exits
+// through finishPreload, which frees its scheduling slot and dispatches the
+// next task. Waiting here would hold preloadsMu while the worker's reader
+// closes under the torrent client lock, stalling status requests and
+// playback. The caller must hold preloadsMu.
 func (c *Controller) releasePreloadLocked(preload *preloadTask, dispatch bool) {
 	if preload.expiryTimer != nil {
 		preload.expiryTimer.Stop()
@@ -1073,9 +1119,7 @@ func (c *Controller) releasePreloadLocked(preload *preloadTask, dispatch bool) {
 	if preload.queued {
 		c.removeQueuedPreloadLocked(preload)
 	}
-	if preload.active && preload.done != nil {
-		<-preload.done
-	} else {
+	if !preload.active {
 		preload.doneOnce.Do(func() {
 			if preload.done != nil {
 				close(preload.done)
@@ -1083,7 +1127,6 @@ func (c *Controller) releasePreloadLocked(preload *preloadTask, dispatch bool) {
 		})
 	}
 	preload.queued = false
-	c.releasePreloadCapacityLocked(preload)
 	c.clearPreloadProtectionLocked(preload)
 	if dispatch {
 		c.dispatchPreloadsLocked()
@@ -1111,7 +1154,7 @@ func (c *Controller) releasePreloadCapacityLocked(preload *preloadTask) {
 		return
 	}
 	preload.active = false
-	c.preloadActiveTasks--
+	c.preloadWorkers = slices.DeleteFunc(c.preloadWorkers, func(worker *preloadTask) bool { return worker == preload })
 }
 
 // releasePreloadBudgetLocked returns the task's reservation to the stream pool.
@@ -1196,8 +1239,8 @@ func (c *Controller) releaseOnePreloadReservationLocked() bool {
 }
 
 // preparePreloadsForPlaybackLocked retires the preload for the file that is
-// about to play, stops unrelated workers that are still downloading, and
-// releases the cache held by ready memory preloads. Stopped workers are
+// about to play, cancels unrelated workers that are still downloading, and
+// releases the cache held by ready memory preloads. Cancelled workers are
 // re-queued ahead of later requests and resume when the playback session
 // ends. A ready memory preload for the file being played is returned so the
 // session can hold its protection and memory reservation; every other retired
@@ -1254,12 +1297,12 @@ func (c *Controller) preparePreloadsForPlaybackLocked(infoHash metainfo.Hash, fi
 		return true
 	})
 
-	// Register each replacement before stopping the worker so the worker's
+	// Register each replacement before cancelling the worker so the worker's
 	// completion sees that it was superseded and leaves the replacement alone.
 	// Iterate in reverse so front insertion preserves the order found above.
 	for _, preload := range slices.Backward(interrupted) {
 		replacement := preload.requeue()
-		replacement.progressFloor = preload.progressBytes()
+		replacement.progressFloor = preload.reportedProgressBytes()
 		c.registerPreloadLocked(replacement, true)
 		c.releasePreloadLocked(preload, false)
 	}
@@ -1392,10 +1435,52 @@ func (c *Controller) validPlaybackLeaseLocked(session *playbackSession) *preload
 	return session.lease
 }
 
+// cancelAllPreloads cancels every preload and waits for running workers to
+// exit, so none still reads from the client, pool, or storage its caller is
+// about to close. It waits after releasing preloadsMu, which the exiting
+// workers take in finishPreload.
 func (c *Controller) cancelAllPreloads() {
 	c.preloadsMu.Lock()
-	defer c.preloadsMu.Unlock()
 	c.cancelAllPreloadsLocked()
+	running := c.preloadWorkerDonesLocked()
+	c.preloadsMu.Unlock()
+
+	for _, done := range running {
+		<-done
+	}
+}
+
+// preloadWorkerDonesLocked returns the done channels of every running
+// preload worker, including cancelled workers still exiting. The caller must
+// hold preloadsMu, and must release it before waiting on them.
+func (c *Controller) preloadWorkerDonesLocked() []<-chan struct{} {
+	dones := make([]<-chan struct{}, 0, len(c.preloadWorkers))
+	for _, worker := range c.preloadWorkers {
+		if worker.done != nil {
+			dones = append(dones, worker.done)
+		}
+	}
+	return dones
+}
+
+// waitForPreloadWorkers waits until the given workers exit, the context ends,
+// or preloadWorkerExitTimeout passes. It bounds the wait so a worker stuck in
+// a read cannot hold up playback.
+func waitForPreloadWorkers(ctx context.Context, dones []<-chan struct{}) {
+	if len(dones) == 0 {
+		return
+	}
+	timeout := time.NewTimer(preloadWorkerExitTimeout)
+	defer timeout.Stop()
+	for _, done := range dones {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return
+		case <-timeout.C:
+			return
+		}
+	}
 }
 
 // cancelAllPreloadsLocked releases every speculative cache lease and priority

@@ -139,7 +139,6 @@ type Controller struct {
 	posterWorkersMu      sync.Mutex
 	posterWorkersStopped bool
 	postersPath          string
-	preloadActiveTasks   int
 	// preloadPlaybackCount is the number of open playback sessions. Preload
 	// dispatch is paused while it is positive.
 	preloadPlaybackCount int
@@ -149,6 +148,10 @@ type Controller struct {
 	// playback session that sees it change knows the viewer has moved on.
 	preloadRequests  uint64
 	preloadSnapshots sync.Map
+	// preloadWorkers are the tasks whose workers are running, including
+	// cancelled ones that have not exited yet. Each holds a scheduling slot
+	// until its worker exits. Guarded by preloadsMu.
+	preloadWorkers   []*preloadTask
 	preloads         sync.Map
 	preloadsMu       sync.Mutex
 	profilerAddr     string
