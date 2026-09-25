@@ -1017,6 +1017,9 @@ func (c *Controller) configureTorrentClient() error {
 		_ = client.Close()
 		return errors.New("failed to set initial stream readahead budget")
 	}
+	// Evicted pieces must stop counting as downloaded, or a torrent read in
+	// full looks complete to the client, which then drops its peers.
+	storageClient.SetEvictionHandler(memstorage.ClientEvictionHandler(client))
 
 	c.mu.Lock()
 	c.client = client

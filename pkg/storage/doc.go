@@ -30,7 +30,9 @@
 //  4. Statistics: Provides comprehensive memory usage statistics at both global and per-torrent levels.
 //
 //  5. Self-Hashing: Implements the SelfHashing interface to verify piece integrity without external
-//     hashing mechanisms.
+//     hashing mechanisms. A piece whose buffer is not fully written, for example because it was
+//     evicted mid-download, fails with ErrPieceIncomplete rather than a wrong hash, so the torrent
+//     client re-downloads it instead of banning the peers that sent it.
 //
 //  6. Eviction Protection: Satisfies the stream.ActiveRangeRegistry interface so that
 //     actively-read pieces and file boundary pieces are protected from standard LRU eviction.
@@ -70,6 +72,14 @@
 // When an allocation would exceed the configured limit, the client automatically evicts
 // least-recently-used pieces. Eviction removes piece data and tracking from memory, causing
 // evicted pieces to be reported as incomplete so the torrent engine can download them again on demand.
+// Pieces still downloading, meaning incomplete and written within the last 30 seconds, are spared
+// while other unprotected pieces can be evicted instead, because an evicted partial piece must be
+// downloaded again in full. They are still evicted, oldest first, when nothing else frees enough memory.
+// The torrent engine caches piece completion and is not told when storage drops a piece on its own.
+// Register ClientEvictionHandler with SetEvictionHandler so every evicted piece, and every piece
+// already gone when the engine marks it complete, is reported back to it from a background
+// goroutine; otherwise it keeps treating evicted pieces as downloaded, skips them when reading
+// ahead, and considers a torrent that was read in full complete, dropping its peers.
 // When an incoming piece has the same size as a buffer detached during allocation-triggered
 // eviction, the buffer is cleared and handed directly to the incoming reservation. This reduces
 // allocation and garbage-collection churn without retaining an unaccounted free-buffer pool.

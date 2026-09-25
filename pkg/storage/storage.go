@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 )
@@ -25,6 +26,13 @@ import (
 // ErrPieceNotAvailable is returned when reading or hashing a piece that has
 // never been written or has been evicted.
 var ErrPieceNotAvailable = errors.New("piece not available in memory")
+
+// ErrPieceIncomplete is returned when reading or hashing piece bytes that have
+// not been written, such as when an in-progress piece was evicted and only its
+// later chunks were written to a fresh buffer. Reporting it as a storage error
+// keeps the torrent client from blaming, and banning, the peers that sent the
+// data.
+var ErrPieceIncomplete = errors.New("piece data is incomplete in memory")
 
 // ErrInsufficientMemory is returned when memory allocation fails even after attempting
 // to evict existing pieces to free up space.
@@ -60,6 +68,13 @@ type Client struct {
 	closeCh chan struct{}
 	// closed is protected by mu and rejects new work before closeCh is signaled.
 	closed bool
+	// evictedPending holds pieces evicted, or found missing when marked
+	// complete, since the eviction handler last ran. It is protected by mu
+	// and nil until a handler is registered.
+	evictedPending map[pieceKey]struct{}
+	// evictedSignal wakes the eviction notifier. It is nil until a handler is
+	// registered.
+	evictedSignal chan struct{}
 	// fileBoundaries tracks head and tail piece ranges for media files being streamed
 	// or preloaded, protecting container metadata from standard LRU eviction.
 	fileBoundaries map[activeRangeKey]fileBoundary
@@ -68,6 +83,8 @@ type Client struct {
 	logger    *slog.Logger
 	maxMemory int64
 	mu        sync.RWMutex
+	// notifier tracks the goroutine that runs the eviction handler.
+	notifier sync.WaitGroup
 	// pieces stores the metadata and data for each piece across all torrents.
 	pieces map[pieceKey]*pieceData
 	// pendingAllocations counts reservations whose buffers have not yet been
@@ -155,6 +172,11 @@ type byteRange struct {
 
 type evictionProtection uint8
 
+// downloadingPieceGrace is how long after its last write an incomplete piece
+// counts as still downloading, and so is spared while other pieces can be
+// evicted instead. Writes refresh it at most once per touchMinInterval.
+const downloadingPieceGrace = 30 * time.Second
+
 const (
 	protectActiveAndBoundaries evictionProtection = iota
 	protectActiveOnly
@@ -230,6 +252,7 @@ func (c *Client) Close() error {
 	if c.closed {
 		c.mu.Unlock()
 		<-c.closeCh
+		c.notifier.Wait()
 		return nil
 	}
 	c.closed = true
@@ -240,7 +263,6 @@ func (c *Client) Close() error {
 	c.allocations.Wait()
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	// Clear all pieces.
 	for key, pd := range c.pieces {
@@ -254,7 +276,11 @@ func (c *Client) Close() error {
 	c.lru.Init()
 	c.used = 0
 	close(c.closeCh)
+	c.mu.Unlock()
 
+	// The notifier may be running the handler, which can call back into the
+	// client, so wait for it only after releasing mu.
+	c.notifier.Wait()
 	return nil
 }
 
@@ -267,6 +293,86 @@ func (c *Client) Closed() <-chan struct{} {
 // isClosed reports whether the client has been closed. c.mu must be held.
 func (c *Client) isClosed() bool {
 	return c.closed
+}
+
+// SetEvictionHandler registers handler to be told about every piece that
+// eviction removes, and about every piece that is already gone when the
+// torrent engine marks it complete. The engine caches piece completion, and
+// marks a hashed piece complete even when storing that fails, so without this
+// it keeps treating such pieces as downloaded: it skips them when reading
+// ahead, and once every piece of a torrent has been downloaded it considers
+// the torrent complete and may drop its peers. Pieces removed because their
+// torrent closed are not reported. The handler runs on a background goroutine
+// without any client lock held, so it may call back into the client.
+// Notifications for the same piece are coalesced. Only the first handler is
+// kept, and none is started after Close. Close stops the goroutine.
+func (c *Client) SetEvictionHandler(handler func(infoHash metainfo.Hash, index int)) {
+	if handler == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.evictedSignal != nil {
+		return
+	}
+	c.evictedPending = make(map[pieceKey]struct{})
+	c.evictedSignal = make(chan struct{}, 1)
+	c.notifier.Go(func() { c.runEvictionNotifier(handler) })
+}
+
+// ClientEvictionHandler returns an eviction handler that makes client re-read
+// the completion of each evicted piece, so it downloads the piece again when
+// it is next needed.
+func ClientEvictionHandler(client *torrent.Client) func(infoHash metainfo.Hash, index int) {
+	return func(infoHash metainfo.Hash, index int) {
+		to, ok := client.Torrent(infoHash)
+		if !ok || to.Info() == nil || index < 0 || index >= to.NumPieces() {
+			return
+		}
+		select {
+		case <-to.Closed():
+			return
+		default:
+		}
+		to.Piece(index).UpdateCompletion()
+	}
+}
+
+// runEvictionNotifier delivers pending eviction notifications to handler until
+// the client closes.
+func (c *Client) runEvictionNotifier(handler func(infoHash metainfo.Hash, index int)) {
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case <-c.evictedSignal:
+		}
+		c.mu.Lock()
+		pending := c.evictedPending
+		c.evictedPending = make(map[pieceKey]struct{})
+		c.mu.Unlock()
+		for key := range pending {
+			select {
+			case <-c.closeCh:
+				return
+			default:
+			}
+			handler(key.infoHash, key.index)
+		}
+	}
+}
+
+// queueEvictionLocked records a piece for the eviction handler. c.mu must be
+// held.
+func (c *Client) queueEvictionLocked(key pieceKey) {
+	if c.evictedSignal == nil {
+		return
+	}
+	c.evictedPending[key] = struct{}{}
+	select {
+	case c.evictedSignal <- struct{}{}:
+	default:
+	}
 }
 
 // EvictTo evicts unprotected pieces until memory usage is at most targetBytes.
@@ -775,18 +881,48 @@ func (c *Client) emergencyEvictDownToLocked(target int64) {
 
 // evictDownToInternalLocked evicts pieces until target is reached. If reuseSize
 // is positive, at most one detached buffer of exactly that length is returned
-// for immediate handoff to an incoming allocation. c.mu must be held.
+// for immediate handoff to an incoming allocation. Pieces still downloading are
+// spared on a first pass and evicted only if the target is otherwise out of
+// reach, because an evicted partial piece must be downloaded again in full.
+// c.mu must be held.
 func (c *Client) evictDownToInternalLocked(target int64, protection evictionProtection, reuseSize int64) []byte {
 	if c.used <= target {
 		return nil
 	}
 
-	evicted := int64(0)
-	targetEvict := c.used - target
-	var reusable []byte
+	before := c.used
+	downloadingSince := time.Now().Add(-downloadingPieceGrace).UnixNano()
+	reusable := c.evictPassLocked(target, protection, reuseSize, downloadingSince)
+	if c.used > target {
+		if reusable != nil {
+			reuseSize = 0
+		}
+		if downloadingReusable := c.evictPassLocked(target, protection, reuseSize, 0); reusable == nil {
+			reusable = downloadingReusable
+		}
+	}
 
-	// Iterate from the back of the LRU list (least recently used).
-	for e := c.lru.Back(); e != nil && evicted < targetEvict; {
+	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		msg := "eviction completed"
+		if protection != protectActiveAndBoundaries {
+			msg = "emergency eviction completed"
+		}
+		c.logger.Debug(msg,
+			slog.Int64("target", target),
+			slog.Int64("evicted", before-c.used),
+			slog.Int64("newUsed", c.used))
+	}
+
+	return reusable
+}
+
+// evictPassLocked walks the LRU list from its least recently used end and
+// evicts pieces allowed by protection until target is reached. Incomplete
+// pieces touched after downloadingSince, in Unix nanoseconds, are skipped as
+// still downloading; zero spares none. c.mu must be held.
+func (c *Client) evictPassLocked(target int64, protection evictionProtection, reuseSize, downloadingSince int64) []byte {
+	var reusable []byte
+	for e := c.lru.Back(); e != nil && c.used > target; {
 		key := e.Value.(pieceKey)
 		next := e.Prev() // Save the next element before potential removal.
 
@@ -812,6 +948,15 @@ func (c *Client) evictDownToInternalLocked(target int64, protection evictionProt
 				}
 			case protectNone:
 			}
+			if downloadingSince > 0 && pd.lastTouchNano.Load() > downloadingSince {
+				pd.mu.RLock()
+				downloading := !pd.complete
+				pd.mu.RUnlock()
+				if downloading {
+					e = next
+					continue
+				}
+			}
 			if protection == protectNone && c.logger.Enabled(context.Background(), slog.LevelWarn) && inActiveRange {
 				c.logger.Warn("emergency eviction of active range piece under memory pressure",
 					slog.String("hash", key.infoHash.HexString()),
@@ -819,12 +964,12 @@ func (c *Client) evictDownToInternalLocked(target int64, protection evictionProt
 					slog.Int64("size", int64(dataLen)))
 			}
 
+			c.queueEvictionLocked(key)
 			size := int64(dataLen)
 			detached := c.evictPieceLocked(key, pd)
 			if reusable == nil && size == reuseSize {
 				reusable = detached
 			}
-			evicted += size
 
 			// Update torrent-specific memory usage.
 			if state, exists := c.torrents[key.infoHash]; exists {
@@ -836,21 +981,6 @@ func (c *Client) evictDownToInternalLocked(target int64, protection evictionProt
 
 		e = next
 	}
-
-	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
-		if protection == protectActiveAndBoundaries {
-			c.logger.Debug("eviction completed",
-				slog.Int64("target", target),
-				slog.Int64("evicted", evicted),
-				slog.Int64("newUsed", c.used))
-		} else {
-			c.logger.Debug("emergency eviction completed",
-				slog.Int64("target", target),
-				slog.Int64("evicted", evicted),
-				slog.Int64("newUsed", c.used))
-		}
-	}
-
 	return reusable
 }
 
@@ -885,6 +1015,17 @@ func (pd *pieceData) recordWrittenRange(start, end int64) {
 	for _, current := range ranges {
 		pd.writtenBytes += current.end - current.start
 	}
+}
+
+// rangeWritten reports whether [start, end) lies within a single written
+// range. Written ranges are merged when they touch, so a fully written span
+// is always covered by one range. pd.mu must be held.
+func (pd *pieceData) rangeWritten(start, end int64) bool {
+	if start >= end {
+		return true
+	}
+	i := sort.Search(len(pd.writtenRanges), func(i int) bool { return pd.writtenRanges[i].end > start })
+	return i < len(pd.writtenRanges) && pd.writtenRanges[i].start <= start && pd.writtenRanges[i].end >= end
 }
 
 // isPieceInActiveRangeLocked checks whether a piece falls inside any registered
@@ -1051,20 +1192,38 @@ func (p *pieceImpl) Completion() storage.Completion {
 func (p *pieceImpl) MarkComplete() error {
 	pd, err := p.getPieceData()
 	if err != nil {
+		if errors.Is(err, ErrPieceNotAvailable) {
+			p.reportMissingOnComplete()
+		}
 		return err
 	}
 
 	pd.mu.Lock()
-	defer pd.mu.Unlock()
-
 	// Only mark as complete if we have the data in memory.
 	if pd.data == nil {
+		// Queueing needs c.mu, which must never be taken while holding pd.mu.
+		pd.mu.Unlock()
+		p.reportMissingOnComplete()
 		return errors.New("cannot mark incomplete piece as complete without data")
 	}
-
 	pd.complete = true
+	pd.mu.Unlock()
 
 	return nil
+}
+
+// reportMissingOnComplete queues a piece that was evicted between hashing and
+// being marked complete. The torrent engine marks it complete regardless, so
+// the eviction handler must make it re-read the completion. c.mu and pd.mu
+// must not be held.
+func (p *pieceImpl) reportMissingOnComplete() {
+	c := p.client
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if current, exists := c.torrents[p.infoHash]; !exists || current != p.torrent {
+		return
+	}
+	c.queueEvictionLocked(p.key())
 }
 
 // MarkNotComplete implements the storage.PieceImpl interface.
@@ -1123,6 +1282,14 @@ func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 		}
 	}
 
+	// Bytes never written since the buffer was allocated, such as chunks
+	// lost when an in-progress piece was evicted, read as zeros. Refuse them
+	// so no caller mistakes them for piece data.
+	if !pd.rangeWritten(off, end) {
+		pd.mu.RUnlock()
+		return 0, ErrPieceIncomplete
+	}
+
 	n = copy(b, pd.data[off:end])
 	if n < len(b) && err == nil {
 		err = io.EOF // Signal that not all requested bytes were returned.
@@ -1135,7 +1302,8 @@ func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 }
 
 // SelfHash implements the storage.SelfHashing interface, computing the SHA-1 hash
-// of the piece data in memory.
+// of the piece data in memory. It returns ErrPieceIncomplete unless every byte
+// of the current buffer has been written.
 func (p *pieceImpl) SelfHash() (metainfo.Hash, error) {
 	pd, err := p.getPieceData()
 	if err != nil {
@@ -1147,6 +1315,12 @@ func (p *pieceImpl) SelfHash() (metainfo.Hash, error) {
 
 	if pd.data == nil {
 		return metainfo.Hash{}, ErrPieceNotAvailable
+	}
+	// Chunks lost to eviction would hash as zeros and look like corrupt peer
+	// data. anacrolix bans the sole contributor of a piece that fails its
+	// hash without a storage error, so report the gap as one instead.
+	if pd.writtenBytes < int64(len(pd.data)) {
+		return metainfo.Hash{}, ErrPieceIncomplete
 	}
 
 	// Compute the SHA-1 hash.
