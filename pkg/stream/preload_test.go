@@ -533,7 +533,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		pl := p.preloads[infoHash]
-		pl.idleSince = time.Now().Add(-idle)
+		pl.readyAt = time.Now().Add(-idle)
 		pl.finishedAt = time.Now().Add(-idle)
 	}
 
@@ -549,23 +549,90 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		assert.Zero(t, reservedPreloadBytes(pool), "an expired preload releases its memory")
 	})
 
-	t.Run("restarts the TTL while its file is read", func(t *testing.T) {
+	t.Run("keeps a preload while its file is read", func(t *testing.T) {
 		pool, to, file := newReadyPreload(t, time.Minute)
 		_, release, err := pool.Acquire(file, MemoryStorage)
 		require.NoError(t, err)
+		defer release()
 		idleFor(pool, to.InfoHash(), time.Hour)
 		pool.expirePreloads()
 		assert.Equal(t, PreloadReady, preloadState(pool, to.InfoHash()), "a preload being read must not expire")
+	})
 
-		// The TTL restarts from when its last reader closes.
+	t.Run("releases a read preload once its lingering reader closes", func(t *testing.T) {
+		pool, to, file := newReadyPreload(t, time.Hour)
+		_, release, err := pool.Acquire(file, MemoryStorage)
+		require.NoError(t, err)
+		release()
+		pool.expirePreloads()
+		assert.Equal(t, PreloadReady, preloadState(pool, to.InfoHash()), "the lingering reader bridges the player's next request")
+
+		pool.mu.Lock()
+		for _, sr := range pool.readers {
+			sr.lingerSince = time.Now().Add(-time.Hour)
+		}
+		pool.mu.Unlock()
+		pool.closeExpiredLingeringReaders()
+		_, ok := pool.PreloadStatus(to.InfoHash())
+		assert.False(t, ok, "playback of the file has ended, so its cache is released")
+		assert.Zero(t, reservedPreloadBytes(pool))
+	})
+
+	t.Run("releases a read preload when a reader of another file closes its lingering reader", func(t *testing.T) {
+		pool, to, file := newReadyPreload(t, time.Hour)
+		_, release, err := pool.Acquire(file, MemoryStorage)
+		require.NoError(t, err)
+		release()
+
+		c := newTestTorrentClient(t)
+		_, otherFile := addSizedTorrent(t, c, "other", 64, 640)
+		_, releaseOther, err := pool.Acquire(otherFile, MemoryStorage)
+		require.NoError(t, err)
+		defer releaseOther()
+		_, ok := pool.PreloadStatus(to.InfoHash())
+		assert.False(t, ok)
+	})
+
+	t.Run("releases on ready when playback ended while it ran", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger(), PreloadReadyTTL: time.Hour})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1 << 20)
+		to, file, data := addHashedTorrent(t, c, "movie")
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		_, release, err := pool.Acquire(file, MemoryStorage)
+		require.NoError(t, err)
 		release()
 		pool.mu.Lock()
 		for key, sr := range pool.readers {
 			pool.removeReaderLocked(key, sr)
 		}
-		idleSince := pool.preloads[to.InfoHash()].idleSince
 		pool.mu.Unlock()
-		assert.WithinDuration(t, time.Now(), idleSince, time.Second)
+		require.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "a running preload is not released")
+
+		writePieces(t, to, data, allPieces(to)...)
+		require.Eventually(t, func() bool {
+			_, ok := pool.PreloadStatus(to.InfoHash())
+			return !ok
+		}, 5*time.Second, time.Millisecond, "a preload whose playback already ended must not stay cached")
+	})
+
+	t.Run("a preload requested during playback counts as read", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger()})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1 << 20)
+		to, file := addSizedTorrent(t, c, "movie", 64, 640)
+		_, release, err := pool.Acquire(file, MemoryStorage)
+		require.NoError(t, err)
+		defer release()
+		_, err = pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		read := pool.preloads[to.InfoHash()].read
+		pool.mu.Unlock()
+		assert.True(t, read)
 	})
 
 	t.Run("keeps a final state for the TTL", func(t *testing.T) {

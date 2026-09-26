@@ -113,10 +113,12 @@ type Config struct {
 	// makes the nearest pieces download first. Values above 1 are clamped to 1.
 	// A non-positive value disables prioritization.
 	PriorityWindowFraction float64
-	// PreloadReadyTTL is how long a ready preload stays cached after its file
-	// last had a reader, and how long a failed or evicted preload keeps
-	// reporting its final state. Zero defaults to 5 minutes. Negative values
-	// keep them until they are replaced, cancelled, or evicted.
+	// PreloadReadyTTL is how long a ready preload whose file has not been read
+	// stays cached, and how long a failed or evicted preload keeps reporting
+	// its final state. A preload whose file was read is released once the
+	// file has no reader left, including a lingering one, whatever the TTL.
+	// Zero defaults to 5 minutes. Negative values keep unread and finished
+	// preloads until they are replaced, cancelled, or evicted.
 	PreloadReadyTTL time.Duration
 	// ReadObserver, when set, is called after every Read of a reader with the
 	// reader's storage mode and how long the Read took, including any wait
@@ -512,6 +514,9 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 		wrapper:       wrapper,
 	}
 	p.readers[key] = sr
+	if pl := p.preloads[infoHash]; pl != nil && pl.file == file {
+		pl.read = true
+	}
 
 	if isFileStorage {
 		sr.readahead = p.cfg.FileReadaheadBytes
@@ -667,10 +672,6 @@ func (p *Pool) removeReaderLocked(key readerKey, sr *streamReader) {
 	p.clearReaderClaimsLocked(sr)
 	closeStreamReaderLocked(sr)
 	delete(p.readers, key)
-	// A ready preload's TTL runs from when its file was last read.
-	if pl := p.preloads[sr.infoHash]; pl != nil && pl.state == PreloadReady && pl.file == sr.file {
-		pl.idleSince = time.Now()
-	}
 }
 
 // refreshReadaheadLocked recalculates and applies readahead for all active readers.
@@ -726,14 +727,19 @@ func (p *Pool) closeLingeringReadersLocked() {
 		return
 	}
 
+	closed := false
 	for key, sr := range p.readers {
 		if sr.active {
 			continue
 		}
 		p.removeReaderLocked(key, sr)
+		closed = true
 		p.logger.Debug("closed lingering reader for active work",
 			slog.String("hash", sr.infoHash.HexString()),
 			slog.Uint64("readerID", sr.readerID))
+	}
+	if closed {
+		p.releaseReadPreloadsLocked()
 	}
 }
 
@@ -1426,6 +1432,7 @@ func (p *Pool) closeExpiredLingeringReaders() {
 
 	timeout := p.effectiveLingerTimeout(p.sampleMemoryPressure())
 	now := time.Now()
+	closed := false
 	for key, sr := range p.readers {
 		if sr.active {
 			continue
@@ -1435,9 +1442,13 @@ func (p *Pool) closeExpiredLingeringReaders() {
 			continue
 		}
 		p.removeReaderLocked(key, sr)
+		closed = true
 		p.logger.Debug("closed lingering reader",
 			slog.String("hash", sr.infoHash.HexString()),
 			slog.Uint64("readerID", sr.readerID),
 			slog.Duration("lingered", lingered))
+	}
+	if closed {
+		p.releaseReadPreloadsLocked()
 	}
 }

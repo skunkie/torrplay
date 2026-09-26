@@ -82,14 +82,18 @@
 // the readahead budget, reported by PreloadCapacity, and protects them from
 // eviction until it is removed. The rest of the budget is always kept for
 // playback readers, so a new stream is never starved by held preloads. When
-// the share is full, a queued preload evicts the ready preload that has gone
-// longest without a reader; ready preloads of files being read stay pinned. A
+// the share is full, a queued preload evicts the oldest ready preload; ready
+// preloads of files being read stay pinned. A
 // preload that cannot fit and has nothing to wait for fails. A smaller
 // SetReadaheadBudget evicts preloads until they fit, cheapest first. A ready
 // preload that loses a piece to eviction downloads it again.
 //
-// A ready preload expires PreloadReadyTTL after its file last had a reader,
-// and a failed or evicted preload reports its final state for as long.
+// A ready preload serves one playback of its file: once the file has been read
+// and has no reader left, including a lingering one, the preload is released,
+// so the linger timeout is its grace period between the player's requests. A
+// ready preload whose file is never read expires PreloadReadyTTL after it
+// became ready, and a failed or evicted preload reports its final state for
+// as long.
 // File-storage preloads write to disk and reserve nothing.
 //
 // # Memory Pressure

@@ -113,12 +113,16 @@ type preload struct {
 	// [0, headEnd) and [tailStart, tailEnd) the preload caches. An empty tail
 	// range caches only the head.
 	headEnd, tailStart, tailEnd int64
-	// idleSince is when a ready preload's file last had a reader, or when
-	// the preload became ready. The ready TTL runs from it.
-	idleSince   time.Time
-	infoHash    metainfo.Hash
-	mode        StorageMode
-	pieces      []int
+	infoHash                    metainfo.Hash
+	mode                        StorageMode
+	pieces                      []int
+	// read reports that a reader of the preload's file was acquired since the
+	// preload was requested. Once its file has no reader left, a read preload
+	// has served its purpose and is released.
+	read bool
+	// readyAt is when the preload became ready. The ready TTL of a preload
+	// whose file has not been read runs from it.
+	readyAt     time.Time
 	reservation preloadReservation
 	reserved    bool
 	state       PreloadState
@@ -177,6 +181,7 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 		return PreloadStatus{}, ErrPreloadDoesNotFit
 	}
 	pl.completedBytes, _ = pl.progress()
+	pl.read = p.fileHasReadersLocked(file)
 	tor.AllowDataDownload()
 	p.preloads[infoHash] = pl
 	p.preloadQueue = append(p.preloadQueue, pl)
@@ -554,11 +559,16 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 	switch {
 	case pl.state == PreloadRunning && complete:
 		pl.state = PreloadReady
-		pl.idleSince = time.Now()
+		pl.readyAt = time.Now()
 		p.unclaimPreloadLocked(pl)
 		p.logger.Debug("preload ready",
 			slog.String("hash", pl.infoHash.HexString()),
 			slog.String("file", pl.file.Path()))
+		// Playback that started and ended while the preload ran no longer
+		// needs its cache.
+		if pl.read && !p.fileHasReadersLocked(pl.file) {
+			p.removePreloadLocked(pl.infoHash)
+		}
 		p.dispatchPreloadsLocked()
 	case pl.state == PreloadReady && !complete:
 		pl.state = PreloadRunning
@@ -644,16 +654,16 @@ func (p *Pool) reservedPreloadBytesLocked() int64 {
 	return reserved
 }
 
-// evictIdlePreloadLocked evicts the ready preload that has gone longest
-// without a reader, skipping preloads whose file is being read. It returns
-// false when there is none. Must be called with p.mu held.
+// evictIdlePreloadLocked evicts the oldest ready preload, skipping preloads
+// whose file is being read. It returns false when there is none. Must be
+// called with p.mu held.
 func (p *Pool) evictIdlePreloadLocked() bool {
 	var victim *preload
 	for _, pl := range p.preloads {
 		if pl.state != PreloadReady || !pl.reserved || p.fileHasReadersLocked(pl.file) {
 			continue
 		}
-		if victim == nil || pl.idleSince.Before(victim.idleSince) {
+		if victim == nil || pl.readyAt.Before(victim.readyAt) {
 			victim = pl
 		}
 	}
@@ -686,6 +696,22 @@ func (p *Pool) shrinkPreloadsLocked() {
 			return
 		}
 		p.finishPreloadLocked(victim, PreloadEvicted)
+	}
+}
+
+// releaseReadPreloadsLocked releases the ready preloads whose file was read
+// and has no reader left, including a lingering one: playback of the file has
+// ended, so its cache has served its purpose. Must be called with p.mu held.
+func (p *Pool) releaseReadPreloadsLocked() {
+	released := false
+	for infoHash, pl := range p.preloads {
+		if pl.state == PreloadReady && pl.read && !p.fileHasReadersLocked(pl.file) {
+			p.removePreloadLocked(infoHash)
+			released = true
+		}
+	}
+	if released {
+		p.dispatchPreloadsLocked()
 	}
 }
 
@@ -743,9 +769,9 @@ func (p *Pool) stopPreloadLocked(pl *preload) {
 }
 
 // expirePreloads removes preloads whose torrent closed, ready preloads whose
-// file has had no reader for the ready TTL, and failed or evicted preloads
-// that have reported their final state for the ready TTL. A ready preload's
-// TTL restarts while its file is being read.
+// file has not been read within the ready TTL, read preloads whose file has no
+// reader left, and failed or evicted preloads that have reported their final
+// state for the ready TTL.
 func (p *Pool) expirePreloads() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -760,8 +786,9 @@ func (p *Pool) expirePreloads() {
 			removed = true
 		case pl.state == PreloadReady:
 			if p.fileHasReadersLocked(pl.file) {
-				pl.idleSince = now
-			} else if ttl > 0 && now.Sub(pl.idleSince) >= ttl {
+				continue
+			}
+			if pl.read || (ttl > 0 && now.Sub(pl.readyAt) >= ttl) {
 				p.removePreloadLocked(infoHash)
 				removed = true
 			}
