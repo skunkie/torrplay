@@ -135,12 +135,11 @@ type preload struct {
 }
 
 // preloadReservation is the protection budget held by a memory-storage
-// preload, the file and pieces it protects, and whether it protects both that
-// file's head and tail.
+// preload, the pieces it protects, and whether it protects both its file's
+// head and tail.
 type preloadReservation struct {
 	bytes            int64
 	coversBoundaries bool
-	filePath         string
 	// headStart, headEnd, tailStart, and tailEnd are the inclusive piece
 	// ranges protected from eviction while the reservation is held.
 	headStart, headEnd, tailStart, tailEnd int
@@ -350,7 +349,6 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload
 		reservation: preloadReservation{
 			bytes:            boundaryPieceBytes(info, headStart, headEndPiece, tailStartPiece, tailEndPiece),
 			coversBoundaries: preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
-			filePath:         file.Path(),
 			headStart:        headStart,
 			headEnd:          headEndPiece,
 			tailStart:        tailStartPiece,
@@ -732,10 +730,11 @@ func (p *Pool) fileHasReadersLocked(file *torrent.File) bool {
 }
 
 // preloadCoversFileLocked reports whether a held preload reservation protects
-// both the given file's head and tail. Must be called with p.mu held.
-func (p *Pool) preloadCoversFileLocked(infoHash metainfo.Hash, filePath string) bool {
+// both the head and tail of file, of the torrent with infoHash. Must be called
+// with p.mu held.
+func (p *Pool) preloadCoversFileLocked(infoHash metainfo.Hash, file *torrent.File) bool {
 	pl := p.preloads[infoHash]
-	return pl != nil && pl.reserved && pl.reservation.coversBoundaries && pl.reservation.filePath == filePath
+	return pl != nil && pl.file == file && pl.reserved && pl.reservation.coversBoundaries
 }
 
 // finishPreloadLocked stops a preload that failed or was evicted. It keeps

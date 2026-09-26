@@ -113,13 +113,16 @@ func reservedPreloadBytes(p *Pool) int64 {
 	return p.reservedPreloadBytesLocked()
 }
 
-// holdPreload registers a running memory preload that reserves size bytes
-// without a file, for tests of the pool's budget accounting. It reports
-// whether the reservation fit.
-func holdPreload(p *Pool, infoHash metainfo.Hash, reservation preloadReservation) bool {
+// holdPreload registers a running memory preload of file, or of a file
+// without data when file is nil, that holds reservation, for tests of the
+// pool's budget accounting. It reports whether the reservation fit.
+func holdPreload(p *Pool, infoHash metainfo.Hash, file *torrent.File, reservation preloadReservation) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	pl := &preload{file: &torrent.File{}, infoHash: infoHash, mode: MemoryStorage, reservation: reservation, state: PreloadRunning}
+	if file == nil {
+		file = &torrent.File{}
+	}
+	pl := &preload{file: file, infoHash: infoHash, mode: MemoryStorage, reservation: reservation, state: PreloadRunning}
 	// Register the preload first, as Preload does, so the rebalance after the
 	// reservation counts it.
 	p.preloads[infoHash] = pl
@@ -807,7 +810,7 @@ func TestPool_PreloadCapacity(t *testing.T) {
 		p.SetReadaheadBudget(tt.budget)
 		assert.Equal(t, tt.want, p.PreloadCapacity(), "budget %d", tt.budget)
 		// The whole capacity must be reservable by a single preload.
-		assert.True(t, holdPreload(p, metainfo.Hash{1}, preloadReservation{bytes: tt.want}), "budget %d", tt.budget)
+		assert.True(t, holdPreload(p, metainfo.Hash{1}, nil, preloadReservation{bytes: tt.want}), "budget %d", tt.budget)
 	}
 }
 
@@ -816,9 +819,9 @@ func TestPool_ReservePreloadLocked(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 		p.SetReadaheadBudget(1000)
 
-		require.True(t, holdPreload(p, metainfo.Hash{1}, preloadReservation{bytes: 300}))
-		assert.False(t, holdPreload(p, metainfo.Hash{2}, preloadReservation{bytes: 300}), "only 200 bytes of the preload share are left")
-		require.True(t, holdPreload(p, metainfo.Hash{2}, preloadReservation{bytes: 200}))
+		require.True(t, holdPreload(p, metainfo.Hash{1}, nil, preloadReservation{bytes: 300}))
+		assert.False(t, holdPreload(p, metainfo.Hash{2}, nil, preloadReservation{bytes: 300}), "only 200 bytes of the preload share are left")
+		require.True(t, holdPreload(p, metainfo.Hash{2}, nil, preloadReservation{bytes: 200}))
 		p.mu.Lock()
 		available := p.availableProtectionBudgetLocked(p.readaheadBudget)
 		p.mu.Unlock()
@@ -838,7 +841,7 @@ func TestPool_ReservePreloadLocked(t *testing.T) {
 		}
 
 		preloadHash := metainfo.Hash{9}
-		require.True(t, holdPreload(p, preloadHash, preloadReservation{bytes: 600}))
+		require.True(t, holdPreload(p, preloadHash, nil, preloadReservation{bytes: 600}))
 		for _, sr := range p.readers {
 			assert.Equal(t, int64(160), sr.readahead, "readers share the budget left by the preload")
 		}
@@ -881,13 +884,13 @@ func TestPool_ReservePreloadLocked(t *testing.T) {
 
 		// A preload of another file of the torrent protects nothing this reader
 		// needs, so the reader keeps its boundaries and pays for the reservation.
-		require.True(t, holdPreload(pool, to.InfoHash(), preloadReservation{bytes: 16 << 20, coversBoundaries: true, filePath: "other.mkv"}))
+		require.True(t, holdPreload(pool, to.InfoHash(), &torrent.File{}, preloadReservation{bytes: 16 << 20, coversBoundaries: true}))
 		assert.Equal(t, 1, boundaries())
 		withOtherPreload := readahead()
 		pool.CancelPreload(to.InfoHash())
 
 		// A head-only preload of the playing file leaves its tail unprotected.
-		require.True(t, holdPreload(pool, to.InfoHash(), preloadReservation{bytes: 16 << 20, filePath: file.Path()}))
+		require.True(t, holdPreload(pool, to.InfoHash(), file, preloadReservation{bytes: 16 << 20}))
 		assert.Equal(t, 1, boundaries(), "a head-only preload must not suppress the tail boundary")
 		pool.CancelPreload(to.InfoHash())
 

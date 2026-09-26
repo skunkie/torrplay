@@ -597,11 +597,7 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		if sr.reader != nil {
 			sr.reader.SetReadahead(readahead)
 		}
-		var boundaryBytes int64
-		if sr.file != nil {
-			boundaryBytes = plan.boundaryBytes[readerFileKey{infoHash: sr.infoHash, filePath: sr.file.Path()}]
-		}
-		p.registerActiveRangeLocked(sr, readahead, boundaryBytes)
+		p.registerActiveRangeLocked(sr, readahead, plan.boundaryBytes[sr.file])
 	}
 
 	p.logger.Debug("refreshed readahead",
@@ -652,7 +648,7 @@ func (p *Pool) SetReadaheadBudget(budgetBytes int64) {
 type readaheadPlan struct {
 	// boundaryBytes holds the head and tail size for each file that keeps
 	// boundary protection. Files whose boundary pieces do not fit are absent.
-	boundaryBytes map[readerFileKey]int64
+	boundaryBytes map[*torrent.File]int64
 	// share is each reader's protection budget in bytes after boundaries.
 	share int64
 }
@@ -668,17 +664,17 @@ type readaheadPlan struct {
 func (p *Pool) planReadaheadLocked(totalBudget int64) readaheadPlan {
 	available := p.availableProtectionBudgetLocked(totalBudget)
 	activeCount := 0
-	activeFiles := make(map[readerFileKey]*torrent.File)
+	activeFiles := make(map[*torrent.File]struct{})
 	for _, sr := range p.readers {
 		if sr.active && !sr.isFileStorage {
 			activeCount++
-			if sr.file != nil && !p.preloadCoversFileLocked(sr.infoHash, sr.file.Path()) {
-				activeFiles[readerFileKey{infoHash: sr.infoHash, filePath: sr.file.Path()}] = sr.file
+			if sr.file != nil && !p.preloadCoversFileLocked(sr.infoHash, sr.file) {
+				activeFiles[sr.file] = struct{}{}
 			}
 		}
 	}
 	plan := readaheadPlan{
-		boundaryBytes: make(map[readerFileKey]int64, len(activeFiles)),
+		boundaryBytes: make(map[*torrent.File]int64, len(activeFiles)),
 		share:         available,
 	}
 	if activeCount < 1 {
@@ -687,9 +683,9 @@ func (p *Pool) planReadaheadLocked(totalBudget int64) readaheadPlan {
 
 	allowance := 2 * p.boundaryBytesPerFileLocked(available, len(activeFiles))
 	var boundaryCost int64
-	for key, file := range activeFiles {
+	for file := range activeFiles {
 		if boundaryBytes, cost, ok := fitFileBoundaries(file, allowance); ok {
-			plan.boundaryBytes[key] = boundaryBytes
+			plan.boundaryBytes[file] = boundaryBytes
 			boundaryCost += cost
 		}
 	}
@@ -759,11 +755,6 @@ func filePieceLength(file *torrent.File) int64 {
 // reserved by preload ranges. Must be called with p.mu held.
 func (p *Pool) availableProtectionBudgetLocked(totalBudget int64) int64 {
 	return max(totalBudget-p.reservedPreloadBytesLocked(), 0)
-}
-
-type readerFileKey struct {
-	infoHash metainfo.Hash
-	filePath string
 }
 
 // boundaryBytesPerFileLocked bounds the aggregate head-and-tail protection to
