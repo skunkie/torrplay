@@ -14,6 +14,7 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/torrplay/torrplay/pkg/storage"
 )
 
 // PreloadState is the lifecycle state of a torrent's preload.
@@ -143,10 +144,9 @@ type preloadReservation struct {
 	// headStart, headEnd, tailStart, and tailEnd are the inclusive piece
 	// ranges protected from eviction while the reservation is held.
 	headStart, headEnd, tailStart, tailEnd int
-	// headID and tailID identify the reservation's protected ranges in the
-	// registry. They are drawn from the reader ID sequence, so they never
-	// collide with a reader's own range.
-	headID, tailID uint64
+	// id identifies the reservation's protection in the registry. It is drawn
+	// from the reader ID sequence, so it never collides with a reader's.
+	id uint64
 }
 
 // Preload starts caching the head and tail of file, replacing any preload of
@@ -618,13 +618,13 @@ func (p *Pool) reservePreloadLocked(pl *preload) bool {
 		}
 	}
 	p.nextID++
-	pl.reservation.headID = p.nextID
-	p.nextID++
-	pl.reservation.tailID = p.nextID
+	pl.reservation.id = p.nextID
 	pl.reserved = true
 	if p.cfg.Registry != nil {
-		p.cfg.Registry.SetActiveRange(pl.infoHash, pl.reservation.headID, pl.reservation.headStart, pl.reservation.headEnd)
-		p.cfg.Registry.SetActiveRange(pl.infoHash, pl.reservation.tailID, pl.reservation.tailStart, pl.reservation.tailEnd)
+		p.cfg.Registry.SetProtection(pl.infoHash, pl.reservation.id, storage.Protection{Active: []storage.PieceRange{
+			{Start: pl.reservation.headStart, End: pl.reservation.headEnd},
+			{Start: pl.reservation.tailStart, End: pl.reservation.tailEnd},
+		}})
 	}
 	p.refreshReadaheadLocked()
 	return true
@@ -639,8 +639,7 @@ func (p *Pool) releasePreloadReservationLocked(pl *preload) {
 	}
 	pl.reserved = false
 	if p.cfg.Registry != nil {
-		p.cfg.Registry.ClearActiveRange(pl.infoHash, pl.reservation.headID)
-		p.cfg.Registry.ClearActiveRange(pl.infoHash, pl.reservation.tailID)
+		p.cfg.Registry.ClearProtection(pl.infoHash, pl.reservation.id)
 	}
 	p.refreshReadaheadLocked()
 }

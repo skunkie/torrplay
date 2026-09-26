@@ -147,7 +147,7 @@ func TestPreloadState_String(t *testing.T) {
 }
 
 func TestPool_Preload(t *testing.T) {
-	newPool := func(t *testing.T, reg ActiveRangeRegistry) *Pool {
+	newPool := func(t *testing.T, reg ProtectionRegistry) *Pool {
 		t.Helper()
 		pool := New(Config{Logger: testLogger(), Registry: reg})
 		t.Cleanup(pool.Close)

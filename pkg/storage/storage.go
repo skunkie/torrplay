@@ -60,10 +60,6 @@ type Client struct {
 	allocationCond *sync.Cond
 	// allocations tracks reservations until their buffers are published or refunded.
 	allocations sync.WaitGroup
-	// activeRanges tracks piece-index windows that readers are actively consuming.
-	// Pieces inside these ranges are protected from standard LRU eviction, except
-	// as a last resort under severe memory pressure (see emergency eviction).
-	activeRanges map[activeRangeKey]activeRange
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
 	// counters accumulates storage events for Counters.
@@ -77,9 +73,6 @@ type Client struct {
 	// evictedSignal wakes the eviction notifier. It is nil until a handler is
 	// registered.
 	evictedSignal chan struct{}
-	// fileBoundaries tracks head and tail piece ranges for media files being streamed
-	// or preloaded, protecting container metadata from standard LRU eviction.
-	fileBoundaries map[activeRangeKey]fileBoundary
 	// lru is the global least-recently-used list for all pieces.
 	lru       *list.List
 	logger    *slog.Logger
@@ -92,6 +85,9 @@ type Client struct {
 	// pendingAllocations counts reservations whose buffers have not yet been
 	// published or refunded. It is protected by mu.
 	pendingAllocations int
+	// protections holds the piece ranges each owner, such as a stream reader
+	// or a preload, protects from eviction.
+	protections map[protectionKey]Protection
 	// torrents tracks the state for each torrent being managed.
 	torrents map[metainfo.Hash]*torrentState
 	// used is the total memory currently consumed by piece data.
@@ -244,28 +240,33 @@ const (
 	protectNone
 )
 
-// activeRangeKey uniquely identifies a reader's active range within a torrent.
-type activeRangeKey struct {
+// protectionKey identifies one owner's protection within a torrent.
+type protectionKey struct {
 	infoHash metainfo.Hash
-	readerID uint64
+	ownerID  uint64
 }
 
-// activeRange stores the piece-index window [startPiece, endPiece] (inclusive)
-// that a reader is actively consuming, protecting those pieces from standard
-// LRU eviction (see emergency eviction for the last-resort exception).
-type activeRange struct {
-	endPiece   int
-	startPiece int
+// PieceRange is an inclusive range of torrent piece indexes.
+type PieceRange struct {
+	End   int
+	Start int
 }
 
-// fileBoundary stores the head and tail piece-index ranges [headStart, headEnd]
-// and [tailStart, tailEnd] (inclusive) for a media file, protecting container
-// metadata and seek indexes from standard LRU eviction throughout playback.
-type fileBoundary struct {
-	headEnd   int
-	headStart int
-	tailEnd   int
-	tailStart int
+// contains reports whether the range holds piece index.
+func (r PieceRange) contains(index int) bool {
+	return index >= r.Start && index <= r.End
+}
+
+// Protection holds the piece ranges one owner protects from standard LRU
+// eviction.
+type Protection struct {
+	// Active holds ranges being read or preloaded. Their pieces are evicted
+	// only as a last resort under severe memory pressure.
+	Active []PieceRange
+	// Boundaries holds the head and tail ranges of a streamed file, which keep
+	// container metadata such as MP4 moov atoms or Matroska cues resident.
+	// Their pieces are evicted before those of active ranges.
+	Boundaries []PieceRange
 }
 
 // torrentState holds the state specific to a single torrent.
@@ -293,14 +294,13 @@ func New(maxMemory int64, logger *slog.Logger) *Client {
 	}
 
 	c := &Client{
-		maxMemory:      maxMemory,
-		pieces:         make(map[pieceKey]*pieceData),
-		torrents:       make(map[metainfo.Hash]*torrentState),
-		activeRanges:   make(map[activeRangeKey]activeRange),
-		fileBoundaries: make(map[activeRangeKey]fileBoundary),
-		lru:            list.New(),
-		closeCh:        make(chan struct{}),
-		logger:         logger,
+		maxMemory:   maxMemory,
+		pieces:      make(map[pieceKey]*pieceData),
+		torrents:    make(map[metainfo.Hash]*torrentState),
+		protections: make(map[protectionKey]Protection),
+		lru:         list.New(),
+		closeCh:     make(chan struct{}),
+		logger:      logger,
 	}
 	c.allocationCond = sync.NewCond(&c.mu)
 	return c
@@ -332,8 +332,7 @@ func (c *Client) Close() error {
 
 	c.pieces = make(map[pieceKey]*pieceData)
 	c.torrents = make(map[metainfo.Hash]*torrentState)
-	c.activeRanges = make(map[activeRangeKey]activeRange)
-	c.fileBoundaries = make(map[activeRangeKey]fileBoundary)
+	c.protections = make(map[protectionKey]Protection)
 	c.lru.Init()
 	c.used = 0
 	close(c.closeCh)
@@ -914,15 +913,10 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 		totalEvicted += size
 	}
 
-	// Remove active ranges and file boundaries for this torrent.
-	for key := range c.activeRanges {
+	// Remove the protections for this torrent.
+	for key := range c.protections {
 		if key.infoHash == infoHash {
-			delete(c.activeRanges, key)
-		}
-	}
-	for key := range c.fileBoundaries {
-		if key.infoHash == infoHash {
-			delete(c.fileBoundaries, key)
+			delete(c.protections, key)
 		}
 	}
 
@@ -1009,8 +1003,7 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 				continue
 			}
 
-			inActiveRange := c.isPieceInActiveRangeLocked(key)
-			inFileBoundary := c.isPieceInFileBoundaryLocked(key)
+			inActiveRange, inFileBoundary := c.pieceProtectionLocked(key)
 			switch protection {
 			case protectActiveAndBoundaries:
 				if inActiveRange || inFileBoundary {
@@ -1125,97 +1118,59 @@ func (pd *pieceData) rangeWritten(start, end int64) bool {
 	return i < len(pd.writtenRanges) && pd.writtenRanges[i].start <= start && pd.writtenRanges[i].end >= end
 }
 
-// isPieceInActiveRangeLocked checks whether a piece falls inside any registered
-// active reader range for the given torrent hash. Must be called with c.mu held.
-func (c *Client) isPieceInActiveRangeLocked(key pieceKey) bool {
-	for k, r := range c.activeRanges {
-		if k.infoHash == key.infoHash && key.index >= r.startPiece && key.index <= r.endPiece {
-			return true
+// pieceProtectionLocked reports whether a piece falls inside any registered
+// active range or file boundary of its torrent. Must be called with c.mu held.
+func (c *Client) pieceProtectionLocked(key pieceKey) (inActiveRange, inFileBoundary bool) {
+	for k, protection := range c.protections {
+		if k.infoHash != key.infoHash {
+			continue
+		}
+		if !inActiveRange && slices.ContainsFunc(protection.Active, func(r PieceRange) bool { return r.contains(key.index) }) {
+			inActiveRange = true
+		}
+		if !inFileBoundary && slices.ContainsFunc(protection.Boundaries, func(r PieceRange) bool { return r.contains(key.index) }) {
+			inFileBoundary = true
+		}
+		if inActiveRange && inFileBoundary {
+			return true, true
 		}
 	}
-	return false
+	return inActiveRange, inFileBoundary
 }
 
-// isPieceInFileBoundaryLocked checks whether a piece falls inside any registered
-// file boundary (head or tail range) for the given torrent hash. Must be called with c.mu held.
-func (c *Client) isPieceInFileBoundaryLocked(key pieceKey) bool {
-	for k, b := range c.fileBoundaries {
-		if k.infoHash == key.infoHash {
-			if (key.index >= b.headStart && key.index <= b.headEnd) ||
-				(key.index >= b.tailStart && key.index <= b.tailEnd) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// SetActiveRange registers or refreshes an inclusive piece-index range [start, end]
-// that a reader is actively consuming. Pieces inside this range are
-// protected from standard LRU eviction, except as a last resort during emergency
-// eviction under severe memory pressure (to prevent halting torrent downloads).
-// readerID is a unique, caller-chosen identifier.
-// start and end are absolute piece indices within the torrent.
-func (c *Client) SetActiveRange(infoHash metainfo.Hash, readerID uint64, start, end int) {
+// SetProtection replaces the piece ranges that the owner with ownerID, a
+// caller-chosen identifier unique within the torrent, protects from standard
+// LRU eviction. Ranges hold absolute piece indexes within the torrent. An
+// empty protection clears the owner's. Protection for a torrent the client no
+// longer manages is ignored.
+func (c *Client) SetProtection(infoHash metainfo.Hash, ownerID uint64, protection Protection) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Only register ranges for torrents that are still managed. A late
-	// callback from the stream pool can arrive after closeTorrent has
-	// already deleted the torrent state; silently drop it to prevent
-	// orphaned entries in the activeRanges map.
-	if _, exists := c.torrents[infoHash]; !exists {
+	key := protectionKey{infoHash: infoHash, ownerID: ownerID}
+	// A late call from the stream pool can arrive after closeTorrent has
+	// already deleted the torrent state; drop it to prevent orphaned entries.
+	if _, exists := c.torrents[infoHash]; !exists || (len(protection.Active) == 0 && len(protection.Boundaries) == 0) {
+		delete(c.protections, key)
 		return
 	}
-
-	c.activeRanges[activeRangeKey{infoHash: infoHash, readerID: readerID}] = activeRange{
-		endPiece:   end,
-		startPiece: start,
+	c.protections[key] = Protection{
+		Active:     slices.Clone(protection.Active),
+		Boundaries: slices.Clone(protection.Boundaries),
 	}
 }
 
-// ClearActiveRange removes the active range for a specific reader, allowing its
-// pieces to become eviction candidates again.
-func (c *Client) ClearActiveRange(infoHash metainfo.Hash, readerID uint64) {
+// ClearProtection removes the owner's protection, allowing its pieces to
+// become eviction candidates again.
+func (c *Client) ClearProtection(infoHash metainfo.Hash, ownerID uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	delete(c.activeRanges, activeRangeKey{infoHash: infoHash, readerID: readerID})
+	delete(c.protections, protectionKey{infoHash: infoHash, ownerID: ownerID})
 
-	c.logger.Debug("cleared active range",
+	c.logger.Debug("cleared protection",
 		slog.String("hash", infoHash.HexString()),
-		slog.Uint64("readerID", readerID))
-}
-
-// SetFileBoundaries registers or updates the head and tail piece-index ranges
-// for a file being streamed or preloaded, protecting those boundary pieces from standard
-// LRU eviction throughout playback.
-func (c *Client) SetFileBoundaries(infoHash metainfo.Hash, readerID uint64, headStart, headEnd, tailStart, tailEnd int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if _, exists := c.torrents[infoHash]; !exists {
-		return
-	}
-
-	c.fileBoundaries[activeRangeKey{infoHash: infoHash, readerID: readerID}] = fileBoundary{
-		headEnd:   headEnd,
-		headStart: headStart,
-		tailEnd:   tailEnd,
-		tailStart: tailStart,
-	}
-}
-
-// ClearFileBoundaries removes the protected file boundaries for a specific reader.
-func (c *Client) ClearFileBoundaries(infoHash metainfo.Hash, readerID uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	delete(c.fileBoundaries, activeRangeKey{infoHash: infoHash, readerID: readerID})
-
-	c.logger.Debug("cleared file boundaries",
-		slog.String("hash", infoHash.HexString()),
-		slog.Uint64("readerID", readerID))
+		slog.Uint64("ownerID", ownerID))
 }
 
 // evictPieceLocked removes a piece's data from memory and the LRU list and

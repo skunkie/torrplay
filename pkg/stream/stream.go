@@ -17,28 +17,21 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/torrplay/torrplay/pkg/storage"
 )
 
-// ActiveRangeRegistry is the stream pool's interface to the storage layer.
-// It is intentionally minimal so that any storage implementation can
-// satisfy it without importing the stream package.
-type ActiveRangeRegistry interface {
-	// SetActiveRange registers or refreshes a piece-index window [start, end]
-	// (inclusive) that a reader is actively consuming. Pieces inside this
-	// window are protected from eviction on a best-effort basis; an
-	// implementation may still evict them under severe memory pressure
-	// rather than fail an incoming write outright.
-	SetActiveRange(infoHash metainfo.Hash, readerID uint64, start, end int)
+// ProtectionRegistry is the stream pool's interface to the storage layer's
+// eviction protection, implemented by *storage.Client. Readers and preloads
+// each own one protection, identified by an ID unique within the pool.
+type ProtectionRegistry interface {
+	// SetProtection replaces the piece ranges the owner with ownerID protects
+	// from eviction. Protection is best effort: storage may still evict
+	// protected pieces under severe memory pressure rather than fail an
+	// incoming write.
+	SetProtection(infoHash metainfo.Hash, ownerID uint64, protection storage.Protection)
 
-	// ClearActiveRange removes the active range for a specific reader.
-	ClearActiveRange(infoHash metainfo.Hash, readerID uint64)
-
-	// SetFileBoundaries registers or updates the head and tail piece-index ranges
-	// for a file being streamed, protecting container metadata from standard LRU eviction.
-	SetFileBoundaries(infoHash metainfo.Hash, readerID uint64, headStart, headEnd, tailStart, tailEnd int)
-
-	// ClearFileBoundaries removes the protected file boundaries for a specific reader.
-	ClearFileBoundaries(infoHash metainfo.Hash, readerID uint64)
+	// ClearProtection removes the owner's protection.
+	ClearProtection(infoHash metainfo.Hash, ownerID uint64)
 }
 
 // ReaderPosition describes a reader's piece-index position and readahead window.
@@ -129,9 +122,9 @@ type Config struct {
 	// for torrent data. It runs on the reading goroutine, so it must return
 	// quickly.
 	ReadObserver func(mode StorageMode, duration time.Duration)
-	// Registry tracks active read ranges for piece eviction protection.
-	// Nil disables active-range tracking.
-	Registry ActiveRangeRegistry
+	// Registry protects the pieces readers and preloads need from eviction.
+	// Nil disables eviction protection.
+	Registry ProtectionRegistry
 }
 
 type prioritizedPiece struct {
@@ -292,7 +285,10 @@ func (s *streamReadSeeker) retire() {
 
 // streamReader wraps a torrent.Reader with lifecycle management.
 type streamReader struct {
-	active        bool
+	active bool
+	// boundaries holds the file head and tail ranges the reader protects
+	// alongside its window. Guarded by pool.mu.
+	boundaries    []storage.PieceRange
 	cancel        context.CancelFunc
 	file          *torrent.File
 	infoHash      metainfo.Hash
@@ -562,9 +558,9 @@ func torrentClosed(file *torrent.File) bool {
 func (p *Pool) clearReaderClaimsLocked(sr *streamReader) {
 	p.unclaimLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces)
 	sr.prioritizedPieces = nil
+	sr.boundaries = nil
 	if p.cfg.Registry != nil {
-		p.cfg.Registry.ClearActiveRange(sr.infoHash, sr.readerID)
-		p.cfg.Registry.ClearFileBoundaries(sr.infoHash, sr.readerID)
+		p.cfg.Registry.ClearProtection(sr.infoHash, sr.readerID)
 	}
 }
 
@@ -771,7 +767,7 @@ func readerWindow(file *torrent.File, readahead, byteOffset int64) (start, posit
 	}
 	readaheadPieces := max(readahead/pieceLength, 0)
 	beginPiece := int64(file.BeginPieceIndex())
-	// EndPieceIndex is exclusive; ActiveRangeRegistry endpoints are inclusive.
+	// EndPieceIndex is exclusive; protected piece ranges are inclusive.
 	endPieceMax := int64(file.EndPieceIndex()) - 1
 
 	positionPiece := min(max(filePiece(file, byteOffset), beginPiece), endPieceMax)
@@ -857,25 +853,32 @@ func boundaryPieces(headStart, headEnd, tailStart, tailEnd int) iter.Seq[int] {
 
 // registerActiveRangeLocked computes and registers the eviction-protection window
 // for a reader at its last reported position with the given readahead, and its
-// file boundaries of boundaryBytes each. A non-positive boundaryBytes clears any
+// file boundaries of boundaryBytes each. A non-positive boundaryBytes drops any
 // boundaries the reader registered before. Must be called with p.mu held.
 func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBytes int64) {
-	file, infoHash, readerID := sr.file, sr.infoHash, sr.readerID
 	if p.cfg.Registry == nil {
 		return
 	}
-	start, _, end, ok := readerWindow(file, readahead, sr.lastOffset)
+	start, _, end, ok := readerWindow(sr.file, readahead, sr.lastOffset)
 	if !ok {
 		return
 	}
-	p.cfg.Registry.SetActiveRange(infoHash, readerID, start, end)
-	if boundaryBytes <= 0 {
-		p.cfg.Registry.ClearFileBoundaries(infoHash, readerID)
-		return
+	sr.boundaries = nil
+	if boundaryBytes > 0 {
+		if hs, he, ts, te, ok := computeFileBoundaries(sr.file, boundaryBytes); ok {
+			sr.boundaries = []storage.PieceRange{{Start: hs, End: he}, {Start: ts, End: te}}
+		}
 	}
-	if hs, he, ts, te, ok := computeFileBoundaries(file, boundaryBytes); ok {
-		p.cfg.Registry.SetFileBoundaries(infoHash, readerID, hs, he, ts, te)
-	}
+	p.protectReaderLocked(sr, start, end)
+}
+
+// protectReaderLocked protects a reader's window [start, end] together with
+// its file boundaries. Must be called with p.mu held.
+func (p *Pool) protectReaderLocked(sr *streamReader, start, end int) {
+	p.cfg.Registry.SetProtection(sr.infoHash, sr.readerID, storage.Protection{
+		Active:     []storage.PieceRange{{Start: start, End: end}},
+		Boundaries: sr.boundaries,
+	})
 }
 
 // prioritizeNextPieces plans the PiecePriorityNow claims for the pieces just
@@ -1009,7 +1012,7 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 
 	if !sr.isFileStorage && p.cfg.Registry != nil {
 		if start, _, end, ok := readerWindow(file, readahead, newOffset); ok {
-			p.cfg.Registry.SetActiveRange(sr.infoHash, readerID, start, end)
+			p.protectReaderLocked(sr, start, end)
 		}
 	}
 	p.mu.Unlock()

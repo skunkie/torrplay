@@ -34,7 +34,7 @@
 //     evicted mid-download, fails with ErrPieceIncomplete rather than a wrong hash, so the torrent
 //     client re-downloads it instead of banning the peers that sent it.
 //
-//  6. Eviction Protection: Satisfies the stream.ActiveRangeRegistry interface so that
+//  6. Eviction Protection: Satisfies the stream.ProtectionRegistry interface so that
 //     actively-read pieces and file boundary pieces are protected from standard LRU eviction.
 //     Under memory pressure, boundary protection yields first; active ranges are evicted only
 //     as a last resort to prevent download stalls.
@@ -113,15 +113,15 @@
 //
 // # Eviction Protection
 //
-// The storage client maintains two kinds of protected piece ranges, both keyed by
-// (info hash, reader ID):
+// SetProtection replaces the piece ranges one owner, keyed by (info hash, owner
+// ID), protects, and ClearProtection removes them. A Protection holds two kinds
+// of ranges:
 //
-//   - Active ranges: SetActiveRange marks a reader's readahead window as protected and
-//     ClearActiveRange removes it. The stream pool uses these to keep the pieces around
-//     the current playback position in memory.
-//   - File boundaries: SetFileBoundaries marks the head and tail piece ranges of a streamed
-//     file as protected and ClearFileBoundaries removes them. These keep container metadata,
-//     such as MP4 moov atoms or Matroska cues, resident while a reader seeks.
+//   - Active ranges keep the pieces around a reader's playback position, or a
+//     preload's pieces, in memory.
+//   - File boundaries keep the head and tail of a streamed file, and with them
+//     container metadata such as MP4 moov atoms or Matroska cues, resident while
+//     a reader seeks.
 //
 // When an incoming piece needs space, eviction walks the LRU list in up to three passes,
 // each stopping as soon as the allocation fits:

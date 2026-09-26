@@ -9,7 +9,7 @@
 // It multiplexes multiple concurrent readers per torrent file, keeps a released
 // reader reading ahead briefly for the player's next request, caches the head
 // and tail of files before they are played, and coordinates with the storage
-// layer via the ActiveRangeRegistry interface to protect actively-read and
+// layer via the ProtectionRegistry interface to protect actively-read and
 // preloaded pieces from eviction.
 //
 // # Overview
@@ -36,7 +36,7 @@
 // # Active Range Protection
 //
 // Each active memory-storage reader registers a forward-weighted readahead
-// window (1/4 behind, full readahead ahead) through the ActiveRangeRegistry
+// window (1/4 behind, full readahead ahead) through the ProtectionRegistry
 // interface; file-storage pieces live on disk and need no protection. Pieces
 // inside this window are protected from LRU eviction. When the reader is
 // released, the active range is cleared immediately so those pieces become

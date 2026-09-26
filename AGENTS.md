@@ -91,7 +91,7 @@ fix(controller): move debug profiler to loopback-only listener
 - **Streaming Endpoints & Deadlines**:
   - Disable HTTP read and write deadlines using `http.NewResponseController(w)` on streaming endpoints before calling `http.ServeContent`.
 - **Storage Eviction Protection & Dynamic Readahead**:
-  - Maintain active range windows (`SetActiveRange` / `ClearActiveRange`) for active streaming readers to protect prefetched pieces from LRU memory eviction.
+  - Maintain eviction protection (`SetProtection` / `ClearProtection`) for active streaming readers and preloads to protect prefetched pieces and file boundaries from LRU memory eviction.
   - Dynamically scale and redistribute readahead budgets across active readers in `pkg/stream`.
 - **Profiler & Debug Listener Isolation**:
   - Debug profiling endpoints (`/debug/pprof`) must only be served from dedicated loopback listeners (`127.0.0.1`) and never exposed on public HTTP routers.

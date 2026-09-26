@@ -24,55 +24,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/testutil"
+	"github.com/torrplay/torrplay/pkg/storage"
 )
 
 func TestMain(m *testing.M) {
 	testutil.VerifyTestMain(m)
 }
 
-// stubRegistry implements ActiveRangeRegistry for testing.
+// stubRegistry implements ProtectionRegistry for testing. It records the
+// calls it receives and the last protection set.
 type stubRegistry struct {
-	sets           int
-	clears         int
-	boundarySets   int
-	boundaryClears int
-	last           activeRange
-	lastBoundary   testFileBoundary
+	clears int
+	last   storage.Protection
+	sets   int
 }
 
-type testFileBoundary struct {
-	headStart int
-	headEnd   int
-	tailStart int
-	tailEnd   int
-}
-
-func (r *stubRegistry) SetActiveRange(_ metainfo.Hash, _ uint64, start, end int) {
+func (r *stubRegistry) SetProtection(_ metainfo.Hash, _ uint64, protection storage.Protection) {
 	r.sets++
-	r.last = activeRange{startPiece: start, endPiece: end}
+	r.last = protection
 }
 
-func (r *stubRegistry) ClearActiveRange(_ metainfo.Hash, _ uint64) {
+func (r *stubRegistry) ClearProtection(_ metainfo.Hash, _ uint64) {
 	r.clears++
-}
-
-func (r *stubRegistry) SetFileBoundaries(_ metainfo.Hash, _ uint64, headStart, headEnd, tailStart, tailEnd int) {
-	r.boundarySets++
-	r.lastBoundary = testFileBoundary{
-		headStart: headStart,
-		headEnd:   headEnd,
-		tailStart: tailStart,
-		tailEnd:   tailEnd,
-	}
-}
-
-func (r *stubRegistry) ClearFileBoundaries(_ metainfo.Hash, _ uint64) {
-	r.boundaryClears++
-}
-
-type activeRange struct {
-	startPiece int
-	endPiece   int
 }
 
 // mockReader is a minimal torrent.Reader mock for rebalancing tests.
@@ -397,7 +370,7 @@ func TestPool_Close(t *testing.T) {
 			t.Fatalf("expected 0 readers initially, got %d", len(p.readers))
 		}
 		if reg.clears != 0 {
-			t.Fatalf("expected 0 ClearActiveRange calls initially, got %d", reg.clears)
+			t.Fatalf("expected 0 ClearProtection calls initially, got %d", reg.clears)
 		}
 
 		p.Close()
@@ -710,10 +683,7 @@ func TestPool_Release(t *testing.T) {
 		p.release(42)
 
 		if reg.clears != 1 {
-			t.Fatalf("expected 1 ClearActiveRange call on release, got %d", reg.clears)
-		}
-		if reg.boundaryClears != 1 {
-			t.Fatalf("expected file boundaries to be cleared on release, got %d clears", reg.boundaryClears)
+			t.Fatalf("expected 1 ClearProtection call on release, got %d", reg.clears)
 		}
 	})
 }
@@ -840,7 +810,7 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 	})
 }
 
-func TestPoolActiveRangeRegistry(t *testing.T) {
+func TestPoolProtectionRegistry(t *testing.T) {
 	t.Run("clears on release", func(t *testing.T) {
 		reg := &stubRegistry{}
 		p := newTestPool(t, Config{
@@ -860,7 +830,7 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 		p.release(42)
 
 		if reg.clears != 1 {
-			t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clears)
+			t.Fatalf("expected 1 ClearProtection call, got %d", reg.clears)
 		}
 	})
 
@@ -884,10 +854,7 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 		p.Close()
 
 		if reg.clears != 2 {
-			t.Fatalf("expected 2 ClearActiveRange calls, got %d", reg.clears)
-		}
-		if reg.boundaryClears != 2 {
-			t.Fatalf("expected 2 ClearFileBoundaries calls, got %d", reg.boundaryClears)
+			t.Fatalf("expected 2 ClearProtection calls, got %d", reg.clears)
 		}
 	})
 

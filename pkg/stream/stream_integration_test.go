@@ -290,18 +290,18 @@ func TestPool_Acquire(t *testing.T) {
 
 		_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
 		if reg.setCalls.Load() != 1 {
-			t.Fatalf("expected 1 SetActiveRange call, got %d", reg.setCalls.Load())
+			t.Fatalf("expected 1 SetProtection call, got %d", reg.setCalls.Load())
 		}
 
 		// Verify the registry captured the last range values.
 		snap := reg.lastRangeSnapshot()
-		if snap.start > snap.end {
-			t.Fatalf("expected start <= end, got start=%d end=%d", snap.start, snap.end)
+		if snap.Start > snap.End {
+			t.Fatalf("expected start <= end, got start=%d end=%d", snap.Start, snap.End)
 		}
 
 		release()
 		if reg.clearCalls.Load() != 1 {
-			t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clearCalls.Load())
+			t.Fatalf("expected 1 ClearProtection call, got %d", reg.clearCalls.Load())
 		}
 
 		pool.Close()
@@ -618,46 +618,26 @@ func TestPool_ReaderPositions(t *testing.T) {
 }
 
 type testRegistry struct {
-	setCalls         atomic.Int32
-	clearCalls       atomic.Int32
-	boundarySetCalls atomic.Int32
-	mu               sync.Mutex
-	lastRange        struct {
-		infoHash metainfo.Hash
-		readerID uint64
-		start    int
-		end      int
+	clearCalls atomic.Int32
+	lastRange  storage.PieceRange
+	mu         sync.Mutex
+	setCalls   atomic.Int32
+}
+
+func (r *testRegistry) SetProtection(_ metainfo.Hash, _ uint64, protection storage.Protection) {
+	r.setCalls.Add(1)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(protection.Active) > 0 {
+		r.lastRange = protection.Active[0]
 	}
 }
 
-func (r *testRegistry) SetActiveRange(infoHash metainfo.Hash, readerID uint64, start, end int) {
-	r.setCalls.Add(1)
-	r.mu.Lock()
-	r.lastRange = struct {
-		infoHash metainfo.Hash
-		readerID uint64
-		start    int
-		end      int
-	}{infoHash: infoHash, readerID: readerID, start: start, end: end}
-	r.mu.Unlock()
-}
-
-func (r *testRegistry) ClearActiveRange(_ metainfo.Hash, _ uint64) {
+func (r *testRegistry) ClearProtection(_ metainfo.Hash, _ uint64) {
 	r.clearCalls.Add(1)
 }
 
-func (r *testRegistry) SetFileBoundaries(_ metainfo.Hash, _ uint64, _, _, _, _ int) {
-	r.boundarySetCalls.Add(1)
-}
-
-func (r *testRegistry) ClearFileBoundaries(_ metainfo.Hash, _ uint64) {}
-
-func (r *testRegistry) lastRangeSnapshot() struct {
-	infoHash metainfo.Hash
-	readerID uint64
-	start    int
-	end      int
-} {
+func (r *testRegistry) lastRangeSnapshot() storage.PieceRange {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.lastRange
@@ -843,55 +823,50 @@ func TestComputeRange(t *testing.T) {
 
 // protectionRegistry records the ranges each reader currently protects.
 type protectionRegistry struct {
+	// boundaries and ranges hold each owner's boundary and active ranges.
+	// Owners without ranges of a kind are absent.
+	boundaries map[uint64][]storage.PieceRange
 	mu         sync.Mutex
-	ranges     map[uint64]activeRange
-	boundaries map[uint64]testFileBoundary
+	ranges     map[uint64][]storage.PieceRange
 }
 
 func newProtectionRegistry() *protectionRegistry {
-	return &protectionRegistry{ranges: make(map[uint64]activeRange), boundaries: make(map[uint64]testFileBoundary)}
+	return &protectionRegistry{ranges: make(map[uint64][]storage.PieceRange), boundaries: make(map[uint64][]storage.PieceRange)}
 }
 
-func (r *protectionRegistry) SetActiveRange(_ metainfo.Hash, readerID uint64, start, end int) {
+func (r *protectionRegistry) SetProtection(_ metainfo.Hash, ownerID uint64, protection storage.Protection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.ranges[readerID] = activeRange{startPiece: start, endPiece: end}
+	delete(r.ranges, ownerID)
+	delete(r.boundaries, ownerID)
+	if len(protection.Active) > 0 {
+		r.ranges[ownerID] = protection.Active
+	}
+	if len(protection.Boundaries) > 0 {
+		r.boundaries[ownerID] = protection.Boundaries
+	}
 }
 
-func (r *protectionRegistry) ClearActiveRange(_ metainfo.Hash, readerID uint64) {
+func (r *protectionRegistry) ClearProtection(_ metainfo.Hash, ownerID uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.ranges, readerID)
+	delete(r.ranges, ownerID)
+	delete(r.boundaries, ownerID)
 }
 
-func (r *protectionRegistry) SetFileBoundaries(_ metainfo.Hash, readerID uint64, headStart, headEnd, tailStart, tailEnd int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.boundaries[readerID] = testFileBoundary{headStart: headStart, headEnd: headEnd, tailStart: tailStart, tailEnd: tailEnd}
-}
-
-func (r *protectionRegistry) ClearFileBoundaries(_ metainfo.Hash, readerID uint64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.boundaries, readerID)
-}
-
-// protectedPieces returns the distinct pieces protected by any reader.
+// protectedPieces returns the distinct pieces protected by any owner.
 func (r *protectionRegistry) protectedPieces() map[int]struct{} {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	pieces := make(map[int]struct{})
-	add := func(start, end int) {
-		for index := start; index <= end; index++ {
-			pieces[index] = struct{}{}
+	for _, owned := range []map[uint64][]storage.PieceRange{r.ranges, r.boundaries} {
+		for _, ranges := range owned {
+			for _, protected := range ranges {
+				for index := protected.Start; index <= protected.End; index++ {
+					pieces[index] = struct{}{}
+				}
+			}
 		}
-	}
-	for _, protected := range r.ranges {
-		add(protected.startPiece, protected.endPiece)
-	}
-	for _, boundary := range r.boundaries {
-		add(boundary.headStart, boundary.headEnd)
-		add(boundary.tailStart, boundary.tailEnd)
 	}
 	return pieces
 }
@@ -972,12 +947,34 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	setsBeforeBoundary := reg.sets
 	pool.updateActiveRange(key, 32)
 	assert.Equal(t, setsBeforeBoundary+1, reg.sets, "crossing a torrent piece must refresh the active range")
-	assert.Equal(t, 2, reg.last.endPiece, "readahead must follow the actual torrent piece")
+	require.Len(t, reg.last.Active, 1)
+	assert.Equal(t, 2, reg.last.Active[0].End, "readahead must follow the actual torrent piece")
 
 	positions := pool.ReaderPositions(to.InfoHash())
 	require.Len(t, positions, 1)
 	assert.Equal(t, 1, positions[0].Position)
 	assert.Equal(t, 2, positions[0].End)
+}
+
+func TestPoolReaderMoveKeepsBoundaries(t *testing.T) {
+	c := newTestTorrentClient(t)
+	_, file := addSizedTorrent(t, c, "movie", 64, 64*64)
+	reg := &stubRegistry{}
+	pool := New(Config{Registry: reg, Logger: testLogger()})
+	defer pool.Close()
+	pool.SetReadaheadBudget(64 * 16)
+
+	_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
+	require.NoError(t, err)
+	defer release()
+	boundaries := reg.last.Boundaries
+	require.NotEmpty(t, boundaries, "the reader must protect its file's boundaries")
+
+	pool.updateActiveRange(1, 64*30)
+	require.Len(t, reg.last.Active, 1)
+	window := reg.last.Active[0]
+	assert.True(t, window.Start <= 30 && 30 <= window.End, "the window must follow the reader, got %+v", window)
+	assert.Equal(t, boundaries, reg.last.Boundaries, "moving the window must keep the boundaries")
 }
 
 func TestFilePieceRanges(t *testing.T) {
