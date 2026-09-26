@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1093,14 +1095,13 @@ func fitFileBoundaries(file *torrent.File, allowance int64) (boundaryBytes, cost
 	if pieceLength <= 0 {
 		return allowance / 2, min(file.Length(), allowance), true
 	}
+	info := file.Torrent().Info()
 	for boundaryBytes = allowance / 2; ; boundaryBytes = max(boundaryBytes-pieceLength, pieceLength) {
 		headStart, headEnd, tailStart, tailEnd, ok := computeFileBoundaries(file, boundaryBytes)
 		if !ok {
 			return 0, 0, false
 		}
-		// The tail may repeat or overlap the head; count shared pieces once.
-		pieces := int64(headEnd-headStart+1) + int64(max(tailEnd-max(tailStart, headEnd+1)+1, 0))
-		if cost = pieces * pieceLength; cost <= allowance {
+		if cost = BoundaryPieceBytes(info, headStart, headEnd, tailStart, tailEnd); cost <= allowance {
 			return boundaryBytes, cost, true
 		}
 		if boundaryBytes <= pieceLength {
@@ -1223,26 +1224,63 @@ func computeFileBoundaries(file *torrent.File, boundaryBytes int64) (headStart, 
 	if file == nil || file.Length() == 0 {
 		return 0, 0, 0, 0, false
 	}
-	tor := file.Torrent()
-	if tor == nil || tor.Info() == nil {
+	length := file.Length()
+	startend := max(boundaryBytes, filePieceLength(file))
+	return FilePieceRanges(file, min(length, startend), max(length-startend, 0), length)
+}
+
+// FilePieceRanges returns the inclusive torrent piece ranges holding the
+// file-relative byte ranges [0, headEnd) and [tailStart, tailEnd). An empty
+// tail range repeats the head range. It returns false when the file has no
+// piece metadata or the head range is empty.
+func FilePieceRanges(file *torrent.File, headEnd, tailStart, tailEnd int64) (int, int, int, int, bool) {
+	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil || headEnd <= 0 {
 		return 0, 0, 0, 0, false
 	}
-	pieceLength := tor.Info().PieceLength
-	if pieceLength <= 0 {
-		pieceLength = 1
-	}
-
-	startend := max(boundaryBytes, pieceLength)
+	pieceLength := max(file.Torrent().Info().PieceLength, 1)
 	fileOffset := file.Offset()
-	fileEndOffset := fileOffset + file.Length()
+	headStartPiece := int(fileOffset / pieceLength)
+	headEndPiece := int((fileOffset + headEnd - 1) / pieceLength)
+	if tailEnd <= tailStart {
+		return headStartPiece, headEndPiece, headStartPiece, headEndPiece, true
+	}
+	return headStartPiece, headEndPiece,
+		int((fileOffset + tailStart) / pieceLength),
+		int((fileOffset + tailEnd - 1) / pieceLength), true
+}
 
-	headPieceStart := int(fileOffset / pieceLength)
-	headPieceEnd := int(min(fileEndOffset-1, fileOffset+startend-1) / pieceLength)
+// BoundaryPieces returns the pieces of the inclusive head and tail piece
+// ranges in ascending order. The tail may repeat or overlap the head; pieces
+// shared by both are listed once.
+func BoundaryPieces(headStart, headEnd, tailStart, tailEnd int) []int {
+	pieces := make([]int, 0, max(headEnd-headStart+1, 0)+max(tailEnd-tailStart+1, 0))
+	return slices.AppendSeq(pieces, boundaryPieces(headStart, headEnd, tailStart, tailEnd))
+}
 
-	tailPieceStart := int(max(fileOffset, fileEndOffset-startend) / pieceLength)
-	tailPieceEnd := int((fileEndOffset - 1) / pieceLength)
+// BoundaryPieceBytes returns the storage size of the pieces BoundaryPieces
+// lists. Storage protects and evicts whole pieces, so this is the memory the
+// head and tail ranges occupy, including a shorter final piece at its real size.
+func BoundaryPieceBytes(info *metainfo.Info, headStart, headEnd, tailStart, tailEnd int) int64 {
+	var total int64
+	for index := range boundaryPieces(headStart, headEnd, tailStart, tailEnd) {
+		total += info.Piece(index).Length()
+	}
+	return total
+}
 
-	return headPieceStart, headPieceEnd, tailPieceStart, tailPieceEnd, true
+func boundaryPieces(headStart, headEnd, tailStart, tailEnd int) iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for index := headStart; index <= headEnd; index++ {
+			if !yield(index) {
+				return
+			}
+		}
+		for index := max(tailStart, headEnd+1); index <= tailEnd; index++ {
+			if !yield(index) {
+				return
+			}
+		}
+	}
 }
 
 // registerActiveRangeLocked computes and registers the eviction-protection window

@@ -1148,6 +1148,56 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	assert.Equal(t, 3, plan[1].index)
 }
 
+func TestFilePieceRanges(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, _ := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
+	// video.bin spans torrent bytes [32, 544) across 64-byte pieces 0 through 8.
+	video := to.Files()[1]
+
+	tests := []struct {
+		name                        string
+		headEnd, tailStart, tailEnd int64
+		want                        [4]int
+		ok                          bool
+	}{
+		{name: "head and tail", headEnd: 32, tailStart: 480, tailEnd: 512, want: [4]int{0, 0, 8, 8}, ok: true},
+		{name: "head crosses a piece boundary", headEnd: 33, tailStart: 479, tailEnd: 512, want: [4]int{0, 1, 7, 8}, ok: true},
+		{name: "empty tail repeats head", headEnd: 100, want: [4]int{0, 2, 0, 2}, ok: true},
+		{name: "empty head", headEnd: 0, tailStart: 480, tailEnd: 512},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			headStart, headEnd, tailStart, tailEnd, ok := FilePieceRanges(video, tt.headEnd, tt.tailStart, tt.tailEnd)
+			assert.Equal(t, tt.ok, ok)
+			if tt.ok {
+				assert.Equal(t, tt.want, [4]int{headStart, headEnd, tailStart, tailEnd})
+			}
+		})
+	}
+
+	t.Run("nil file", func(t *testing.T) {
+		_, _, _, _, ok := FilePieceRanges(nil, 32, 0, 0)
+		assert.False(t, ok)
+	})
+}
+
+func TestFitFileBoundaries(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, _ := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
+	video := to.Files()[1]
+
+	// 64-byte boundaries cover head pieces 0 and 1 and tail pieces 7 and 8,
+	// the torrent's 32-byte final piece. Costing that piece at its real size
+	// lets them fit within 224 bytes.
+	boundaryBytes, cost, ok := fitFileBoundaries(video, 224)
+	require.True(t, ok)
+	assert.Equal(t, int64(64), boundaryBytes)
+	assert.Equal(t, int64(64+64+64+32), cost)
+
+	_, _, ok = fitFileBoundaries(video, 128)
+	assert.False(t, ok, "four boundary pieces cannot fit within 128 bytes")
+}
+
 func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, file := addMultiPieceTorrent(t, c)

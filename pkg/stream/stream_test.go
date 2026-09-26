@@ -1625,6 +1625,45 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 }
 
 // TestComputeFileBoundaries verifies that computeFileBoundaries handles a nil or empty file.
+func TestBoundaryPieces(t *testing.T) {
+	tests := []struct {
+		name                                   string
+		headStart, headEnd, tailStart, tailEnd int
+		want                                   []int
+	}{
+		{name: "tail repeats head", headStart: 0, headEnd: 1, tailStart: 0, tailEnd: 1, want: []int{0, 1}},
+		{name: "disjoint head and tail", headStart: 0, headEnd: 1, tailStart: 5, tailEnd: 6, want: []int{0, 1, 5, 6}},
+		{name: "overlapping head and tail", headStart: 0, headEnd: 3, tailStart: 2, tailEnd: 5, want: []int{0, 1, 2, 3, 4, 5}},
+		{name: "adjacent head and tail", headStart: 0, headEnd: 2, tailStart: 3, tailEnd: 4, want: []int{0, 1, 2, 3, 4}},
+		{name: "tail inside head", headStart: 0, headEnd: 5, tailStart: 2, tailEnd: 3, want: []int{0, 1, 2, 3, 4, 5}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, BoundaryPieces(tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd))
+		})
+	}
+}
+
+func TestBoundaryPieceBytes(t *testing.T) {
+	// Six full 16-byte pieces followed by a 4-byte final piece.
+	info := &metainfo.Info{PieceLength: 16, Length: 100, Pieces: make([]byte, 7*sha1.Size)}
+	tests := []struct {
+		name                                   string
+		headStart, headEnd, tailStart, tailEnd int
+		want                                   int64
+	}{
+		{name: "head only", headStart: 0, headEnd: 1, tailStart: 0, tailEnd: 1, want: 32},
+		{name: "disjoint head and tail", headStart: 0, headEnd: 1, tailStart: 5, tailEnd: 6, want: 32 + 16 + 4},
+		{name: "overlapping head and tail", headStart: 0, headEnd: 3, tailStart: 2, tailEnd: 6, want: 6*16 + 4},
+		{name: "adjacent head and tail", headStart: 0, headEnd: 2, tailStart: 3, tailEnd: 4, want: 5 * 16},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, BoundaryPieceBytes(info, tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd))
+		})
+	}
+}
+
 func TestComputeFileBoundaries(t *testing.T) {
 	_, _, _, _, ok := ComputeFileBoundaries(nil)
 	if ok {

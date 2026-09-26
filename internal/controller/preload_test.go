@@ -675,26 +675,6 @@ func TestPreloadCoversBoundaries(t *testing.T) {
 	}
 }
 
-func TestPreloadProtectedBytes(t *testing.T) {
-	// Six full 16-byte pieces followed by a 4-byte final piece.
-	info := &metainfo.Info{PieceLength: 16, Length: 100, Pieces: make([]byte, 7*sha1.Size)}
-	tests := []struct {
-		name                                   string
-		headStart, headEnd, tailStart, tailEnd int
-		expected                               int64
-	}{
-		{name: "head only", headStart: 0, headEnd: 1, tailStart: 0, tailEnd: 1, expected: 32},
-		{name: "disjoint head and tail", headStart: 0, headEnd: 1, tailStart: 5, tailEnd: 6, expected: 32 + 16 + 4},
-		{name: "overlapping head and tail", headStart: 0, headEnd: 3, tailStart: 2, tailEnd: 6, expected: 6*16 + 4},
-		{name: "adjacent head and tail", headStart: 0, headEnd: 2, tailStart: 3, tailEnd: 4, expected: 5 * 16},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, preloadProtectedBytes(info, tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd))
-		})
-	}
-}
-
 func TestStartPreloadReservesWholeProtectedPieces(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

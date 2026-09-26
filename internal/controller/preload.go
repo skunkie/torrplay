@@ -558,7 +558,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		readerStartEnd, readerEndStart, readerEndEnd = fitPreloadRanges(file, limit, readerStartEnd, readerEndStart, readerEndEnd)
 		targetBytes = readerStartEnd + (readerEndEnd - readerEndStart)
 	}
-	headStart, headEnd, tailStart, tailEnd, hasProtection := preloadPieceBoundaries(file, readerStartEnd, readerEndStart, readerEndEnd)
+	headStart, headEnd, tailStart, tailEnd, hasProtection := stream.FilePieceRanges(file, readerStartEnd, readerEndStart, readerEndEnd)
 	if !hasProtection {
 		// Not even one piece fits the memory limit.
 		if old, ok := c.preloads.LoadAndDelete(ih); ok {
@@ -570,8 +570,8 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		return nil
 	}
 	coversBoundaries := preloadCoversBoundaries(file.Length(), readerStartEnd, readerEndStart, readerEndEnd)
-	reserveBytes := preloadProtectedBytes(to.Info(), headStart, headEnd, tailStart, tailEnd)
-	protectedPieces := preloadProtectedPieceIndexes(headStart, headEnd, tailStart, tailEnd)
+	reserveBytes := stream.BoundaryPieceBytes(to.Info(), headStart, headEnd, tailStart, tailEnd)
+	protectedPieces := stream.BoundaryPieces(headStart, headEnd, tailStart, tailEnd)
 
 	if old, ok := c.preloads.LoadAndDelete(ih); ok {
 		if p, ok := old.(*preloadTask); ok {
@@ -921,22 +921,6 @@ func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool
 	return headEnd > 0 && (headEnd >= fileLength || (tailEnd > tailStart && tailEnd >= fileLength))
 }
 
-func preloadPieceBoundaries(file *torrent.File, headEnd, tailStart, tailEnd int64) (int, int, int, int, bool) {
-	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil || headEnd <= 0 {
-		return 0, 0, 0, 0, false
-	}
-	pieceLength := max(file.Torrent().Info().PieceLength, 1)
-	fileOffset := file.Offset()
-	headStartPiece := int(fileOffset / pieceLength)
-	headEndPiece := int((fileOffset + headEnd - 1) / pieceLength)
-	if tailEnd <= tailStart {
-		return headStartPiece, headEndPiece, headStartPiece, headEndPiece, true
-	}
-	return headStartPiece, headEndPiece,
-		int((fileOffset + tailStart) / pieceLength),
-		int((fileOffset + tailEnd - 1) / pieceLength), true
-}
-
 // fitPreloadRanges trims the head range [0, headEnd) and the tail range
 // [tailStart, tailEnd) until the whole pieces they touch fit within budget.
 // Storage protects and evicts complete pieces, so a range ending one byte into
@@ -950,8 +934,8 @@ func fitPreloadRanges(file *torrent.File, budget, headEnd, tailStart, tailEnd in
 	pieceLength := max(info.PieceLength, 1)
 	fileOffset := file.Offset()
 	for headEnd > 0 {
-		headStartPiece, headEndPiece, tailStartPiece, tailEndPiece, ok := preloadPieceBoundaries(file, headEnd, tailStart, tailEnd)
-		if !ok || preloadProtectedBytes(info, headStartPiece, headEndPiece, tailStartPiece, tailEndPiece) <= budget {
+		headStartPiece, headEndPiece, tailStartPiece, tailEndPiece, ok := stream.FilePieceRanges(file, headEnd, tailStart, tailEnd)
+		if !ok || stream.BoundaryPieceBytes(info, headStartPiece, headEndPiece, tailStartPiece, tailEndPiece) <= budget {
 			break
 		}
 		headPieces := headEndPiece - headStartPiece + 1
@@ -973,30 +957,6 @@ func fitPreloadRanges(file *torrent.File, budget, headEnd, tailStart, tailEnd in
 		return 0, 0, 0
 	}
 	return headEnd, tailStart, tailEnd
-}
-
-// preloadProtectedBytes returns the size of the whole pieces covered by the
-// inclusive head and tail piece ranges. Storage protects and evicts complete
-// pieces, so reserving only the requested byte count would under-account for
-// ranges that start or end inside a piece.
-func preloadProtectedBytes(info *metainfo.Info, headStart, headEnd, tailStart, tailEnd int) int64 {
-	var total int64
-	for _, index := range preloadProtectedPieceIndexes(headStart, headEnd, tailStart, tailEnd) {
-		total += info.Piece(index).Length()
-	}
-	return total
-}
-
-func preloadProtectedPieceIndexes(headStart, headEnd, tailStart, tailEnd int) []int {
-	pieces := make([]int, 0, max(headEnd-headStart+1, 0)+max(tailEnd-tailStart+1, 0))
-	for index := headStart; index <= headEnd; index++ {
-		pieces = append(pieces, index)
-	}
-	// The tail may repeat or overlap the head; include shared pieces once.
-	for index := max(tailStart, headEnd+1); index <= tailEnd; index++ {
-		pieces = append(pieces, index)
-	}
-	return pieces
 }
 
 // currentPreloadLocked returns the registered preload after discarding tasks
