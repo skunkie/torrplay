@@ -107,9 +107,7 @@
 //   - Client.MemoryStats provides global memory usage statistics.
 //   - Client.TorrentStats provides detailed per-torrent and per-piece statistics.
 //
-// TorrentStats also provides derived completion and memory-usage fractions.
-// Client.PiecesCached checks only a given set of pieces, for callers that poll
-// whether a small protected range is still resident and complete.
+// TorrentStats also provides the torrent's fraction of the memory limit.
 //
 // # Eviction Protection
 //
@@ -133,9 +131,8 @@
 //     refund its memory. It prevents ErrInsufficientMemory from making the torrent engine
 //     disable data downloads.
 //
-// EvictTo runs only the first pass and reports ErrEvictionTargetNotReached when protected
-// pieces prevent reaching the target. SetMaxMemory enforces a new limit with all three
-// passes, waiting for pending allocations when necessary.
+// SetMaxMemory enforces a new limit with all three passes, waiting for pending
+// allocations when necessary.
 //
 // # Error Handling
 //
@@ -146,7 +143,6 @@
 //   - ErrClientClosed indicates that the storage client has been closed.
 //   - ErrTorrentClosed indicates that an operation used a closed torrent implementation.
 //   - ErrTorrentNotManaged indicates that statistics were requested for an unmanaged torrent.
-//   - ErrEvictionTargetNotReached indicates that protected pieces prevented manual eviction.
 //
 // # Implementation Details
 //

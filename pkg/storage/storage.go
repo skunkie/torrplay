@@ -49,10 +49,6 @@ var ErrTorrentClosed = errors.New("storage torrent is closed")
 // that is not currently managed by the client.
 var ErrTorrentNotManaged = errors.New("torrent is not managed by storage")
 
-// ErrEvictionTargetNotReached is returned when protected pieces prevent a
-// requested eviction target from being reached.
-var ErrEvictionTargetNotReached = errors.New("eviction target not reached")
-
 // Client implements the storage.Client interface from anacrolix/torrent.
 type Client struct {
 	// allocationCond wakes allocations that are temporarily blocked behind
@@ -435,30 +431,6 @@ func (c *Client) queueEvictionLocked(key pieceKey) {
 	}
 }
 
-// EvictTo evicts unprotected pieces until memory usage is at most targetBytes.
-// It returns the number of bytes reclaimed. If active-range or file-boundary
-// protection prevents reaching the target, it returns ErrEvictionTargetNotReached with the reclaimed
-// byte count. Negative targets are treated as zero.
-func (c *Client) EvictTo(targetBytes int64) (int64, error) {
-	if targetBytes < 0 {
-		targetBytes = 0
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.isClosed() {
-		return 0, ErrClientClosed
-	}
-
-	before := c.used
-	c.evictDownToLocked(targetBytes)
-	reclaimed := before - c.used
-	if c.used > targetBytes {
-		return reclaimed, fmt.Errorf("%w: target=%d used=%d", ErrEvictionTargetNotReached, targetBytes, c.used)
-	}
-	return reclaimed, nil
-}
-
 // Counters returns a snapshot of the cumulative storage event counts.
 func (c *Client) Counters() Counters {
 	return Counters{
@@ -497,21 +469,6 @@ func (c *Client) memoryStatsLocked() MemoryStats {
 		TrackedPieces:       len(c.pieces),
 		UsedBytes:           c.used,
 	}
-}
-
-// CompletedFraction returns the fraction of the torrent's total metadata pieces
-// represented by tracked pieces marked complete, in [0, 1].
-func (s TorrentStats) CompletedFraction() float64 {
-	if s.TotalPieces <= 0 {
-		return 0
-	}
-	completed := 0
-	for _, piece := range s.Pieces {
-		if piece.Complete {
-			completed++
-		}
-	}
-	return float64(completed) / float64(s.TotalPieces)
 }
 
 // MemoryUsageFraction returns the fraction of the global memory limit used by
@@ -613,33 +570,6 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 	return stats, nil
 }
 
-// PiecesCached reports whether every listed piece of a managed torrent is
-// resident in memory and marked complete. Unlike TorrentStats, it inspects only
-// the listed pieces. It returns ErrTorrentNotManaged if the torrent is not
-// managed.
-func (c *Client) PiecesCached(infoHash metainfo.Hash, indexes []int) (bool, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	state, exists := c.torrents[infoHash]
-	if !exists {
-		return false, fmt.Errorf("%w: %s", ErrTorrentNotManaged, infoHash)
-	}
-	for _, index := range indexes {
-		pd, ok := c.pieces[pieceKey{infoHash: infoHash, index: index}]
-		if !ok || pd.torrent != state {
-			return false, nil
-		}
-		pd.mu.RLock()
-		cached := pd.data != nil && pd.complete
-		pd.mu.RUnlock()
-		if !cached {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
 // OpenTorrent implements the storage.Client interface. It is called when a new
 // torrent is added to the torrent client.
 func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash metainfo.Hash) (storage.TorrentImpl, error) {
@@ -689,12 +619,8 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 // SetMaxMemory updates the maximum memory limit for the storage client.
 // If the new limit is lower than current usage, an eviction will be triggered
 // to bring memory usage within the new limit. Negative values are clamped to 0.
-//
-// Unlike EvictTo (which respects active-range and file-boundary protections and returns
-// ErrEvictionTargetNotReached if protected pieces prevent reaching the target),
-// SetMaxMemory enforces an absolute process memory ceiling and will perform
-// emergency eviction of protected pieces if necessary to bring memory usage
-// within the configured limit.
+// The limit is an absolute ceiling: protected pieces are evicted too if that
+// is needed to enforce it.
 //
 // It returns ErrClientClosed after Close and ErrInsufficientMemory if the new
 // limit cannot be enforced. This operation is thread-safe.

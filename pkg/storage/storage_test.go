@@ -367,27 +367,6 @@ func TestClient_TorrentStats(t *testing.T) {
 		assert.ErrorIs(t, err, ErrTorrentNotManaged)
 	})
 
-	// Checks the calculation of completion fraction.
-	t.Run("completed fraction", func(t *testing.T) {
-		client := newTestClient(1024)
-		info, infoHash := newTestInfo(256, 4)
-
-		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
-		require.NoError(t, err)
-
-		// Complete 2 out of 4 pieces
-		for i := range 2 {
-			p := torrentImpl.Piece(info.Piece(i))
-			_, err := p.WriteAt(fmt.Appendf(nil, "piece_%d", i), 0)
-			require.NoError(t, err)
-			err = p.MarkComplete()
-			require.NoError(t, err)
-		}
-
-		progress := requireTorrentStats(t, client, infoHash).CompletedFraction()
-		assert.InDelta(t, 0.5, progress, 0.001)
-	})
-
 	// Verifies the calculation of memory usage fraction.
 	t.Run("memory usage fraction", func(t *testing.T) {
 		client := newTestClient(1024)
@@ -503,43 +482,6 @@ func TestClient_TorrentStats(t *testing.T) {
 		assert.Equal(t, 0, status.Index)
 		assert.Equal(t, int64(256), status.SizeBytes)
 	})
-}
-
-func TestClient_PiecesCached(t *testing.T) {
-	client := newTestClient(1024)
-	info, infoHash := newTestInfo(256, 3)
-	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
-	require.NoError(t, err)
-
-	complete := torrentImpl.Piece(info.Piece(0))
-	_, err = complete.WriteAt(make([]byte, 256), 0)
-	require.NoError(t, err)
-	require.NoError(t, complete.MarkComplete())
-	_, err = torrentImpl.Piece(info.Piece(1)).WriteAt(make([]byte, 256), 0)
-	require.NoError(t, err)
-
-	cached, err := client.PiecesCached(infoHash, []int{0})
-	require.NoError(t, err)
-	assert.True(t, cached)
-	cached, err = client.PiecesCached(infoHash, nil)
-	require.NoError(t, err)
-	assert.True(t, cached, "an empty set is trivially cached")
-
-	cached, err = client.PiecesCached(infoHash, []int{0, 1})
-	require.NoError(t, err)
-	assert.False(t, cached, "a resident piece that is not complete is not cached")
-	cached, err = client.PiecesCached(infoHash, []int{0, 2})
-	require.NoError(t, err)
-	assert.False(t, cached, "a piece that was never written is not cached")
-
-	_, err = client.EvictTo(0)
-	require.NoError(t, err)
-	cached, err = client.PiecesCached(infoHash, []int{0})
-	require.NoError(t, err)
-	assert.False(t, cached, "an evicted piece is not cached")
-
-	_, err = client.PiecesCached(metainfo.Hash{0xff}, []int{0})
-	require.ErrorIs(t, err, ErrTorrentNotManaged)
 }
 
 // TestPieceImplReadWrite tests basic read and write operations on a piece.
@@ -786,8 +728,7 @@ func TestClient_SetEvictionHandler(t *testing.T) {
 		// The piece hashes and is evicted before the engine marks it complete.
 		_, err = p.WriteAt(make([]byte, 256), 0)
 		require.NoError(t, err)
-		_, err = client.EvictTo(0)
-		require.NoError(t, err)
+		evictUnprotected(client, 0)
 
 		reported := make(chan int, 4)
 		client.SetEvictionHandler(func(_ metainfo.Hash, index int) { reported <- index })
@@ -876,8 +817,7 @@ func TestClient_Counters(t *testing.T) {
 				_, err := pieces[0].WriteAt(full, 0)
 				require.NoError(t, err)
 				require.NoError(t, pieces[0].MarkComplete())
-				_, err = client.EvictTo(0)
-				require.NoError(t, err)
+				evictUnprotected(client, 0)
 				_, err = pieces[0].ReadAt(make([]byte, 16), 0)
 				require.ErrorIs(t, err, ErrPieceNotAvailable)
 				require.Error(t, pieces[0].MarkComplete())
@@ -1176,7 +1116,7 @@ func TestClient_SetMaxMemory(t *testing.T) {
 	})
 }
 
-func TestClient_EvictTo(t *testing.T) {
+func TestClient_EvictDownToLocked(t *testing.T) {
 	// Checks manual eviction down to a specific target.
 	t.Run("evicts down to target", func(t *testing.T) {
 		client := newTestClient(1024)
@@ -1193,9 +1133,7 @@ func TestClient_EvictTo(t *testing.T) {
 		}
 
 		// Force evict down to 1 piece
-		reclaimed, err := client.EvictTo(256)
-		require.NoError(t, err)
-		assert.Equal(t, int64(512), reclaimed)
+		assert.Equal(t, int64(512), evictUnprotected(client, 256))
 
 		stats, err := client.TorrentStats(infoHash)
 		require.NoError(t, err)
@@ -1220,18 +1158,15 @@ func TestClient_EvictTo(t *testing.T) {
 
 		client.SetProtection(infoHash, 1, activeProtection(0, 1))
 
-		// EvictTo must not deadlock when all pieces are protected.
-		done := make(chan error, 1)
-		go func() {
-			_, err := client.EvictTo(0)
-			done <- err
-		}()
+		// Eviction must not loop when all pieces are protected.
+		done := make(chan int64, 1)
+		go func() { done <- evictUnprotected(client, 0) }()
 
 		select {
-		case err := <-done:
-			assert.ErrorIs(t, err, ErrEvictionTargetNotReached)
+		case reclaimed := <-done:
+			assert.Zero(t, reclaimed)
 		case <-time.After(2 * time.Second):
-			t.Fatal("EvictTo hung with protected pieces exceeding target")
+			t.Fatal("eviction hung with protected pieces exceeding target")
 		}
 
 		client.mu.RLock()
@@ -1978,8 +1913,6 @@ func TestClient_Close(t *testing.T) {
 		require.NoError(t, client.Close())
 
 		assert.ErrorIs(t, client.SetMaxMemory(1), ErrClientClosed)
-		_, err := client.EvictTo(0)
-		assert.ErrorIs(t, err, ErrClientClosed)
 	})
 
 	t.Run("is idempotent", func(t *testing.T) {
@@ -2171,8 +2104,7 @@ func TestPieceImplRejectsReadAndHashOfPartiallyWrittenPiece(t *testing.T) {
 	// second chunk lands in a fresh zeroed buffer.
 	_, err = p.WriteAt(data[:128], 0)
 	require.NoError(t, err)
-	_, err = client.EvictTo(0)
-	require.NoError(t, err)
+	evictUnprotected(client, 0)
 	_, err = p.WriteAt(data[128:], 128)
 	require.NoError(t, err)
 
@@ -2618,4 +2550,14 @@ func inActiveRange(client *Client, key pieceKey) bool {
 func inFileBoundary(client *Client, key pieceKey) bool {
 	_, boundary := client.pieceProtectionLocked(key)
 	return boundary
+}
+
+// evictUnprotected evicts pieces outside every protected range until memory
+// usage is at most target, and returns the bytes reclaimed.
+func evictUnprotected(client *Client, target int64) int64 {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	before := client.used
+	client.evictDownToLocked(target)
+	return before - client.used
 }
