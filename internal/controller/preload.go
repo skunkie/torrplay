@@ -16,6 +16,7 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
 	"github.com/torrplay/torrplay/pkg/stream"
 )
@@ -271,7 +272,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool 
 		return false
 	}
 
-	if _, err := pool.Preload(file, c.preloadStorageMode(ih)); err != nil {
+	if _, err := pool.Preload(file, c.torrentStorageMode(ih)); err != nil {
 		if !errors.Is(err, stream.ErrPreloadDoesNotFit) {
 			c.logger.Load().Warn("failed to start preload", "hash", ih, "file", file.Path(), "error", err)
 		}
@@ -280,11 +281,21 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool 
 	return true
 }
 
-// preloadStorageMode returns the storage mode a torrent's preload uses: file
-// storage only for torrents saved with it, memory storage otherwise.
-func (c *Controller) preloadStorageMode(ih metainfo.Hash) stream.StorageMode {
-	if t, err := c.db.GetTorrent(ih); err == nil && utils.Val(t.Storage) == api.File {
-		return stream.FileStorage
+// torrentStorageMode returns the storage a torrent's streams, preload, and
+// stats use: the storage a saved torrent was stored with, otherwise the storage
+// a loaded one was loaded into, and memory storage by default. File storage is
+// only ever chosen for saved torrents, so an unsaved torrent streams from
+// memory.
+func (c *Controller) torrentStorageMode(ih metainfo.Hash) stream.StorageMode {
+	t, err := c.db.GetTorrent(ih)
+	if err == nil {
+		if utils.Val(t.Storage) == api.File {
+			return stream.FileStorage
+		}
+		return stream.MemoryStorage
+	}
+	if !errors.Is(err, database.ErrTorrentNotFound) {
+		c.logger.Load().Error("failed to get torrent from database for its storage mode", "err", err, "hash", ih)
 	}
 	c.torrentTracker.mu.RLock()
 	defer c.torrentTracker.mu.RUnlock()

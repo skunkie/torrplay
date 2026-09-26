@@ -1532,8 +1532,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		return nil, errors.New("torrent info not available")
 	}
 
-	t, err := c.db.GetTorrent(to.InfoHash())
-	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
+	isFileStorage := c.torrentStorageMode(to.InfoHash()) == stream.FileStorage
 
 	stats := to.Stats()
 	resp := &api.TorrentStats{
@@ -2013,21 +2012,8 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	var isFileStorage bool
-	t, err := c.db.GetTorrent(ih)
-	if err != nil {
-		if !errors.Is(err, database.ErrTorrentNotFound) {
-			c.logger.Load().Error("failed to get torrent from database for streaming", "err", err, "hash", ih)
-		}
-		c.torrentTracker.mu.RLock()
-		if info, ok := c.torrentTracker.torrents[ih]; ok {
-			isFileStorage = info.storageType == api.File
-		} else if !errors.Is(err, database.ErrTorrentNotFound) {
-			c.logger.Load().Warn("torrent not found in tracker fallback either, defaulting to memory storage", "hash", ih)
-		}
-		c.torrentTracker.mu.RUnlock()
-	} else {
-		isFileStorage = utils.Val(t.Storage) == api.File
+	mode := c.torrentStorageMode(ih)
+	if _, err := c.db.GetTorrent(ih); err == nil {
 		go func() {
 			err := c.updateTorrent(ih, api.TorrentUpdate{
 				Files: &[]api.TorrentFileUpdate{
@@ -2049,10 +2035,6 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	mode := stream.MemoryStorage
-	if isFileStorage {
-		mode = stream.FileStorage
-	}
 	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
 	if err != nil {
 		status := http.StatusInternalServerError

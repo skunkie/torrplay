@@ -523,6 +523,36 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
+func TestController_TorrentStorageMode(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	saved := func(ih metainfo.Hash, storage api.TorrentStorage) {
+		t.Helper()
+		require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{Torrent: api.Torrent{
+			Hash:    ih,
+			Magnet:  utils.MagnetURIFromHash(ih),
+			Name:    ih.HexString(),
+			Storage: utils.Ptr(storage),
+		}}))
+	}
+	tracked := func(ih metainfo.Hash, storage api.TorrentStorage) {
+		ctrl.torrentTracker.mu.Lock()
+		defer ctrl.torrentTracker.mu.Unlock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{lastUsedAt: time.Now(), storageType: storage}
+	}
+
+	savedFile, savedMemory, trackedFile, unknown := metainfo.Hash{1}, metainfo.Hash{2}, metainfo.Hash{3}, metainfo.Hash{4}
+	saved(savedFile, api.File)
+	saved(savedMemory, api.Memory)
+	tracked(savedMemory, api.File)
+	tracked(trackedFile, api.File)
+
+	assert.Equal(t, stream.FileStorage, ctrl.torrentStorageMode(savedFile))
+	assert.Equal(t, stream.MemoryStorage, ctrl.torrentStorageMode(savedMemory), "a saved torrent's own storage wins")
+	assert.Equal(t, stream.FileStorage, ctrl.torrentStorageMode(trackedFile))
+	assert.Equal(t, stream.MemoryStorage, ctrl.torrentStorageMode(unknown))
+}
+
 func TestDeleteTorrentClearsPreload(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
