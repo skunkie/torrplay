@@ -514,8 +514,8 @@ paths:
     delete:
       tags:
         - v1
-      summary: Cancel active torrent preload.
-      description: Cancels active preload workers and releases boundary protections for the torrent.
+      summary: Cancel torrent preload.
+      description: Stops the torrent's preload, whether queued, preloading, or ready, and releases its download priority, reserved memory, and eviction protection.
       operationId: deleteTorrentPreload
       parameters:
         - $ref: "#/components/parameters/Hash"
@@ -1730,7 +1730,7 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ReaderInfo"
-          description: Active read stream positions for this torrent.
+          description: Positions of this torrent's stream readers, including readers lingering between a player's range requests.
         total_pieces:
           type: integer
           format: int
@@ -1752,7 +1752,7 @@ components:
 
     ReaderInfo:
       type: object
-      description: Active reader information.
+      description: Stream reader position and readahead window.
       required:
         - position
         - start
