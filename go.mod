@@ -158,3 +158,5 @@ require (
 )
 
 replace github.com/ethulhu/helix => github.com/skunkie/helix v0.0.0-20260907121934-c313cc3efa2f
+
+replace github.com/anacrolix/torrent => github.com/skunkie/torrent v0.0.0-20260926002629-e84c3fe28137
