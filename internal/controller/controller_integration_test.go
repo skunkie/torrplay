@@ -637,7 +637,7 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 
 	// Without a preload, the fully downloaded torrent is ready as a whole.
 	ctrl.cancelPreload(ih)
-	complete := ctrl.getPreloadStatus(ih)
+	complete := ctrl.preloadResponse(ih)
 	assert.Equal(t, api.Ready, complete.Status)
 	assert.Equal(t, preloadNoFileIndex, complete.FileIndex)
 	assert.Nil(t, complete.FilePath)

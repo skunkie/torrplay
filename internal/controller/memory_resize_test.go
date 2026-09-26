@@ -81,7 +81,7 @@ func TestUpdateSettingsMemoryShrinkEvictsPreloadsThatNoLongerFit(t *testing.T) {
 	preload, ok = ctrl.preloadStatus(to.InfoHash())
 	require.True(t, ok)
 	assert.Equal(t, stream.PreloadEvicted, preload.State, "a preload that no longer fits must be evicted")
-	assert.Equal(t, api.Evicted, ctrl.getPreloadStatus(to.InfoHash()).Status)
+	assert.Equal(t, api.Evicted, ctrl.preloadResponse(to.InfoHash()).Status)
 	assert.Equal(t, int64(smaller), ctrl.storageClient.Load().MemoryStats().LimitBytes)
 	assert.Equal(t, preloadCapacityFor(t, smaller), ctrl.streamPool.Load().PreloadCapacity())
 }

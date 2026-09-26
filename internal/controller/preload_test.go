@@ -404,7 +404,7 @@ func TestStreamDoesNotPausePreloads(t *testing.T) {
 
 // TestGetPreloadStatusReportsQueuedPreload verifies that a preload waiting for
 // a preload slot reports that it is queued rather than downloading.
-func TestGetPreloadStatusReportsQueuedPreload(t *testing.T) {
+func TestPreloadResponseReportsQueuedPreload(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 	setTestMemoryLimit(t, ctrl, 512<<20)
@@ -422,9 +422,9 @@ func TestGetPreloadStatusReportsQueuedPreload(t *testing.T) {
 		}
 	}()
 
-	assert.Equal(t, api.Preloading, ctrl.getPreloadStatus(hashes[0]).Status)
-	assert.Equal(t, api.Preloading, ctrl.getPreloadStatus(hashes[1]).Status)
-	queued := ctrl.getPreloadStatus(hashes[2])
+	assert.Equal(t, api.Preloading, ctrl.preloadResponse(hashes[0]).Status)
+	assert.Equal(t, api.Preloading, ctrl.preloadResponse(hashes[1]).Status)
+	queued := ctrl.preloadResponse(hashes[2])
 	assert.Equal(t, api.Queued, queued.Status)
 	assert.Equal(t, 0, queued.FileIndex)
 	assert.Positive(t, queued.TargetBytes)
@@ -463,7 +463,7 @@ func TestTorrentActivityReadsDoNotRaceClientReconfigure(t *testing.T) {
 			// These run without c.mu from request handlers and must observe
 			// either the old or the new component, never a torn read.
 			ctrl.hasTorrentReaders(ih)
-			ctrl.getPreloadStatus(ih)
+			ctrl.preloadResponse(ih)
 			_, _ = ctrl.clientTorrent(ih)
 		}
 	})
@@ -513,13 +513,13 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	require.True(t, ctrl.startPreload(to, to.Files()[0]))
 	to.Drop()
 	<-to.Closed()
-	assert.Equal(t, api.Idle, ctrl.getPreloadStatus(ih).Status, "a closed torrent must not report its preload")
+	assert.Equal(t, api.Idle, ctrl.preloadResponse(ih).Status, "a closed torrent must not report its preload")
 
 	// Re-adding the torrent creates a new instance, which gets a new preload.
 	readded := addSintelTorrent(t, ctrl)
 	require.NotSame(t, to, readded)
 	require.True(t, ctrl.startPreload(readded, readded.Files()[0]))
-	assert.Equal(t, api.Preloading, ctrl.getPreloadStatus(ih).Status)
+	assert.Equal(t, api.Preloading, ctrl.preloadResponse(ih).Status)
 	ctrl.cancelPreload(ih)
 }
 
@@ -692,5 +692,5 @@ func TestDeleteTorrentWithRunningPreloadRemovesFileStorage(t *testing.T) {
 	assert.NoDirExists(t, torrentDir)
 	_, err := ctrl.db.GetTorrent(ih)
 	require.ErrorIs(t, err, database.ErrTorrentNotFound)
-	assert.Equal(t, api.Idle, ctrl.getPreloadStatus(ih).Status, "the cancelled preload must not report a status")
+	assert.Equal(t, api.Idle, ctrl.preloadResponse(ih).Status, "the cancelled preload must not report a status")
 }

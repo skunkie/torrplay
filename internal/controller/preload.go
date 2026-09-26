@@ -91,7 +91,7 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 
 	c.startPreload(to, files[targetIdx])
 
-	resp := c.getPreloadStatus(ih)
+	resp := c.preloadResponse(ih)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
@@ -113,7 +113,7 @@ func (c *Controller) GetTorrentPreload(w http.ResponseWriter, _ *http.Request, h
 		}
 	}
 
-	resp := c.getPreloadStatus(ih)
+	resp := c.preloadResponse(ih)
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
@@ -139,7 +139,9 @@ func (c *Controller) DeleteTorrentPreload(w http.ResponseWriter, _ *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
+// preloadResponse returns the API view of a torrent's preload, with the
+// torrent's current transfer rate and peer counts.
+func (c *Controller) preloadResponse(ih metainfo.Hash) api.PreloadResponse {
 	resp := api.PreloadResponse{
 		FileIndex: preloadNoFileIndex,
 		Status:    api.Idle,
