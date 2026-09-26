@@ -539,6 +539,48 @@ func TestAddTorrentByHashLoadsTorrentSavedWithoutMagnet(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
+func TestController_WaitForInfo(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
+
+	t.Run("returns once the metadata is known", func(t *testing.T) {
+		to := addSyntheticTorrent(t, ctrl, 1<<20, 1<<20)
+		require.NoError(t, ctrl.waitForInfo(to))
+		require.NoError(t, ctrl.waitForInfoOrDrop(to))
+	})
+
+	// A torrent added by hash alone has no peers here, so its metadata never
+	// arrives.
+	withoutInfo := func(t *testing.T, ih metainfo.Hash) *torrent.Torrent {
+		t.Helper()
+		to, err := ctrl.loadTorrent(utils.MagnetURIFromHash(ih), api.Memory)
+		require.NoError(t, err)
+		return to
+	}
+
+	t.Run("times out and keeps the torrent", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{7})
+		err := ctrl.waitForInfo(to)
+		var apiErr api.Error
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusGatewayTimeout, apiErr.Code)
+		assert.Equal(t, gotInfoTimeoutMsg, apiErr.Message)
+		_, loaded := ctrl.clientTorrent(to.InfoHash())
+		assert.True(t, loaded)
+	})
+
+	t.Run("times out and drops the torrent", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{8})
+		require.Error(t, ctrl.waitForInfoOrDrop(to))
+		select {
+		case <-to.Closed():
+		default:
+			t.Fatal("the torrent was not dropped")
+		}
+	})
+}
+
 func TestController_TorrentStorageMode(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

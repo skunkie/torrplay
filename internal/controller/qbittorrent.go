@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -40,12 +39,8 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
-			select {
-			case <-to.GotInfo():
-			case <-time.After(c.runtimeConfig.gotInfoTimeout):
-				to.Drop()
-				<-to.Closed()
-				api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+			if err := c.waitForInfoOrDrop(to); err != nil {
+				api.HandleError(w, err)
 				return
 			}
 
@@ -109,12 +104,8 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 					return
 				}
 
-				select {
-				case <-to.GotInfo():
-				case <-time.After(c.runtimeConfig.gotInfoTimeout):
-					to.Drop()
-					<-to.Closed()
-					api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+				if err := c.waitForInfoOrDrop(to); err != nil {
+					api.HandleError(w, err)
 					return
 				}
 

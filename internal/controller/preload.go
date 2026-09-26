@@ -11,7 +11,6 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
-	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -56,10 +55,8 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 		return
 	}
 
-	select {
-	case <-to.GotInfo():
-	case <-time.After(c.runtimeConfig.gotInfoTimeout):
-		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+	if err := c.waitForInfo(to); err != nil {
+		api.HandleError(w, err)
 		return
 	}
 
