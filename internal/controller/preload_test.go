@@ -500,10 +500,9 @@ func TestStreamRejectedWhileTorrentClientUnavailable(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
 }
 
-// TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock verifies that
-// playback lets preload workers it cancelled exit before acquiring its
-// reader, and waits without holding preloadsMu, which exiting workers take.
-func TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock(t *testing.T) {
+// TestStreamDoesNotWaitForCancelledPreloadWorkers verifies that playback
+// acquires its reader while a preload worker it cancelled is still exiting.
+func TestStreamDoesNotWaitForCancelledPreloadWorkers(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
@@ -515,7 +514,10 @@ func TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock(t *testing.T) {
 	exiting := &preloadTask{active: true, cancel: func() {}, done: make(chan struct{}), infoHash: metainfo.Hash{9}}
 	// Let the worker exit even when an assertion fails, or controller
 	// cleanup would wait for it forever.
-	defer exiting.doneOnce.Do(func() { close(exiting.done) })
+	defer func() {
+		exiting.doneOnce.Do(func() { close(exiting.done) })
+		ctrl.finishPreload(exiting, false, false)
+	}()
 	ctrl.preloadsMu.Lock()
 	ctrl.preloadWorkers = append(ctrl.preloadWorkers, exiting)
 	ctrl.preloadsMu.Unlock()
@@ -529,21 +531,12 @@ func TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock(t *testing.T) {
 		ctrl.router.ServeHTTP(httptest.NewRecorder(), req)
 	}()
 
-	// The request opens its playback session, then waits with preloadsMu
-	// free and without a reader.
-	require.Eventually(t, func() bool {
-		ctrl.preloadsMu.Lock()
-		defer ctrl.preloadsMu.Unlock()
-		return ctrl.preloadPlaybackCount == 1
-	}, 5*time.Second, time.Millisecond, "playback session was not opened")
-	require.Never(t, func() bool { return pool.HasReaders(ih) }, 100*time.Millisecond, time.Millisecond,
-		"playback acquired its reader before the cancelled worker exited")
-
-	// Once the worker exits, playback acquires its reader.
-	exiting.doneOnce.Do(func() { close(exiting.done) })
-	ctrl.finishPreload(exiting, false, false)
-	require.Eventually(t, func() bool { return pool.HasReaders(ih) }, 5*time.Second, time.Millisecond,
-		"playback did not acquire its reader after the worker exited")
+	require.Eventually(t, func() bool { return pool.HasActiveReaders(ih) }, 2*time.Second, time.Millisecond,
+		"playback must acquire its reader without waiting for the cancelled worker")
+	ctrl.preloadsMu.Lock()
+	assert.Equal(t, 1, ctrl.preloadPlaybackCount, "the playback session must be open while streaming")
+	assert.Contains(t, ctrl.preloadWorkers, exiting, "the cancelled worker is still exiting")
+	ctrl.preloadsMu.Unlock()
 
 	cancel()
 	select {
@@ -551,6 +544,10 @@ func TestStreamWaitsForCancelledPreloadWorkersWithoutPreloadLock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("stream request did not end after its context was cancelled")
 	}
+	ctrl.preloadsMu.Lock()
+	defer ctrl.preloadsMu.Unlock()
+	session := ctrl.playbackSessions[playbackKey{infoHash: ih, filePath: to.Files()[0].Path()}]
+	assert.True(t, session == nil || session.requests == 0, "the finished request must end its session request")
 }
 
 func TestTorrentActivityReadsDoNotRaceClientReconfigure(t *testing.T) {
@@ -1182,52 +1179,6 @@ func TestController_CancelAllPreloads(t *testing.T) {
 		t.Fatal("cancelAllPreloads did not return after every worker exited")
 	}
 	assert.Empty(t, ctrl.preloadWorkers)
-}
-
-func TestWaitForPreloadWorkers(t *testing.T) {
-	t.Run("returns once every worker exits", func(t *testing.T) {
-		first, second := make(chan struct{}), make(chan struct{})
-		returned := make(chan struct{})
-		go func() {
-			waitForPreloadWorkers(context.Background(), []<-chan struct{}{first, second})
-			close(returned)
-		}()
-
-		close(first)
-		require.Never(t, func() bool {
-			select {
-			case <-returned:
-				return true
-			default:
-				return false
-			}
-		}, 50*time.Millisecond, time.Millisecond, "returned before every worker exited")
-		close(second)
-		require.Eventually(t, func() bool {
-			select {
-			case <-returned:
-				return true
-			default:
-				return false
-			}
-		}, 5*time.Second, time.Millisecond)
-	})
-
-	t.Run("returns when the context ends", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		returned := make(chan struct{})
-		go func() {
-			waitForPreloadWorkers(ctx, []<-chan struct{}{make(chan struct{})})
-			close(returned)
-		}()
-
-		select {
-		case <-returned:
-		case <-time.After(time.Second):
-			t.Fatal("waited past the end of the context")
-		}
-	})
 }
 
 // TestController_GetPreloadStatus verifies how the status of a running

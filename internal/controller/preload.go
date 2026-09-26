@@ -50,11 +50,6 @@ const (
 	// preloads concurrently for: a default head and tail boundary. Below it, a
 	// single preload takes the whole capacity instead.
 	minSharedPreloadBytes = 2 * int64(stream.DefaultFileBoundaryBytes)
-
-	// preloadWorkerExitTimeout bounds how long playback waits for the preload
-	// workers it cancelled to exit before its reader starts competing with
-	// them for pieces. Cancelled workers normally exit within milliseconds.
-	preloadWorkerExitTimeout = 5 * time.Second
 )
 
 type preloadTask struct {
@@ -1370,26 +1365,6 @@ func (c *Controller) preloadWorkerDonesLocked() []<-chan struct{} {
 		}
 	}
 	return dones
-}
-
-// waitForPreloadWorkers waits until the given workers exit, the context ends,
-// or preloadWorkerExitTimeout passes. It bounds the wait so a worker stuck in
-// a read cannot hold up playback.
-func waitForPreloadWorkers(ctx context.Context, dones []<-chan struct{}) {
-	if len(dones) == 0 {
-		return
-	}
-	timeout := time.NewTimer(preloadWorkerExitTimeout)
-	defer timeout.Stop()
-	for _, done := range dones {
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return
-		case <-timeout.C:
-			return
-		}
-	}
 }
 
 // cancelAllPreloadsLocked releases every speculative cache lease and priority

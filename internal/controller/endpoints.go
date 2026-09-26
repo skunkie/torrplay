@@ -2061,26 +2061,24 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	if isFileStorage {
 		mode = stream.FileStorage
 	}
-	// Live playback pauses active preload workers because both compete for the
-	// same download bandwidth. Unrelated ready memory preloads release their
-	// speculative leases; a ready preload for this file transfers its lease to
-	// the playback session, which spans the player's separate range requests.
-	// New preload requests stay queued until the session ends. Acquire the
-	// reader under preloadsMu so dispatch cannot race reader registration.
+	// Live playback cancels running preload workers because both compete for
+	// the same download bandwidth. Unrelated ready memory preloads release
+	// their speculative leases; a ready preload for this file transfers its
+	// lease to the playback session, which spans the player's separate range
+	// requests. New preload requests stay queued until the session ends. The
+	// reader does not wait for cancelled workers to exit: they hold no piece
+	// priorities or memory reservation, and their readahead ends as soon as
+	// their reads observe the cancellation.
 	c.preloadsMu.Lock()
 	session := c.beginPlaybackLocked(ih, file.Path())
-	stopping := c.preloadWorkerDonesLocked()
 	c.preloadsMu.Unlock()
-	// Let the preload workers playback just cancelled exit before its reader
-	// competes with their readahead. Wait without preloadsMu, which the
-	// exiting workers take; the open session keeps dispatch paused meanwhile.
-	waitForPreloadWorkers(r.Context(), stopping)
-	c.preloadsMu.Lock()
-	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
-	if err != nil {
+	defer func() {
+		c.preloadsMu.Lock()
 		c.endPlaybackRequestLocked(session)
-	}
-	c.preloadsMu.Unlock()
+		c.preloadsMu.Unlock()
+	}()
+
+	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, stream.ErrPoolClosed) {
@@ -2089,12 +2087,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), status)
 		return
 	}
-	defer func() {
-		release()
-		c.preloadsMu.Lock()
-		c.endPlaybackRequestLocked(session)
-		c.preloadsMu.Unlock()
-	}()
+	defer release()
 
 	dlna.AddHeader(w, r)
 
