@@ -869,30 +869,37 @@ func (p *Pool) boundaryBytesPerFileLocked(totalBudget int64, activeFiles int) in
 
 const trailingReadaheadDivisor = 4 // trailing range is 1/4th of readahead pieces
 
-// computeRange returns the (start, end) piece indices for a given file position,
-// readahead, and read offset. All callers share the same clamping logic.
-// The ahead range reaches the full readahead piece count to protect all pieces actively prefetched
-// by the torrent client, matching reader.SetReadahead(readahead). The position
-// piece is always included; readaheadForShare sizes readahead so that the
-// complete range fits the reader's share of the protection budget.
-func computeRange(file *torrent.File, pieceLength, readahead, byteOffset int64) (start, end int) {
-	if pieceLength <= 0 {
-		pieceLength = 1
+// readerWindow returns the inclusive piece range a reader of file at byteOffset
+// with the given readahead protects, and the piece it reads, all clamped to the
+// file's pieces. The ahead range reaches the full readahead piece count to
+// protect all pieces actively prefetched by the torrent client, matching
+// reader.SetReadahead(readahead), and a trailing quarter of it stays behind.
+// readaheadForShare sizes readahead so that the complete range fits the
+// reader's share of the protection budget. It returns false without piece
+// metadata or for a file that spans no piece.
+func readerWindow(file *torrent.File, readahead, byteOffset int64) (start, position, end int, ok bool) {
+	pieceLength := filePieceLength(file)
+	if pieceLength <= 0 || file.EndPieceIndex() <= file.BeginPieceIndex() {
+		return 0, 0, 0, false
 	}
 	readaheadPieces := max(readahead/pieceLength, 0)
 	beginPiece := int64(file.BeginPieceIndex())
 	// EndPieceIndex is exclusive; ActiveRangeRegistry endpoints are inclusive.
 	endPieceMax := int64(file.EndPieceIndex()) - 1
-	if endPieceMax < beginPiece {
-		return int(beginPiece), int(beginPiece)
-	}
 
-	positionPiece := min(max((file.Offset()+byteOffset)/pieceLength, beginPiece), endPieceMax)
+	positionPiece := min(max(filePiece(file, byteOffset), beginPiece), endPieceMax)
 	trailing := readaheadPieces / trailingReadaheadDivisor
+	return int(max(positionPiece-trailing, beginPiece)), int(positionPiece), int(min(positionPiece+readaheadPieces, endPieceMax)), true
+}
 
-	startPiece := max(positionPiece-trailing, beginPiece)
-	endPiece := min(positionPiece+readaheadPieces, endPieceMax)
-	return int(startPiece), int(endPiece)
+// filePiece returns the torrent piece holding the file-relative byteOffset.
+// Without piece metadata it returns the byte offset itself, so a change of
+// position still reads as a change of piece.
+func filePiece(file *torrent.File, byteOffset int64) int64 {
+	if file == nil {
+		return byteOffset
+	}
+	return (file.Offset() + byteOffset) / max(filePieceLength(file), 1)
 }
 
 // defaultFileBoundaryBytes is the minimum amount of head and tail bytes (8 MiB)
@@ -967,14 +974,13 @@ func boundaryPieces(headStart, headEnd, tailStart, tailEnd int) iter.Seq[int] {
 // boundaries the reader registered before. Must be called with p.mu held.
 func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBytes int64) {
 	file, infoHash, readerID := sr.file, sr.infoHash, sr.readerID
-	if p.cfg.Registry == nil || file == nil || file.Torrent() == nil || file.Torrent().Info() == nil {
+	if p.cfg.Registry == nil {
 		return
 	}
-	if file.EndPieceIndex() <= file.BeginPieceIndex() {
+	start, _, end, ok := readerWindow(file, readahead, sr.lastOffset)
+	if !ok {
 		return
 	}
-	pieceLength := file.Torrent().Info().PieceLength
-	start, end := computeRange(file, pieceLength, readahead, sr.lastOffset)
 	p.cfg.Registry.SetActiveRange(infoHash, readerID, start, end)
 	if boundaryBytes <= 0 {
 		p.cfg.Registry.ClearFileBoundaries(infoHash, readerID)
@@ -990,24 +996,14 @@ func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBy
 // priorities shared by overlapping readers are only lowered after their final
 // owner releases them.
 func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead int64, fraction float64) []prioritizedPiece {
-	if fraction <= 0 || readahead <= 0 || file == nil {
+	pieceLength := filePieceLength(file)
+	if fraction <= 0 || readahead <= 0 || pieceLength <= 0 {
 		return nil
 	}
 	tor := file.Torrent()
-	if tor == nil {
-		return nil
-	}
-	info := tor.Info()
-	if info == nil {
-		return nil
-	}
 
 	// EndPieceIndex already is the exclusive loop boundary.
 	endPieceMax := int64(file.EndPieceIndex())
-	pieceLength := info.PieceLength
-	if pieceLength <= 0 {
-		pieceLength = 1
-	}
 
 	// Clamp target to the torrent's actual piece count — EndPieceIndex()
 	// may exceed it for partially-seeded or split files.
@@ -1156,15 +1152,7 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
 	// wrapper.mu — preserving the lock order.
 	sr.lastOffset = newOffset
-	pieceLength := int64(1)
-	if file != nil && file.Torrent() != nil && file.Torrent().Info() != nil && file.Torrent().Info().PieceLength > 0 {
-		pieceLength = file.Torrent().Info().PieceLength
-	}
-	torrentOffset := newOffset
-	if file != nil {
-		torrentOffset += file.Offset()
-	}
-	currentPiece := torrentOffset / pieceLength
+	currentPiece := filePiece(file, newOffset)
 	pieceChanged := (currentPiece != sr.lastPieceIdx) || (sr.lastPieceIdx < 0)
 	sr.lastPieceIdx = currentPiece
 
@@ -1176,9 +1164,10 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 	readahead := sr.readahead
 	prioEnabled := p.cfg.PriorityWindowFraction > 0
 
-	if !sr.isFileStorage && p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
-		start, end := computeRange(file, pieceLength, readahead, newOffset)
-		p.cfg.Registry.SetActiveRange(sr.infoHash, readerID, start, end)
+	if !sr.isFileStorage && p.cfg.Registry != nil {
+		if start, _, end, ok := readerWindow(file, readahead, newOffset); ok {
+			p.cfg.Registry.SetActiveRange(sr.infoHash, readerID, start, end)
+		}
 	}
 	p.mu.Unlock()
 
@@ -1214,26 +1203,9 @@ func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 		if sr.infoHash != infoHash {
 			continue
 		}
-		if sr.file == nil || sr.file.Torrent() == nil {
+		start, position, end, ok := readerWindow(sr.file, sr.readahead, sr.lastOffset)
+		if !ok {
 			continue
-		}
-		if sr.file.EndPieceIndex() <= sr.file.BeginPieceIndex() {
-			continue
-		}
-		info := sr.file.Torrent().Info()
-		if info == nil {
-			continue
-		}
-		byteOffset := sr.lastOffset
-		pieceLength := info.PieceLength
-		if pieceLength <= 0 {
-			pieceLength = 1
-		}
-		start, end := computeRange(sr.file, pieceLength, sr.readahead, byteOffset)
-		position := max(int((sr.file.Offset()+byteOffset)/pieceLength), sr.file.BeginPieceIndex())
-		lastPiece := sr.file.EndPieceIndex() - 1
-		if position > lastPiece {
-			position = lastPiece
 		}
 		result = append(result, ReaderPosition{
 			End:      end,

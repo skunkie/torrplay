@@ -1017,6 +1017,37 @@ func TestFilePieceRanges(t *testing.T) {
 	})
 }
 
+func TestReaderWindow(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, _ := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
+	// video.bin spans torrent bytes [32, 544) across 64-byte pieces 0 through 8.
+	video := to.Files()[1]
+
+	tests := []struct {
+		name                 string
+		readahead, offset    int64
+		start, position, end int
+	}{
+		{name: "start of file", readahead: 0, offset: 0, start: 0, position: 0, end: 0},
+		{name: "inside the file", readahead: 4 * 64, offset: 200, start: 2, position: 3, end: 7},
+		{name: "clamped to the last piece", readahead: 4 * 64, offset: 500, start: 7, position: 8, end: 8},
+		{name: "offset past the end", readahead: 0, offset: 10_000, start: 8, position: 8, end: 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start, position, end, ok := readerWindow(video, tt.readahead, tt.offset)
+			require.True(t, ok)
+			assert.Equal(t, [3]int{tt.start, tt.position, tt.end}, [3]int{start, position, end})
+		})
+	}
+
+	t.Run("without piece metadata", func(t *testing.T) {
+		_, _, _, ok := readerWindow(&torrent.File{}, 64, 0)
+		assert.False(t, ok)
+		assert.Equal(t, int64(100), filePiece(&torrent.File{}, 100), "a position change still reads as a piece change")
+	})
+}
+
 func TestFitFileBoundaries(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, _ := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
