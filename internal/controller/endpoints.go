@@ -1412,7 +1412,13 @@ func (c *Controller) addTorrentByHash(ih metainfo.Hash) (*torrent.Torrent, error
 		return c.loadTorrent(utils.MagnetURIFromHash(ih), api.Memory)
 	}
 
-	return c.loadTorrent(t.Magnet, utils.Val(t.Storage))
+	// A torrent saved without a magnet is found by its hash like any other;
+	// loadTorrentSpec adds whatever metadata was stored with it.
+	magnet := t.Magnet
+	if magnet == "" {
+		magnet = utils.MagnetURIFromHash(ih)
+	}
+	return c.loadTorrent(magnet, utils.Val(t.Storage))
 }
 
 // addTorrentByMagnet adds a torrent to the client by its magnet URI.

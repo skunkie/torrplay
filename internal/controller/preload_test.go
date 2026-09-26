@@ -523,6 +523,22 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
+func TestAddTorrentByHashLoadsTorrentSavedWithoutMagnet(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	ih := metainfo.Hash{5}
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{Torrent: api.Torrent{
+		Hash:    ih,
+		Name:    "saved",
+		Storage: utils.Ptr(api.Memory),
+	}}))
+
+	to, err := ctrl.addTorrentByHash(ih)
+	require.NoError(t, err)
+	assert.Equal(t, ih, to.InfoHash())
+	ctrl.cancelPreload(ih)
+}
+
 func TestController_TorrentStorageMode(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
