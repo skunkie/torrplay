@@ -634,7 +634,16 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	assert.Equal(t, float32(1), retainedState.Progress)
 	assert.Equal(t, readyState.TargetBytes, retainedState.TargetBytes)
 	assert.Equal(t, readyState.CompletedBytes, retainedState.CompletedBytes)
+
+	// Without a preload, the fully downloaded torrent is ready as a whole.
 	ctrl.cancelPreload(ih)
+	complete := ctrl.getPreloadStatus(ih)
+	assert.Equal(t, api.Ready, complete.Status)
+	assert.Equal(t, preloadNoFileIndex, complete.FileIndex)
+	assert.Nil(t, complete.FilePath)
+	assert.Equal(t, float32(1), complete.Progress)
+	assert.Equal(t, int64(len(fixture.payload)), complete.CompletedBytes)
+	assert.Equal(t, complete.CompletedBytes, complete.TargetBytes)
 }
 
 func TestIntegrationControllerLifecycle(t *testing.T) {

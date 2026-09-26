@@ -140,52 +140,39 @@ func (c *Controller) DeleteTorrentPreload(w http.ResponseWriter, _ *http.Request
 }
 
 func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
-	to, hasTorrent := c.clientTorrent(ih)
-	var completedLength int64
-	fullyComplete := false
-	if hasTorrent && to != nil && to.Info() != nil {
-		completedLength = to.Length()
-		fullyComplete = to.BytesCompleted() == completedLength
-	}
-
-	base := api.PreloadResponse{
+	resp := api.PreloadResponse{
 		FileIndex: preloadNoFileIndex,
 		Status:    api.Idle,
 	}
-	if hasTorrent && to != nil {
-		rate, _ := peerTransferRates(to)
-		if !math.IsNaN(rate) && !math.IsInf(rate, 0) {
-			base.DownloadRate = int64(rate)
+	var length int64
+	fullyComplete := false
+	if to, ok := c.clientTorrent(ih); ok && to != nil {
+		if rate, _ := peerTransferRates(to); !math.IsNaN(rate) && !math.IsInf(rate, 0) {
+			resp.DownloadRate = int64(rate)
 		}
 		stats := to.Stats()
-		base.ActivePeers = stats.ActivePeers
-		base.TotalPeers = stats.TotalPeers
-	}
-
-	// A fully downloaded torrent is ready as a whole, so a preload that ended
-	// without becoming ready no longer matters.
-	completeTorrent := func() api.PreloadResponse {
-		resp := base
-		resp.CompletedBytes = completedLength
-		resp.Progress = 1
-		resp.Status = api.Ready
-		resp.TargetBytes = completedLength
-		return resp
+		resp.ActivePeers = stats.ActivePeers
+		resp.TotalPeers = stats.TotalPeers
+		if to.Info() != nil {
+			length = to.Length()
+			fullyComplete = to.BytesCompleted() == length
+		}
 	}
 
 	status, ok := c.preloadStatus(ih)
+	// A fully downloaded torrent is ready as a whole, so a preload that ended
+	// without becoming ready, or none at all, no longer matters.
+	if fullyComplete && (!ok || status.State == stream.PreloadFailed || status.State == stream.PreloadEvicted) {
+		resp.CompletedBytes = length
+		resp.Progress = 1
+		resp.Status = api.Ready
+		resp.TargetBytes = length
+		return resp
+	}
 	if !ok {
-		if fullyComplete {
-			return completeTorrent()
-		}
-		return base
+		return resp
 	}
-	resp := base
-	resp.CompletedBytes = status.CompletedBytes
-	resp.TargetBytes = status.TargetBytes
-	if status.TargetBytes > 0 {
-		resp.Progress = min(1, float32(status.CompletedBytes)/float32(status.TargetBytes))
-	}
+
 	switch status.State {
 	case stream.PreloadQueued:
 		resp.Status = api.Queued
@@ -194,22 +181,22 @@ func (c *Controller) getPreloadStatus(ih metainfo.Hash) api.PreloadResponse {
 	case stream.PreloadReady:
 		resp.Status = api.Ready
 	case stream.PreloadFailed:
-		if fullyComplete {
-			return completeTorrent()
-		}
 		resp.Status = api.Failed
-		return resp
 	case stream.PreloadEvicted:
-		if fullyComplete {
-			return completeTorrent()
-		}
 		resp.Status = api.Evicted
-		return resp
 	default:
-		return base
+		return resp
 	}
-	resp.FileIndex = status.FileIndex
-	resp.FilePath = &status.FilePath
+	resp.CompletedBytes = status.CompletedBytes
+	resp.TargetBytes = status.TargetBytes
+	if status.TargetBytes > 0 {
+		resp.Progress = min(1, float32(status.CompletedBytes)/float32(status.TargetBytes))
+	}
+	// Only a preload that still holds or is fetching its file reports it.
+	if status.State <= stream.PreloadReady {
+		resp.FileIndex = status.FileIndex
+		resp.FilePath = &status.FilePath
+	}
 	return resp
 }
 
