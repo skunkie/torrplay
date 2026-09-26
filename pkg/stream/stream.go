@@ -441,7 +441,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
 	} else {
-		p.refreshReadaheadLocked(p.readaheadBudget)
+		p.refreshReadaheadLocked()
 	}
 	// The new reader takes over from the file's lingering reader. It closes
 	// only after the new reader has its window, so pieces both want keep a
@@ -530,7 +530,7 @@ func (p *Pool) release(readerID uint64) {
 // readers keep their readahead. Must be called with p.mu held.
 func (p *Pool) rebalanceLocked() {
 	if p.readaheadBudget > 0 {
-		p.refreshReadaheadLocked(p.readaheadBudget)
+		p.refreshReadaheadLocked()
 	}
 }
 
@@ -581,8 +581,8 @@ func (p *Pool) removeReaderLocked(sr *streamReader) {
 // refreshReadaheadLocked recalculates and applies readahead for all active readers.
 // File-storage readers keep their fixed readahead and are never divided.
 // Must be called with p.mu held.
-func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
-	plan := p.planReadaheadLocked(totalReadaheadBudget)
+func (p *Pool) refreshReadaheadLocked() {
+	plan := p.planReadaheadLocked()
 
 	for _, sr := range p.readers {
 		if !sr.active {
@@ -601,7 +601,7 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 	}
 
 	p.logger.Debug("refreshed readahead",
-		slog.Int64("totalPool", totalReadaheadBudget),
+		slog.Int64("totalPool", p.readaheadBudget),
 		slog.Int64("perReaderShare", plan.share))
 }
 
@@ -638,7 +638,7 @@ func (p *Pool) SetReadaheadBudget(budgetBytes int64) {
 	defer p.mu.Unlock()
 	p.readaheadBudget = budgetBytes
 	p.shrinkPreloadsLocked()
-	p.refreshReadaheadLocked(budgetBytes)
+	p.refreshReadaheadLocked()
 	p.dispatchPreloadsLocked()
 }
 
@@ -661,8 +661,8 @@ type readaheadPlan struct {
 // preload already protects them within that reservation. The remainder is shared
 // evenly by the readers. File-storage readers are excluded because they have
 // their own readahead. Must be called with p.mu held.
-func (p *Pool) planReadaheadLocked(totalBudget int64) readaheadPlan {
-	available := p.availableProtectionBudgetLocked(totalBudget)
+func (p *Pool) planReadaheadLocked() readaheadPlan {
+	available := max(p.readaheadBudget-p.reservedPreloadBytesLocked(), 0)
 	activeCount := 0
 	activeFiles := make(map[*torrent.File]struct{})
 	for _, sr := range p.readers {
@@ -681,7 +681,12 @@ func (p *Pool) planReadaheadLocked(totalBudget int64) readaheadPlan {
 		return plan
 	}
 
-	allowance := 2 * p.boundaryBytesPerFileLocked(available, len(activeFiles))
+	// Each file's head and tail get an even share of at most half the
+	// available budget, and never more than a default boundary each.
+	var allowance int64
+	if len(activeFiles) > 0 {
+		allowance = 2 * min(int64(defaultFileBoundaryBytes), available/(4*int64(len(activeFiles))))
+	}
 	var boundaryCost int64
 	for file := range activeFiles {
 		if boundaryBytes, cost, ok := fitFileBoundaries(file, allowance); ok {
@@ -749,21 +754,6 @@ func filePieceLength(file *torrent.File) int64 {
 		return 0
 	}
 	return max(file.Torrent().Info().PieceLength, 0)
-}
-
-// availableProtectionBudgetLocked returns the protection capacity not already
-// reserved by preload ranges. Must be called with p.mu held.
-func (p *Pool) availableProtectionBudgetLocked(totalBudget int64) int64 {
-	return max(totalBudget-p.reservedPreloadBytesLocked(), 0)
-}
-
-// boundaryBytesPerFileLocked bounds the aggregate head-and-tail protection to
-// at most half of the stream protection budget. Must be called with p.mu held.
-func (p *Pool) boundaryBytesPerFileLocked(totalBudget int64, activeFiles int) int64 {
-	if activeFiles <= 0 || totalBudget <= 0 {
-		return 0
-	}
-	return min(int64(defaultFileBoundaryBytes), totalBudget/(4*int64(activeFiles)))
 }
 
 const trailingReadaheadDivisor = 4 // trailing range is 1/4th of readahead pieces

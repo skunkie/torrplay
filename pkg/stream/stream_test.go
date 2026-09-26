@@ -493,7 +493,8 @@ func TestPool_EffectiveLingerTimeout(t *testing.T) {
 // byteReadahead returns the readahead the pool assigns to a reader without
 // piece metadata for the given total budget.
 func byteReadahead(p *Pool, totalBudget int64) int64 {
-	return readaheadForShare(p.planReadaheadLocked(totalBudget).share, 0)
+	p.readaheadBudget = totalBudget
+	return readaheadForShare(p.planReadaheadLocked().share, 0)
 }
 
 func TestPool_PlanReadaheadLocked(t *testing.T) {
@@ -501,7 +502,8 @@ func TestPool_PlanReadaheadLocked(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 
 		// With no active readers the whole budget remains unallocated.
-		if share := p.planReadaheadLocked(1000).share; share != 1000 {
+		p.readaheadBudget = 1000
+		if share := p.planReadaheadLocked().share; share != 1000 {
 			t.Fatalf("expected share 1000, got %d", share)
 		}
 
@@ -826,7 +828,8 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 		p.readers[uint64(2)] = sr2
 
 		// One active range reserves 1/4 of its ahead window for trailing protection.
-		p.refreshReadaheadLocked(1000)
+		p.readaheadBudget = 1000
+		p.refreshReadaheadLocked()
 
 		if sr1.readahead != 800 {
 			t.Fatalf("expected active reader readahead=800, got %d", sr1.readahead)
@@ -998,7 +1001,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 		p.readaheadBudget = pool
 
 		// All 3 active share the budget after accounting for trailing protection.
-		p.refreshReadaheadLocked(pool)
+		p.refreshReadaheadLocked()
 		for i, sr := range srs {
 			want := int64(2666)
 			if sr.readahead != want {
@@ -1050,7 +1053,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 			reader:        fsMr,
 		}
 		p.readers[uint64(99)] = fsSr
-		p.refreshReadaheadLocked(pool)
+		p.refreshReadaheadLocked()
 		if srs[2].readahead != 8000 {
 			t.Fatalf("memory reader should keep readahead=8000, got %d", srs[2].readahead)
 		}

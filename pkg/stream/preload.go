@@ -626,7 +626,7 @@ func (p *Pool) reservePreloadLocked(pl *preload) bool {
 		p.cfg.Registry.SetActiveRange(pl.infoHash, pl.reservation.headID, pl.reservation.headStart, pl.reservation.headEnd)
 		p.cfg.Registry.SetActiveRange(pl.infoHash, pl.reservation.tailID, pl.reservation.tailStart, pl.reservation.tailEnd)
 	}
-	p.refreshReadaheadLocked(p.readaheadBudget)
+	p.refreshReadaheadLocked()
 	return true
 }
 
@@ -642,7 +642,7 @@ func (p *Pool) releasePreloadReservationLocked(pl *preload) {
 		p.cfg.Registry.ClearActiveRange(pl.infoHash, pl.reservation.headID)
 		p.cfg.Registry.ClearActiveRange(pl.infoHash, pl.reservation.tailID)
 	}
-	p.refreshReadaheadLocked(p.readaheadBudget)
+	p.refreshReadaheadLocked()
 }
 
 // reservedPreloadBytesLocked returns the bytes all preloads reserve. Must be

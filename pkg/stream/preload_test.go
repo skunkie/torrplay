@@ -823,7 +823,7 @@ func TestPool_ReservePreloadLocked(t *testing.T) {
 		assert.False(t, holdPreload(p, metainfo.Hash{2}, nil, preloadReservation{bytes: 300}), "only 200 bytes of the preload share are left")
 		require.True(t, holdPreload(p, metainfo.Hash{2}, nil, preloadReservation{bytes: 200}))
 		p.mu.Lock()
-		available := p.availableProtectionBudgetLocked(p.readaheadBudget)
+		available := p.planReadaheadLocked().share
 		p.mu.Unlock()
 		assert.Equal(t, int64(500), available, "playback keeps the rest of the budget")
 	})
