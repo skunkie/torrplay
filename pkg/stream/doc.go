@@ -130,12 +130,10 @@
 //			Registry:           nil, // pass a storage.Client here to enable eviction protection
 //		})
 //		defer pool.Close()
-//		if !pool.SetReadaheadBudget(256 << 20) {
-//			panic("readahead budget conflicts with active preload reservations")
-//		}
+//		pool.SetReadaheadBudget(256 << 20)
 //
 //		// Acquire returns the bounded io.ReadSeeker expected by http.ServeContent.
-//		// reader, release, err := pool.Acquire(file, stream.MemoryStorage)
+//		// reader, release, err := pool.Acquire(r.Context(), file, stream.MemoryStorage)
 //		// if err != nil { panic(err) }
 //		// defer release()
 //		// http.ServeContent(w, r, file.Path(), time.Time{}, reader)

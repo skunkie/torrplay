@@ -5,6 +5,7 @@
 package stream
 
 import (
+	"context"
 	"crypto/sha1"
 	"errors"
 	"fmt"
@@ -27,7 +28,7 @@ import (
 func acquireTestReader(t *testing.T, pool *Pool, file *torrent.File, mode StorageMode, budgetBytes int64) (io.ReadSeeker, ReleaseFunc) {
 	t.Helper()
 	pool.SetReadaheadBudget(budgetBytes)
-	reader, release, err := pool.Acquire(file, mode)
+	reader, release, err := pool.Acquire(context.Background(), file, mode)
 	if err != nil {
 		t.Fatalf("acquire reader: %v", err)
 	}
@@ -220,9 +221,9 @@ func TestPool_Acquire(t *testing.T) {
 		defer pool.Close()
 		pool.SetReadaheadBudget(1024 * 1024)
 
-		_, releaseFirst, err := pool.Acquire(f, MemoryStorage)
+		_, releaseFirst, err := pool.Acquire(context.Background(), f, MemoryStorage)
 		require.NoError(t, err)
-		_, releaseSecond, err := pool.Acquire(f, MemoryStorage)
+		_, releaseSecond, err := pool.Acquire(context.Background(), f, MemoryStorage)
 		require.NoError(t, err)
 
 		releaseFirst()
@@ -244,10 +245,10 @@ func TestPool_Acquire(t *testing.T) {
 		defer pool.Close()
 		pool.SetReadaheadBudget(1024 * 1024)
 
-		_, releaseFirst, err := pool.Acquire(firstFile, MemoryStorage)
+		_, releaseFirst, err := pool.Acquire(context.Background(), firstFile, MemoryStorage)
 		require.NoError(t, err)
 		releaseFirst()
-		_, releaseSecond, err := pool.Acquire(secondFile, MemoryStorage)
+		_, releaseSecond, err := pool.Acquire(context.Background(), secondFile, MemoryStorage)
 		require.NoError(t, err)
 		defer releaseSecond()
 
@@ -265,7 +266,7 @@ func TestPool_Acquire(t *testing.T) {
 		t.Cleanup(pool.Close)
 		pool.SetReadaheadBudget(1024 * 1024)
 
-		_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
+		_, releaseOld, err := pool.Acquire(context.Background(), oldFile, MemoryStorage)
 		require.NoError(t, err)
 		oldTorrent.Drop()
 		<-oldTorrent.Closed()
@@ -371,7 +372,7 @@ func TestPool_Acquire(t *testing.T) {
 
 		pool.Close()
 
-		reader, release, err := pool.Acquire(f, MemoryStorage)
+		reader, release, err := pool.Acquire(context.Background(), f, MemoryStorage)
 		if !errors.Is(err, ErrPoolClosed) {
 			t.Fatalf("expected ErrPoolClosed, got %v", err)
 		}
@@ -394,7 +395,7 @@ func TestPool_Acquire(t *testing.T) {
 		pool := New(Config{})
 		t.Cleanup(pool.Close)
 
-		reader, release, err := pool.Acquire(file, StorageMode(255))
+		reader, release, err := pool.Acquire(context.Background(), file, StorageMode(255))
 		if !errors.Is(err, ErrInvalidStorageMode) {
 			t.Fatalf("expected ErrInvalidStorageMode, got %v", err)
 		}
@@ -407,7 +408,7 @@ func TestPool_Acquire(t *testing.T) {
 		pool := New(Config{})
 		t.Cleanup(pool.Close)
 
-		reader, release, err := pool.Acquire(nil, MemoryStorage)
+		reader, release, err := pool.Acquire(context.Background(), nil, MemoryStorage)
 		if !errors.Is(err, ErrInvalidFile) {
 			t.Fatalf("expected ErrInvalidFile, got %v", err)
 		}
@@ -918,7 +919,7 @@ func TestPoolProtectedPiecesFitReadaheadBudget(t *testing.T) {
 				pool.SetReadaheadBudget(budget)
 
 				for range readers {
-					_, release, err := pool.Acquire(file, MemoryStorage)
+					_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 					require.NoError(t, err)
 					t.Cleanup(release)
 				}
@@ -962,7 +963,7 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	// Two 64-byte pieces: the position piece and one piece of readahead.
 	pool.SetReadaheadBudget(128)
 
-	_, release, err := pool.Acquire(file, MemoryStorage)
+	_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 	require.NoError(t, err)
 	defer release()
 

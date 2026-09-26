@@ -5,6 +5,7 @@
 package controller
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -63,7 +64,7 @@ func TestEngineStatsCountTorrentsWithStreamReaders(t *testing.T) {
 	pool := ctrl.streamPool.Load()
 	releases := make([]func(), 0, 3)
 	for _, file := range []*torrent.File{series.Files()[0], series.Files()[0], movie.Files()[0]} {
-		_, release, err := pool.Acquire(file, stream.MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, stream.MemoryStorage)
 		require.NoError(t, err)
 		releases = append(releases, release)
 	}

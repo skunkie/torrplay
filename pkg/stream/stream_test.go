@@ -1449,7 +1449,7 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 			PriorityWindowFraction: 1,
 			Registry:               reg,
 		})
-		_, release, err := p.Acquire(file, FileStorage)
+		_, release, err := p.Acquire(context.Background(), file, FileStorage)
 		require.NoError(t, err)
 		defer release()
 		var key uint64

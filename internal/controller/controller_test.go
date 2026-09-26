@@ -1679,7 +1679,7 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 
 		file := to.Files()[0]
 		ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
-		_, release, err := ctrl.streamPool.Load().Acquire(file, stream.MemoryStorage)
+		_, release, err := ctrl.streamPool.Load().Acquire(context.Background(), file, stream.MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 
@@ -1863,7 +1863,7 @@ func TestTorrentActiveField(t *testing.T) {
 
 	file := to.Files()[0]
 	ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
-	_, release, err := ctrl.streamPool.Load().Acquire(file, stream.MemoryStorage)
+	_, release, err := ctrl.streamPool.Load().Acquire(context.Background(), file, stream.MemoryStorage)
 	require.NoError(t, err)
 
 	// Now should be active

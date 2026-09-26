@@ -5,6 +5,7 @@
 package stream
 
 import (
+	"context"
 	"crypto/sha1"
 	"fmt"
 	"slices"
@@ -404,7 +405,7 @@ func TestPool_PreloadScheduling(t *testing.T) {
 		_, err := pool.Preload(readyFile, MemoryStorage)
 		require.NoError(t, err)
 		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
-		_, release, err := pool.Acquire(readyFile, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), readyFile, MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 
@@ -443,7 +444,7 @@ func TestPool_PreloadScheduling(t *testing.T) {
 		t.Cleanup(pool.Close)
 		pool.SetReadaheadBudget(1 << 20)
 		played, playedFile := addSizedTorrent(t, c, "played", 64, 640)
-		_, release, err := pool.Acquire(playedFile, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), playedFile, MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 		release()
@@ -477,7 +478,7 @@ func TestPool_SetReadaheadBudgetEvictsPreloads(t *testing.T) {
 		waitForPreloadState(t, pool, idle.InfoHash(), PreloadReady)
 		_, err := pool.Preload(runningFile, MemoryStorage)
 		require.NoError(t, err)
-		_, release, err := pool.Acquire(readFile, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), readFile, MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 
@@ -549,7 +550,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 
 	t.Run("keeps a preload while its file is read", func(t *testing.T) {
 		pool, to, file := newReadyPreload(t, time.Minute)
-		_, release, err := pool.Acquire(file, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 		idleFor(pool, to.InfoHash(), time.Hour)
@@ -559,7 +560,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 
 	t.Run("releases a read preload once its lingering reader closes", func(t *testing.T) {
 		pool, to, file := newReadyPreload(t, time.Hour)
-		_, release, err := pool.Acquire(file, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 		require.NoError(t, err)
 		release()
 		pool.expirePreloads()
@@ -578,13 +579,13 @@ func TestPool_ExpirePreloads(t *testing.T) {
 
 	t.Run("keeps a read preload while another viewer streams another file", func(t *testing.T) {
 		pool, to, file := newReadyPreload(t, time.Hour)
-		_, release, err := pool.Acquire(file, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 		require.NoError(t, err)
 		release()
 
 		c := newTestTorrentClient(t)
 		_, otherFile := addSizedTorrent(t, c, "other", 64, 640)
-		_, releaseOther, err := pool.Acquire(otherFile, MemoryStorage)
+		_, releaseOther, err := pool.Acquire(context.Background(), otherFile, MemoryStorage)
 		require.NoError(t, err)
 		defer releaseOther()
 		assert.True(t, pool.HasReaders(to.InfoHash()), "another viewer must not close the lingering reader")
@@ -599,7 +600,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		to, file, data := addHashedTorrent(t, c, "movie")
 		_, err := pool.Preload(file, MemoryStorage)
 		require.NoError(t, err)
-		_, release, err := pool.Acquire(file, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 		require.NoError(t, err)
 		release()
 		pool.mu.Lock()
@@ -622,7 +623,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		t.Cleanup(pool.Close)
 		pool.SetReadaheadBudget(1 << 20)
 		to, file := addSizedTorrent(t, c, "movie", 64, 640)
-		_, release, err := pool.Acquire(file, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 		_, err = pool.Preload(file, MemoryStorage)
@@ -859,7 +860,7 @@ func TestPool_ReservePreloadLocked(t *testing.T) {
 		pool := New(Config{Registry: reg, Logger: testLogger()})
 		t.Cleanup(pool.Close)
 		pool.SetReadaheadBudget(budget)
-		_, release, err := pool.Acquire(file, MemoryStorage)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
 		require.NoError(t, err)
 		defer release()
 

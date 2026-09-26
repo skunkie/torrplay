@@ -2051,7 +2051,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
+	reader, release, err := pool.Acquire(r.Context(), file, mode)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, stream.ErrPoolClosed) {

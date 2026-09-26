@@ -449,19 +449,13 @@ func New(cfg Config) *Pool {
 	return p
 }
 
-// Acquire returns an io.ReadSeeker for reading the given file within a torrent.
-// It is equivalent to AcquireContext with context.Background().
-func (p *Pool) Acquire(file *torrent.File, mode StorageMode) (io.ReadSeeker, ReleaseFunc, error) {
-	return p.AcquireContext(context.Background(), file, mode)
-}
-
-// AcquireContext returns an io.ReadSeeker for reading the given file within a torrent
+// Acquire returns an io.ReadSeeker for reading the given file within a torrent
 // with cancellation tied to ctx. The caller MUST call the returned release function
 // (typically via defer) when done reading. The release function is safe to call
 // multiple times. MemoryStorage readers share the budget configured by SetReadaheadBudget;
-// FileStorage readers use Config.FileReadaheadBytes. AcquireContext returns an error
+// FileStorage readers use Config.FileReadaheadBytes. Acquire returns an error
 // for an invalid file or mode, or after the pool has been closed.
-func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode StorageMode) (io.ReadSeeker, ReleaseFunc, error) {
+func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode) (io.ReadSeeker, ReleaseFunc, error) {
 	if file == nil || file.Torrent() == nil {
 		return nil, nil, ErrInvalidFile
 	}
