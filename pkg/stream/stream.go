@@ -1093,13 +1093,10 @@ func computeRange(file *torrent.File, pieceLength, readahead, byteOffset int64) 
 // protected from eviction to preserve container metadata and seek tables.
 const DefaultFileBoundaryBytes = 8 << 20
 
-// ComputeFileBoundaries calculates the head and tail piece index ranges (inclusive)
-// for a file to protect container metadata (e.g. EBML headers, SeekHead, Cues, moov atom)
-// from eviction throughout streaming.
-func ComputeFileBoundaries(file *torrent.File) (headStart, headEnd, tailStart, tailEnd int, ok bool) {
-	return computeFileBoundaries(file, DefaultFileBoundaryBytes)
-}
-
+// computeFileBoundaries calculates the inclusive head and tail piece ranges of
+// boundaryBytes each, at least one piece, that protect a file's container
+// metadata (e.g. EBML headers, SeekHead, Cues, moov atom) from eviction
+// throughout streaming.
 func computeFileBoundaries(file *torrent.File, boundaryBytes int64) (headStart, headEnd, tailStart, tailEnd int, ok bool) {
 	if file == nil || file.Length() == 0 {
 		return 0, 0, 0, 0, false

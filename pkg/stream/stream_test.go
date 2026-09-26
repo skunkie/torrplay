@@ -1581,7 +1581,6 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 	})
 }
 
-// TestComputeFileBoundaries verifies that computeFileBoundaries handles a nil or empty file.
 func TestBoundaryPieces(t *testing.T) {
 	tests := []struct {
 		name                                   string
@@ -1621,10 +1620,15 @@ func TestBoundaryPieceBytes(t *testing.T) {
 	}
 }
 
+// TestComputeFileBoundaries verifies that computeFileBoundaries rejects a nil or empty file.
 func TestComputeFileBoundaries(t *testing.T) {
-	_, _, _, _, ok := ComputeFileBoundaries(nil)
+	_, _, _, _, ok := computeFileBoundaries(nil, DefaultFileBoundaryBytes)
 	if ok {
 		t.Fatal("expected ok=false for nil file")
+	}
+	_, _, _, _, ok = computeFileBoundaries(&torrent.File{}, DefaultFileBoundaryBytes)
+	if ok {
+		t.Fatal("expected ok=false for empty file")
 	}
 }
 
