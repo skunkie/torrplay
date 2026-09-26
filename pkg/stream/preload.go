@@ -167,8 +167,8 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 	if mode != MemoryStorage && mode != FileStorage {
 		return PreloadStatus{}, fmt.Errorf("%w: %d", ErrInvalidStorageMode, mode)
 	}
-	tor := file.Torrent()
-	infoHash := tor.InfoHash()
+	to := file.Torrent()
+	infoHash := to.InfoHash()
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -187,7 +187,7 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 	}
 	pl.completedBytes, _ = pl.progress()
 	pl.read = p.fileHasReadersLocked(file)
-	tor.AllowDataDownload()
+	to.AllowDataDownload()
 	p.preloads[infoHash] = pl
 	p.preloadQueue = append(p.preloadQueue, pl)
 	p.dispatchPreloadsLocked()
@@ -259,17 +259,17 @@ func (pl *preload) status() PreloadStatus {
 // and whether every piece of its ranges is complete. It reads piece states
 // under the torrent client lock.
 func (pl *preload) progress() (completedBytes int64, complete bool) {
-	tor := pl.file.Torrent()
+	to := pl.file.Torrent()
 	states := make(map[int]bool, len(pl.pieces))
 	pieceComplete := func(index int) bool {
 		done, ok := states[index]
 		if !ok {
-			done = tor.PieceState(index).Complete
+			done = to.PieceState(index).Complete
 			states[index] = done
 		}
 		return done
 	}
-	pieceLength := tor.Info().PieceLength
+	pieceLength := to.Info().PieceLength
 	completedBytes = completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), 0, pl.headEnd) +
 		completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), pl.tailStart, pl.tailEnd)
 	for _, index := range pl.pieces {
@@ -489,10 +489,10 @@ func (p *Pool) startPreloadLocked(pl *preload) {
 // complete, and running again if storage evicts one of its pieces, and it
 // removes the preload when its torrent closes.
 func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
-	tor := pl.file.Torrent()
+	to := pl.file.Torrent()
 	// Subscribe before the first check, so no change between the check and
 	// the wait is missed.
-	sub := tor.SubscribePieceStateChanges()
+	sub := to.SubscribePieceStateChanges()
 	defer sub.Close()
 	watched := make(map[int]struct{}, len(pl.pieces))
 	for _, index := range pl.pieces {
@@ -509,7 +509,7 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 		p.updatePreloadLocked(pl, completedBytes, complete)
 		p.mu.Unlock()
 
-		if !waitForPieceChange(ctx, tor, sub.Values, watched) {
+		if !waitForPieceChange(ctx, to, sub.Values, watched) {
 			if ctx.Err() == nil {
 				p.mu.Lock()
 				if p.preloads[pl.infoHash] == pl {

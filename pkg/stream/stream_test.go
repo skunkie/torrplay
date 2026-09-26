@@ -1548,7 +1548,7 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 		// actual clamping logic is exercised in the "drives priority update"
 		// subtest of TestPool_PrioritizeAsync, which dispatches through updateActiveRange (which itself panics on
 		// &torrent.File{}.Torrent().Info()).  The clamping is a simple
-		// endPieceMax = min(endPieceMax, tor.NumPieces()) guard — no loop
+		// endPieceMax = min(endPieceMax, to.NumPieces()) guard — no loop
 		// or arithmetic — so the risk of regression is low and the test
 		// constraint is fundamental to the anacrolix/torrent package.
 		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0.3)
