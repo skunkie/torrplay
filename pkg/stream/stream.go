@@ -119,6 +119,11 @@ type Config struct {
 	// Zero defaults to 5 minutes. Negative values keep unread and finished
 	// preloads until they are replaced, cancelled, or evicted.
 	PreloadReadyTTL time.Duration
+	// PreloadStallTimeout is how long a running preload may go without
+	// completing a piece before it fails, freeing its download slot and
+	// memory, as on a torrent without peers. Zero defaults to 2 minutes.
+	// Negative values let preloads run until they complete or are removed.
+	PreloadStallTimeout time.Duration
 	// ReadObserver, when set, is called after every Read of a reader with the
 	// reader's storage mode and how long the Read took, including any wait
 	// for torrent data. It runs on the reading goroutine, so it must return
@@ -434,6 +439,9 @@ func New(cfg Config) *Pool {
 	}
 	if cfg.PreloadReadyTTL == 0 {
 		cfg.PreloadReadyTTL = defaultPreloadReadyTTL
+	}
+	if cfg.PreloadStallTimeout == 0 {
+		cfg.PreloadStallTimeout = defaultPreloadStallTimeout
 	}
 
 	p := &Pool{

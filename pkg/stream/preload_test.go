@@ -654,6 +654,68 @@ func TestPool_ExpirePreloads(t *testing.T) {
 	})
 }
 
+func TestPool_PreloadStallTimeout(t *testing.T) {
+	stalledFor := func(p *Pool, infoHash metainfo.Hash, stalled time.Duration) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.preloads[infoHash].progressAt = time.Now().Add(-stalled)
+	}
+
+	t.Run("fails a stalled preload and frees its slot", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger(), PreloadStallTimeout: time.Minute})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1500)
+		stalled, stalledFile := addSizedTorrent(t, c, "stalled", 64, 640)
+		waiting, waitingFile := addSizedTorrent(t, c, "waiting", 64, 640)
+		for _, file := range []*torrent.File{stalledFile, waitingFile} {
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+		require.Equal(t, PreloadQueued, preloadState(pool, waiting.InfoHash()), "only one reservation fits")
+
+		pool.expirePreloads()
+		assert.Equal(t, PreloadRunning, preloadState(pool, stalled.InfoHash()))
+		stalledFor(pool, stalled.InfoHash(), time.Minute)
+		pool.expirePreloads()
+		assert.Equal(t, PreloadFailed, preloadState(pool, stalled.InfoHash()))
+		assert.Empty(t, preloadClaims(pool, stalled))
+		assert.Equal(t, PreloadRunning, preloadState(pool, waiting.InfoHash()), "the freed memory admits the queued preload")
+	})
+
+	t.Run("progress restarts the timer", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger(), PreloadStallTimeout: time.Minute})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1 << 20)
+		to, file, data := addHashedTorrent(t, c, "movie")
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		stalledFor(pool, to.InfoHash(), time.Hour)
+
+		writePieces(t, to, data, 0)
+		require.Eventually(t, func() bool {
+			status, _ := pool.PreloadStatus(to.InfoHash())
+			return status.CompletedBytes == 64
+		}, 5*time.Second, time.Millisecond)
+		pool.expirePreloads()
+		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()))
+	})
+
+	t.Run("a negative timeout disables it", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger(), PreloadStallTimeout: -1})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1 << 20)
+		to, file := addSizedTorrent(t, c, "movie", 64, 640)
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		stalledFor(pool, to.InfoHash(), 24*time.Hour)
+		pool.expirePreloads()
+		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()))
+	})
+}
+
 func TestPool_PlanPreloadLocked(t *testing.T) {
 	const mib = int64(1 << 20)
 

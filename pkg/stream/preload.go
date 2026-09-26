@@ -26,7 +26,8 @@ const (
 	PreloadRunning
 	// PreloadReady holds every piece of the preload's ranges.
 	PreloadReady
-	// PreloadFailed could not reserve memory with nothing left to wait for.
+	// PreloadFailed could not reserve memory with nothing left to wait for,
+	// or stopped completing pieces for the stall timeout.
 	PreloadFailed
 	// PreloadEvicted gave up its memory to another preload or to a smaller
 	// readahead budget.
@@ -70,7 +71,8 @@ type PreloadStatus struct {
 var ErrPreloadDoesNotFit = errors.New("preload does not fit the memory limit")
 
 const (
-	defaultPreloadReadyTTL = 5 * time.Minute
+	defaultPreloadReadyTTL     = 5 * time.Minute
+	defaultPreloadStallTimeout = 2 * time.Minute
 
 	// maxConcurrentPreloads caps preloads that are downloading. Preloads share
 	// one priority level and download in rarity order, so running fewer at a
@@ -116,6 +118,9 @@ type preload struct {
 	infoHash                    metainfo.Hash
 	mode                        StorageMode
 	pieces                      []int
+	// progressAt is when a running preload started running or last completed
+	// a piece. The stall timeout runs from it.
+	progressAt time.Time
 	// read reports that a reader of the preload's file was acquired since the
 	// preload was requested. Once its file has no reader left, a read preload
 	// has served its purpose and is released.
@@ -469,6 +474,7 @@ func (p *Pool) runningPreloadCountLocked() int {
 // called with p.mu held.
 func (p *Pool) startPreloadLocked(pl *preload) {
 	pl.state = PreloadRunning
+	pl.progressAt = time.Now()
 	p.claimPreloadLocked(pl)
 	ctx, cancel := context.WithCancel(context.Background())
 	pl.cancel = cancel
@@ -555,6 +561,9 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 	if p.closed || p.preloads[pl.infoHash] != pl {
 		return
 	}
+	if completedBytes > pl.completedBytes {
+		pl.progressAt = time.Now()
+	}
 	pl.completedBytes = completedBytes
 	switch {
 	case pl.state == PreloadRunning && complete:
@@ -572,6 +581,7 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 		p.dispatchPreloadsLocked()
 	case pl.state == PreloadReady && !complete:
 		pl.state = PreloadRunning
+		pl.progressAt = time.Now()
 		p.claimPreloadLocked(pl)
 		p.logger.Debug("preload lost a piece and runs again",
 			slog.String("hash", pl.infoHash.HexString()),
@@ -766,7 +776,8 @@ func (p *Pool) stopPreloadLocked(pl *preload) {
 // expirePreloads removes preloads whose torrent closed, ready preloads whose
 // file has not been read within the ready TTL, read preloads whose file has no
 // reader left, and failed or evicted preloads that have reported their final
-// state for the ready TTL.
+// state for the ready TTL. It fails running preloads that completed no piece
+// within the stall timeout.
 func (p *Pool) expirePreloads() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -785,6 +796,15 @@ func (p *Pool) expirePreloads() {
 			}
 			if pl.read || (ttl > 0 && now.Sub(pl.readyAt) >= ttl) {
 				p.removePreloadLocked(infoHash)
+				removed = true
+			}
+		case pl.state == PreloadRunning:
+			if stall := p.cfg.PreloadStallTimeout; stall > 0 && now.Sub(pl.progressAt) >= stall {
+				p.finishPreloadLocked(pl, PreloadFailed)
+				p.logger.Warn("preload stalled",
+					slog.String("hash", infoHash.HexString()),
+					slog.String("file", pl.file.Path()),
+					slog.Duration("stalled", now.Sub(pl.progressAt)))
 				removed = true
 			}
 		case pl.state == PreloadFailed || pl.state == PreloadEvicted:

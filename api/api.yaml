@@ -2285,7 +2285,7 @@ components:
           example: 0.33
         status:
           type: string
-          description: Current preload status. A queued preload waits for a free preload slot or for memory, and a preloading one is downloading. A failed preload could not reserve memory, and an evicted preload gave up its memory to another preload or to a smaller memory limit; both report the progress they had made.
+          description: Current preload status. A queued preload waits for a free preload slot or for memory, and a preloading one is downloading. A failed preload could not reserve memory or stopped receiving pieces, and an evicted preload gave up its memory to another preload or to a smaller memory limit; both report the progress they had made.
           enum:
             - "evicted"
             - "failed"
