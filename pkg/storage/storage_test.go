@@ -1746,7 +1746,7 @@ func TestPieceImpl_WriteAt(t *testing.T) {
 	// Ensures that multiple goroutines
 	// racing to write the same never-before-allocated piece don't cause c.used
 	// to drift from actual allocated memory (regression test for the double
-	// allocation race in ensureDataAllocated / freeMemory).
+	// allocation race in ensureDataAllocated).
 	t.Run("concurrent writes to same piece do not drift memory", func(t *testing.T) {
 		client := newTestClient(1024)
 		info, infoHash := newTestInfo(256, 1)

@@ -73,8 +73,9 @@
 // least-recently-used pieces. Eviction removes piece data and tracking from memory, causing
 // evicted pieces to be reported as incomplete so the torrent engine can download them again on demand.
 // Pieces still downloading, meaning incomplete and written within the last 30 seconds, are spared
-// while other unprotected pieces can be evicted instead, because an evicted partial piece must be
-// downloaded again in full. They are still evicted, oldest first, when nothing else frees enough memory.
+// while other pieces of the same protection level can be evicted instead, because an evicted partial
+// piece must be downloaded again in full. They are still evicted, oldest first, when nothing else at
+// that level frees enough memory.
 // The torrent engine caches piece completion and is not told when storage drops a piece on its own.
 // Register ClientEvictionHandler with SetEvictionHandler so every evicted piece, and every piece
 // already gone when the engine marks it complete, is reported back to it from a background
@@ -87,7 +88,8 @@
 // # Thread Safety
 //
 // All public methods are thread-safe and can be called concurrently from multiple goroutines.
-// The implementation uses fine-grained locking to minimize contention.
+// One client lock guards the LRU list, the memory accounting, and the torrent and protection maps;
+// each piece has its own lock for its data, so copying piece data happens outside the client lock.
 //
 // # Limitations
 //
@@ -139,6 +141,7 @@
 // The package defines several error conditions:
 //
 //   - ErrPieceNotAvailable indicates that a piece has never been written or has been evicted.
+//   - ErrPieceIncomplete indicates that a resident piece has bytes that were never written.
 //   - ErrInsufficientMemory indicates that an allocation cannot fit even after eviction.
 //   - ErrClientClosed indicates that the storage client has been closed.
 //   - ErrTorrentClosed indicates that an operation used a closed torrent implementation.

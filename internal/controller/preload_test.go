@@ -402,7 +402,7 @@ func TestStreamDoesNotPausePreloads(t *testing.T) {
 	}
 }
 
-// TestGetPreloadStatusReportsQueuedPreload verifies that a preload waiting for
+// TestPreloadResponseReportsQueuedPreload verifies that a preload waiting for
 // a preload slot reports that it is queued rather than downloading.
 func TestPreloadResponseReportsQueuedPreload(t *testing.T) {
 	ctrl, cleanup := newTestController(t)

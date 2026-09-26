@@ -720,7 +720,7 @@ func fitFileBoundaries(file *torrent.File, allowance int64) (boundaryBytes, cost
 }
 
 // readaheadForShare returns the readahead whose protected range fits within
-// share bytes. computeRange protects the position piece, the readahead pieces
+// share bytes. readerWindow protects the position piece, the readahead pieces
 // ahead of it, and a trailing quarter of the readahead behind it, so the
 // readahead is a whole number of pieces and may be zero when the share only
 // covers the piece being read. Without piece metadata the share is split in
@@ -1106,7 +1106,8 @@ func (p *Pool) StreamingTorrentCount() int {
 	return len(torrents)
 }
 
-// Close shuts down the pool, closes all readers, and clears active ranges.
+// Close shuts down the pool, closes all readers, and stops every preload,
+// clearing their protection and priority claims.
 // It is safe to call multiple times.
 func (p *Pool) Close() {
 	p.mu.Lock()

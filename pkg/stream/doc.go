@@ -33,14 +33,14 @@
 // the engine is shared; readers still lingering after LingerTimeout are
 // closed. Readers of a dropped torrent close on release.
 //
-// # Active Range Protection
+// # Eviction Protection
 //
-// Each active memory-storage reader registers a forward-weighted readahead
-// window (1/4 behind, full readahead ahead) through the ProtectionRegistry
-// interface; file-storage pieces live on disk and need no protection. Pieces
-// inside this window are protected from LRU eviction. When the reader is
-// released, the active range is cleared immediately so those pieces become
-// eviction candidates again. A seek is reported when the next read starts, so
+// Each active memory-storage reader protects a forward-weighted readahead
+// window (1/4 behind, full readahead ahead), together with its file's head and
+// tail boundaries when they fit the budget, through the ProtectionRegistry
+// interface; file-storage pieces live on disk and need no protection. When the
+// reader is released, its protection is cleared immediately, so a lingering
+// reader's pieces are eviction candidates again. A seek is reported when the next read starts, so
 // the destination is protected before the read can block, while positions that
 // are never read, such as the size probe of http.ServeContent, are skipped.
 //
@@ -58,17 +58,18 @@
 //
 // # Readahead Rebalancing
 //
-// When a reader is acquired or released, the pool redistributes the total
-// memory readahead budget among active memory-storage readers. Storage protects
+// When a reader is acquired or released, a preload reserves or releases its
+// share, or the budget changes, the pool redistributes the memory readahead
+// budget among active memory-storage readers. Storage protects
 // whole pieces, so the division is made in pieces: head and tail boundaries use
 // at most half of the budget and shrink, or are dropped, until their pieces fit,
 // and each reader's readahead is the largest whole number of pieces whose active
 // range fits its share. With large pieces and a small budget, a reader may protect
 // only the piece it is reading. A file whose held preload reservation covers
 // both its head and tail gets no reader boundaries, because the preload already
-// protects them within that reservation. File-storage
-// readers retain their configured FileReadaheadBytes while active. Lingering
-// readers hold no share of the budget.
+// protects them within that reservation. File-storage readers retain their
+// configured FileReadaheadBytes while active. Lingering readers hold no share
+// of the budget.
 //
 // # Preloads
 //
@@ -97,8 +98,7 @@
 // so the linger timeout is its grace period between the player's requests. A
 // ready preload whose file is never read expires PreloadReadyTTL after it
 // became ready, and a failed or evicted preload reports its final state for
-// as long.
-// File-storage preloads write to disk and reserve nothing.
+// as long. File-storage preloads write to disk and reserve nothing.
 //
 // # Memory Pressure
 //
@@ -132,7 +132,7 @@
 //		defer pool.Close()
 //		pool.SetReadaheadBudget(256 << 20)
 //
-//		// Acquire returns the bounded io.ReadSeeker expected by http.ServeContent.
+//		// Acquire returns the io.ReadSeeker expected by http.ServeContent.
 //		// reader, release, err := pool.Acquire(r.Context(), file, stream.MemoryStorage)
 //		// if err != nil { panic(err) }
 //		// defer release()

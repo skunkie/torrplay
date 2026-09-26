@@ -766,9 +766,9 @@ func TestComputeRange(t *testing.T) {
 		}
 
 		// Manually set lastOffset to 320 (middle of file = 5 pieces × 64 bytes).
-		// lastOffset is only updated by the onOffsetChange callback from ReadAt,
-		// but since the torrent has no peer data, we set it directly to exercise
-		// computeRange at a non-zero offset.
+		// lastOffset is only updated by the reader's position reports, but
+		// since the torrent has no peer data, we set it directly to exercise
+		// readerWindow at a non-zero offset.
 		pool.mu.Lock()
 		var found *streamReader
 		for _, sr := range pool.readers {

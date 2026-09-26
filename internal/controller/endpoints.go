@@ -1441,10 +1441,6 @@ func (c *Controller) addTorrentByMagnetWithStorage(uri string, defaultStorage ap
 	return c.loadTorrent(uri, utils.Val(t.Storage))
 }
 
-// torrentFromMagnetParam resolves a torrent from a user-supplied magnet URI
-// (e.g. the "magnet" query/body parameter on stream and preload requests),
-// validating that its info hash matches the requested hash and registering
-// its trackers with the torrent if they weren't already added.
 // waitForInfo waits at most the metadata timeout for a torrent's metadata. It
 // returns a gateway-timeout error when the metadata does not arrive in time.
 func (c *Controller) waitForInfo(to *torrent.Torrent) error {
@@ -1468,6 +1464,10 @@ func (c *Controller) waitForInfoOrDrop(to *torrent.Torrent) error {
 	return err
 }
 
+// torrentFromMagnetParam resolves a torrent from a user-supplied magnet URI
+// (e.g. the "magnet" query/body parameter on stream and preload requests),
+// validating that its info hash matches the requested hash and registering
+// its trackers with the torrent if they weren't already added.
 func (c *Controller) torrentFromMagnetParam(magnet string, ih metainfo.Hash) (*torrent.Torrent, error) {
 	magnetV2, err := utils.ParseAndValidateMagnet(magnet, ih)
 	if err != nil {

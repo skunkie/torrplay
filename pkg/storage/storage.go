@@ -506,8 +506,8 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 	memoryStats := c.memoryStatsLocked()
 
 	// Collect piece keys belonging to this torrent, then release the global lock
-	// before reading per-piece data. This prevents write starvation from
-	// allocateMemory, evictDownTo, touchPiece, and freeMemory.
+	// before reading per-piece data. This prevents starving the writers of
+	// c.mu: allocation, eviction, and LRU touches.
 	pieceKeys := make([]pieceKey, 0, totalPieces)
 	for key := range c.pieces {
 		if key.infoHash == infoHash {
@@ -729,9 +729,9 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 			reusable = c.evictLocked(max(c.maxMemory-size, 0), deepest, size)
 
 			if c.used+size > c.maxMemory {
-				// Unprotected pieces have already been exhausted, so an unpublished
-				// reservation is the only memory that may be reclaimed without
-				// evicting an active range. Wait for one to publish or refund instead
+				// Unprotected and boundary pieces have already been exhausted, so
+				// an unpublished reservation is the only memory that may be
+				// reclaimed without evicting an active range. Wait for one to publish or refund instead
 				// of surfacing a transient WriteAt error, which the torrent engine
 				// treats as fatal.
 				if c.pendingAllocations > 0 {
@@ -786,9 +786,8 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 		if key.infoHash != infoHash || pd.torrent != state {
 			continue
 		}
-		// Read pd.data under the piece lock so len() is consistent
-		// with any concurrent piece mutations (avoid races with
-		// SetPiece/evict operations).
+		// Read pd.data under the piece lock so len() is consistent with
+		// concurrent writes to the piece.
 		pd.mu.RLock()
 		size := int64(len(pd.data))
 		pd.mu.RUnlock()
