@@ -26,11 +26,12 @@
 // its readahead, so the torrent client keeps fetching the pieces just past
 // where the player stopped. A player that fetches a file in consecutive range
 // requests, or reconnects after a pause, then finds those pieces cached by the
-// time its next request's reader reaches them. A reader lingers only while no
-// other reader is active; a new reader closes it after taking over its own
-// readahead window, so released requests never download outside the shared
-// budget. Readers still lingering after LingerTimeout are closed. Readers of a
-// dropped torrent close on release.
+// time its next request's reader reaches them. The next reader of the same
+// file closes it after taking over its readahead window, and a reader released
+// while another reader of its file is active closes at once, so a file has at
+// most one lingering reader. Other viewers' readers never close it, because
+// the engine is shared; readers still lingering after LingerTimeout are
+// closed. Readers of a dropped torrent close on release.
 //
 // # Active Range Protection
 //

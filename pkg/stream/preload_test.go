@@ -576,7 +576,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		assert.Zero(t, reservedPreloadBytes(pool))
 	})
 
-	t.Run("releases a read preload when a reader of another file closes its lingering reader", func(t *testing.T) {
+	t.Run("keeps a read preload while another viewer streams another file", func(t *testing.T) {
 		pool, to, file := newReadyPreload(t, time.Hour)
 		_, release, err := pool.Acquire(file, MemoryStorage)
 		require.NoError(t, err)
@@ -587,8 +587,8 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		_, releaseOther, err := pool.Acquire(otherFile, MemoryStorage)
 		require.NoError(t, err)
 		defer releaseOther()
-		_, ok := pool.PreloadStatus(to.InfoHash())
-		assert.False(t, ok)
+		assert.True(t, pool.HasReaders(to.InfoHash()), "another viewer must not close the lingering reader")
+		assert.Equal(t, PreloadReady, preloadState(pool, to.InfoHash()))
 	})
 
 	t.Run("releases on ready when playback ended while it ran", func(t *testing.T) {

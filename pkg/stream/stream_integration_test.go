@@ -236,6 +236,25 @@ func TestPool_Acquire(t *testing.T) {
 		pool.mu.Unlock()
 	})
 
+	t.Run("keeps a lingering reader while another file streams", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		first, firstFile := addSizedTorrent(t, c, "first", 64, 640)
+		_, secondFile := addSizedTorrent(t, c, "second", 64, 640)
+		pool := New(Config{Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))})
+		defer pool.Close()
+		pool.SetReadaheadBudget(1024 * 1024)
+
+		_, releaseFirst, err := pool.Acquire(firstFile, MemoryStorage)
+		require.NoError(t, err)
+		releaseFirst()
+		_, releaseSecond, err := pool.Acquire(secondFile, MemoryStorage)
+		require.NoError(t, err)
+		defer releaseSecond()
+
+		assert.True(t, pool.HasReaders(first.InfoHash()), "the engine is shared, so another viewer must not close the reader")
+		assert.False(t, pool.HasActiveReaders(first.InfoHash()))
+	})
+
 	t.Run("closes a reader of a dropped torrent on release", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, createTestMetaInfo(t))

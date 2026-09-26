@@ -95,9 +95,9 @@ type Config struct {
 	FileReadaheadBytes int64
 	// Logger receives pool lifecycle and diagnostic messages. Nil uses slog.Default.
 	Logger *slog.Logger
-	// LingerTimeout is how long a released playback reader stays open, still
-	// reading ahead, while no other work is active. Zero defaults to 30
-	// seconds. Memory pressure may shorten it.
+	// LingerTimeout is how long a released reader stays open, still reading
+	// ahead, for its player's next request. Zero defaults to 30 seconds.
+	// Memory pressure may shorten it.
 	LingerTimeout time.Duration
 	// MemoryUsage returns the current memory usage ratio (0.0–1.0).
 	// When set, lingering readers close sooner under memory pressure to
@@ -512,10 +512,13 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
 		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, DefaultFileBoundaryBytes)
-		p.closeLingeringReadersLocked()
 	} else {
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	}
+	// The new reader takes over from the file's lingering reader. It closes
+	// only after the new reader has its window, so pieces both want keep a
+	// reader's priority throughout.
+	p.closeLingeringReadersLocked(file)
 
 	p.logger.Debug("created new reader",
 		slog.String("hash", infoHash.HexString()),
@@ -574,12 +577,13 @@ func closeStreamReaderLocked(sr *streamReader) {
 // release ends a reader's lease. Called immediately after the HTTP request
 // ends (via defer in streamFile).
 //
-// A released playback reader lingers: it stays open with its readahead, so
-// the torrent client keeps fetching the pieces just past where the player
-// stopped for the player's next range request. It lingers only while no other
-// reader is active, so it cannot download outside the
-// shared budget, and at most LingerTimeout. The next request creates a new
-// reader, which finds those pieces cached. Readers of a closed torrent close
+// A released reader lingers: it stays open with its readahead, so the torrent
+// client keeps fetching the pieces just past where the player stopped for the
+// player's next range request, which creates a new reader of the file and
+// closes the lingering one. A reader released while another reader of its file
+// is active closes at once, so a file has at most one lingering reader.
+// Other viewers' readers do not close it, because the engine is shared; it
+// closes at the latest after LingerTimeout. Readers of a closed torrent close
 // immediately.
 //
 // A lingering reader holds no eviction protection or priority claims, so its
@@ -595,7 +599,7 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 	}
 
 	sr.active = false
-	if torrentClosed(sr.file) {
+	if torrentClosed(sr.file) || p.fileHasActiveReaderLocked(sr.file) {
 		p.removeReaderLocked(key, sr)
 		p.rebalanceLocked()
 		return
@@ -612,9 +616,18 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 		slog.String("hash", infoHash.HexString()),
 		slog.String("file", filePath),
 		slog.Uint64("readerID", readerID))
-
-	// Closes this reader too when other work is active.
 	p.rebalanceLocked()
+}
+
+// fileHasActiveReaderLocked reports whether file has an active reader. Must
+// be called with p.mu held.
+func (p *Pool) fileHasActiveReaderLocked(file *torrent.File) bool {
+	for _, sr := range p.readers {
+		if sr.active && sr.file == file {
+			return true
+		}
+	}
+	return false
 }
 
 // torrentClosed reports whether file's torrent has been dropped.
@@ -631,13 +644,11 @@ func torrentClosed(file *torrent.File) bool {
 }
 
 // rebalanceLocked redistributes the readahead budget after a reader stops
-// being active, or only closes lingering readers while no budget is set.
-// Must be called with p.mu held.
+// being active. Without a budget there is nothing to redistribute. Must be
+// called with p.mu held.
 func (p *Pool) rebalanceLocked() {
 	if p.readaheadBudget > 0 {
 		p.refreshReadaheadLocked(p.readaheadBudget)
-	} else {
-		p.closeLingeringReadersLocked()
 	}
 }
 
@@ -687,41 +698,23 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		p.registerActiveRangeLocked(sr.infoHash, key, sr.file, readahead, sr.lastOffset, boundaryBytes)
 	}
 
-	// Close lingering readers only after active readers have their windows,
-	// so pieces both want keep a reader's priority throughout.
-	p.closeLingeringReadersLocked()
-
 	p.logger.Debug("refreshed readahead",
 		slog.Int64("totalPool", totalReadaheadBudget),
 		slog.Int64("perReaderShare", plan.share))
 }
 
-// closeLingeringReadersLocked closes every lingering reader whenever another
-// reader is active. A reader lingers only while it is the pool's sole reader,
-// so released HTTP range requests cannot accumulate unbudgeted downloads.
-// Preloads do not close lingering readers: they download below readahead
-// priority, so a lingering reader keeps its warm window for its player. Must
-// be called with p.mu held.
-func (p *Pool) closeLingeringReadersLocked() {
-	hasActiveWork := false
-	for _, sr := range p.readers {
-		if sr.active {
-			hasActiveWork = true
-			break
-		}
-	}
-	if !hasActiveWork {
-		return
-	}
-
+// closeLingeringReadersLocked closes file's lingering reader. A ready preload
+// of the file stays while the file has another reader. Must be called with
+// p.mu held.
+func (p *Pool) closeLingeringReadersLocked(file *torrent.File) {
 	closed := false
 	for key, sr := range p.readers {
-		if sr.active {
+		if sr.active || sr.file != file {
 			continue
 		}
 		p.removeReaderLocked(key, sr)
 		closed = true
-		p.logger.Debug("closed lingering reader for active work",
+		p.logger.Debug("closed lingering reader for a newer reader of its file",
 			slog.String("hash", sr.infoHash.HexString()),
 			slog.Uint64("readerID", sr.readerID))
 	}

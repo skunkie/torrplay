@@ -1102,7 +1102,7 @@ func TestPool_HasReaders(t *testing.T) {
 }
 
 func TestPool_SetReadaheadBudget(t *testing.T) {
-	t.Run("redistributes budget and closes lingering readers", func(t *testing.T) {
+	t.Run("redistributes budget and keeps lingering readers", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 		infoHash := metainfo.Hash{}
 
@@ -1117,8 +1117,8 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 		if sr1.readahead != 800 {
 			t.Fatalf("expected active reader readahead=800, got %d", sr1.readahead)
 		}
-		if _, lingering := p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}]; lingering {
-			t.Fatal("expected competing lingering reader to be closed")
+		if _, lingering := p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}]; !lingering {
+			t.Fatal("a budget change must not close a lingering reader")
 		}
 	})
 }
