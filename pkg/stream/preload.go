@@ -586,10 +586,7 @@ func (p *Pool) claimPreloadLocked(pl *preload) {
 	for _, index := range pl.pieces {
 		planned = append(planned, prioritizedPiece{index: index, priority: torrent.PiecePriorityHigh})
 	}
-	tor := pl.file.Torrent()
-	p.priorityMu.Lock()
-	pl.claimed = p.replaceClaimsLocked(pl, tor, pl.claimed, tor, planned)
-	p.priorityMu.Unlock()
+	pl.claimed = p.claimLocked(pl, pl.file.Torrent(), pl.claimed, planned)
 }
 
 // unclaimPreloadLocked removes a preload's priority claims. Must be called
@@ -598,9 +595,7 @@ func (p *Pool) unclaimPreloadLocked(pl *preload) {
 	if len(pl.claimed) == 0 {
 		return
 	}
-	p.priorityMu.Lock()
-	p.clearClaimsLocked(pl, pl.file.Torrent(), pl.claimed)
-	p.priorityMu.Unlock()
+	p.unclaimLocked(pl, pl.file.Torrent(), pl.claimed)
 	pl.claimed = nil
 }
 

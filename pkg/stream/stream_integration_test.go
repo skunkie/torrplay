@@ -1037,30 +1037,28 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 		t.Fatalf("priority plan capacity should be bounded by file pieces, got %d", cap(boundedPlan))
 	}
 
-	sr1.priorityMu.Lock()
-	p.replaceReaderPrioritiesLocked(sr1, file, planned)
-	sr1.priorityMu.Unlock()
-	sr2.priorityMu.Lock()
-	p.replaceReaderPrioritiesLocked(sr2, file, planned)
-	sr2.priorityMu.Unlock()
+	p.mu.Lock()
+	sr1.prioritizedPieces = p.claimLocked(sr1, to, sr1.prioritizedPieces, planned)
+	sr2.prioritizedPieces = p.claimLocked(sr2, to, sr2.prioritizedPieces, planned)
+	p.mu.Unlock()
 
 	key := priorityPieceKey{torrent: to, index: planned[0].index}
-	p.priorityMu.Lock()
+	p.mu.Lock()
 	claim := p.priorityClaims[key]
 	ownerCount := 0
 	if claim != nil {
 		ownerCount = len(claim.owners)
 	}
-	p.priorityMu.Unlock()
+	p.mu.Unlock()
 	if ownerCount != 2 {
 		t.Fatalf("expected two owners for overlapping piece, got %d", ownerCount)
 	}
 
-	sr1.priorityMu.Lock()
-	p.clearReaderPrioritiesLocked(sr1)
-	sr1.priorityMu.Unlock()
+	p.mu.Lock()
+	p.unclaimLocked(sr1, to, sr1.prioritizedPieces)
+	p.mu.Unlock()
 
-	p.priorityMu.Lock()
+	p.mu.Lock()
 	claim = p.priorityClaims[key]
 	ownerCount = 0
 	secondReaderStillOwns := false
@@ -1068,17 +1066,17 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 		ownerCount = len(claim.owners)
 		_, secondReaderStillOwns = claim.owners[sr2]
 	}
-	p.priorityMu.Unlock()
+	p.mu.Unlock()
 	if ownerCount != 1 || !secondReaderStillOwns {
 		t.Fatalf("expected the second reader's claim to survive, owners=%d second=%v", ownerCount, secondReaderStillOwns)
 	}
 
-	sr2.priorityMu.Lock()
-	p.clearReaderPrioritiesLocked(sr2)
-	sr2.priorityMu.Unlock()
-	p.priorityMu.Lock()
+	p.mu.Lock()
+	p.unclaimLocked(sr2, to, sr2.prioritizedPieces)
+	p.mu.Unlock()
+	p.mu.Lock()
 	_, stillClaimed := p.priorityClaims[key]
-	p.priorityMu.Unlock()
+	p.mu.Unlock()
 	if stillClaimed {
 		t.Fatal("expected final owner release to remove the piece claim")
 	}

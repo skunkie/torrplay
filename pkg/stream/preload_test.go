@@ -94,10 +94,8 @@ func waitForPreloadState(t *testing.T, p *Pool, infoHash metainfo.Hash, state Pr
 // torrent's preload.
 func preloadClaims(p *Pool, to *torrent.Torrent) map[int]torrent.PiecePriority {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	pl := p.preloads[to.InfoHash()]
-	p.mu.Unlock()
-	p.priorityMu.Lock()
-	defer p.priorityMu.Unlock()
 	claims := make(map[int]torrent.PiecePriority)
 	for key, claim := range p.priorityClaims {
 		if priority, ok := claim.owners[pl]; ok && key.torrent == to {
@@ -249,9 +247,9 @@ func TestPool_Preload(t *testing.T) {
 		assert.Equal(t, files[1].Path(), status.FilePath)
 		// video.bin spans torrent pieces 0 through 8; header.bin only piece 0.
 		assert.Len(t, preloadClaims(pool, to), 9)
-		pool.priorityMu.Lock()
+		pool.mu.Lock()
 		claimedPieces := len(pool.priorityClaims)
-		pool.priorityMu.Unlock()
+		pool.mu.Unlock()
 		assert.Equal(t, 9, claimedPieces, "the replaced preload must release its claims")
 		assert.Len(t, reg.protectedPieces(), 9)
 	})
@@ -310,9 +308,9 @@ func TestPool_Preload(t *testing.T) {
 		pool.CancelPreload(to.InfoHash())
 		_, ok := pool.PreloadStatus(to.InfoHash())
 		assert.False(t, ok)
-		pool.priorityMu.Lock()
+		pool.mu.Lock()
 		assert.Empty(t, pool.priorityClaims)
-		pool.priorityMu.Unlock()
+		pool.mu.Unlock()
 		assert.Empty(t, reg.protectedPieces())
 		assert.Zero(t, reservedPreloadBytes(pool))
 	})

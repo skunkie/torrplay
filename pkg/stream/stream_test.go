@@ -724,34 +724,6 @@ func TestPool_Close(t *testing.T) {
 			t.Fatalf("expected prioritizedPieces to be nil after Close, got %v", sr.prioritizedPieces)
 		}
 	})
-
-	t.Run("waits for priority worker with no claims", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		key := readerKey{infoHash: metainfo.Hash{51}, filePath: "f", readerID: 1}
-		sr := &streamReader{active: true}
-		p.readers[key] = sr
-
-		// A worker may hold priorityMu after its sequence check but before it
-		// records its first claim. Close must still wait for that worker.
-		sr.priorityMu.Lock()
-		done := make(chan struct{})
-		go func() {
-			p.Close()
-			close(done)
-		}()
-		<-p.closeCh
-		closedBeforeWorker := false
-		select {
-		case <-done:
-			closedBeforeWorker = true
-		case <-time.After(20 * time.Millisecond):
-		}
-		sr.priorityMu.Unlock()
-		<-done
-		if closedBeforeWorker {
-			t.Fatal("Close returned while a priority worker still held its lock")
-		}
-	})
 }
 
 func TestPool_EffectiveLingerTimeout(t *testing.T) {
@@ -1587,164 +1559,69 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 }
 
 func TestPool_PrioritizeAsync(t *testing.T) {
-	t.Run("drives priority update", func(t *testing.T) {
-		// Verifies that prioritizeAsync acquires priorityMu and runs without
-		// panicking.  Since &torrent.File{}.Torrent() is nil,
-		// prioritizeNextPieces returns nil immediately — but the goroutine
-		// runs, acquires/releases priorityMu, and completes cleanly.
-		p := newTestPool(t, Config{
-			Logger:                 testLogger(),
-			PriorityWindowFraction: 0.5,
-		})
-		infoHash := metainfo.Hash{40}
+	newReader := func(t *testing.T) (*Pool, *torrent.Torrent, readerKey, *streamReader) {
+		t.Helper()
+		c := newTestTorrentClient(t)
+		// Ten 64-byte pieces.
+		to, file := addSizedTorrent(t, c, "movie", 64, 640)
+		p := newTestPool(t, Config{Logger: testLogger(), PriorityWindowFraction: 1})
+		key := readerKey{infoHash: to.InfoHash(), filePath: file.Path(), readerID: 1}
+		sr := &streamReader{active: true, file: file, infoHash: to.InfoHash(), lastPieceIdx: 2, readerID: 1}
+		p.readers[key] = sr
+		return p, to, key, sr
+	}
+	claimed := func(p *Pool, sr *streamReader) []int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return slices.Clone(sr.prioritizedPieces)
+	}
 
-		sr := &streamReader{
-			active:        true,
-			infoHash:      infoHash,
-			readerID:      1,
-			readahead:     1024,
-			isFileStorage: false,
+	t.Run("claims the pieces ahead of the reader", func(t *testing.T) {
+		p, to, key, sr := newReader(t)
+		p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64)
+		assert.Equal(t, []int{3, 4, 5, 6}, claimed(p, sr))
+		p.mu.Lock()
+		for _, index := range sr.prioritizedPieces {
+			assert.Equal(t, torrent.PiecePriorityNow, p.priorityClaims[priorityPieceKey{index: index, torrent: to}].owners[sr])
 		}
-
-		// Simulate what updateActiveRange does: bump seq, then call
-		// prioritizeAsync directly (bypassing the Registry path that panics
-		// on &torrent.File{}.Torrent().Info()).
-		seq := sr.prioritySeq.Add(1)
-
-		done := make(chan struct{})
-		go func() {
-			p.prioritizeAsync(sr, seq, &torrent.File{}, 512, 1024)
-			close(done)
-		}()
-
-		// Wait for the goroutine to complete.
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("prioritizeAsync did not complete")
-		}
-
-		// prioritizedPieces should be nil because torrent.File has no torrent.
-		if sr.prioritizedPieces != nil {
-			t.Fatalf("expected nil prioritizedPieces (no real torrent), got %v", sr.prioritizedPieces)
-		}
+		p.mu.Unlock()
 	})
 
-	t.Run("stale goroutine dropped", func(t *testing.T) {
-		// When release() bumps prioritySeq, an in-flight prioritizeAsync must
-		// detect the seq mismatch and drop its write-back to prioritizedPieces.
-		p := newTestPool(t, Config{
-			Logger:                 testLogger(),
-			PriorityWindowFraction: 0.5,
-		})
-		infoHash := metainfo.Hash{41}
+	t.Run("ignores an update for a piece the reader has left", func(t *testing.T) {
+		p, _, key, sr := newReader(t)
+		sr.lastPieceIdx = 5
+		p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64)
+		assert.Empty(t, claimed(p, sr), "a stale update must not replace newer claims")
+	})
 
-		sr := &streamReader{
-			active:        true,
-			infoHash:      infoHash,
-			readerID:      1,
-			readahead:     1024,
-			isFileStorage: false,
+	t.Run("ignores a released reader", func(t *testing.T) {
+		p, _, key, sr := newReader(t)
+		p.release(key.infoHash, key.filePath, key.readerID)
+		p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64)
+		assert.Empty(t, claimed(p, sr))
+		p.mu.Lock()
+		assert.Empty(t, p.priorityClaims)
+		p.mu.Unlock()
+	})
+
+	t.Run("races safely with release", func(t *testing.T) {
+		p, _, key, sr := newReader(t)
+		var wg sync.WaitGroup
+		for range 50 {
+			wg.Go(func() { p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64) })
 		}
-
-		// Dispatch prioritizeAsync(seq=1).
-		seq := sr.prioritySeq.Add(1)
-
-		done := make(chan struct{})
-		go func() {
-			p.prioritizeAsync(sr, seq, &torrent.File{}, 512, 1024)
-			close(done)
-		}()
-
-		// Immediately release — this bumps prioritySeq to 2 and clears
-		// prioritizedPieces.  The in-flight goroutine (seq=1) must see the
-		// mismatch and drop its write.
-		sr.prioritySeq.Add(1)
-		sr.priorityMu.Lock()
-		p.clearReaderPrioritiesLocked(sr)
-		sr.priorityMu.Unlock()
-		sr.active = false
-		sr.lingerSince = time.Now()
-
-		// Wait for the async goroutine to run (it should exit without
-		// modifying sr.prioritizedPieces).
-		select {
-		case <-done:
-		case <-time.After(1 * time.Second):
-		}
-		time.Sleep(50 * time.Millisecond)
-
-		// prioritizedPieces must remain nil — the stale goroutine dropped.
-		if sr.prioritizedPieces != nil {
-			t.Fatalf("expected nil prioritizedPieces (stale goroutine dropped), got %v", sr.prioritizedPieces)
-		}
-		if sr.active {
-			t.Fatal("expected reader to be inactive after release")
-		}
+		wg.Go(func() { p.release(key.infoHash, key.filePath, key.readerID) })
+		wg.Wait()
+		// Updates that ran before the release claimed pieces, which the
+		// release then cleared; later ones did nothing.
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		assert.Empty(t, p.priorityClaims)
+		assert.False(t, sr.active)
 	})
 }
 
 func TestPool_UpdateActiveRange(t *testing.T) {
-	t.Run("concurrent with release", func(t *testing.T) {
-		// Runs prioritizeAsync and release concurrently on the same reader
-		// to verify no panics, races, or dangling priorities.  Run with
-		// -race to catch data races.
-		p := newTestPool(t, Config{
-			Logger:                 testLogger(),
-			PriorityWindowFraction: 0.5,
-		})
-		infoHash := metainfo.Hash{42}
-
-		sr := &streamReader{
-			active:        true,
-			infoHash:      infoHash,
-			readerID:      1,
-			readahead:     1024,
-			isFileStorage: false,
-		}
-
-		// releaseMu mirrors pool.mu: it serializes the "release" side so
-		// only one goroutine writes active/lingerSince at a time.  In
-		// production this is pool.mu; here we add it to keep the test
-		// race-free while still exercising concurrent prioritizeAsync vs.
-		// release.
-		var releaseMu sync.Mutex
-
-		var wg sync.WaitGroup
-		for i := range 50 {
-			wg.Add(2)
-			go func() {
-				defer wg.Done()
-				seq := sr.prioritySeq.Add(1)
-				p.prioritizeAsync(sr, seq, &torrent.File{}, int64(i)*100, 1024)
-			}()
-			go func() {
-				defer wg.Done()
-				releaseMu.Lock()
-				sr.prioritySeq.Add(1)
-				sr.priorityMu.Lock()
-				p.clearReaderPrioritiesLocked(sr)
-				sr.priorityMu.Unlock()
-				sr.active = false
-				sr.lingerSince = time.Now()
-				releaseMu.Unlock()
-			}()
-		}
-		wg.Wait()
-
-		// After all concurrent ops, prioritizedPieces must be nil (no real
-		// torrent to SetPriority on) and the reader must be inactive.
-		if sr.prioritizedPieces != nil {
-			t.Fatalf("expected nil prioritizedPieces after concurrent ops, got %v", sr.prioritizedPieces)
-		}
-		if sr.active {
-			t.Fatal("expected reader to be inactive after release")
-		}
-		if sr.lingerSince.IsZero() {
-			t.Fatal("expected lingerSince to be set after release")
-		}
-	})
-
 	t.Run("nil registry caches offset", func(t *testing.T) {
 		p := newTestPool(t, Config{
 			Logger:   testLogger(),
@@ -2025,9 +1902,7 @@ func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 				if i > 0 {
 					refill()
 				}
-				sr.priorityMu.Lock()
-				p.clearReaderPrioritiesLocked(sr)
-				sr.priorityMu.Unlock()
+				p.unclaimLocked(sr, nil, sr.prioritizedPieces)
 			}
 		})
 	}

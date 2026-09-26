@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -386,34 +385,25 @@ type streamReader struct {
 	// Pool-level ownership keeps overlapping readers from lowering each other's
 	// priorities when one moves or releases.
 	prioritizedPieces []int
-	// priorityMu guards prioritizedPieces so that concurrent offset
-	// updates from different goroutines serialize their piece-priority
-	// writes without contending on pool.mu.
-	priorityMu sync.Mutex
-	// prioritySeq is monotonically incremented on each priority change or reader release.
-	// Out-of-order workers safely bail by comparing their captured seq against the live
-	// counter (sr.prioritySeq.Load() != seq) under priorityMu, rather than tracking a
-	// high-water mark — any newer dispatch invalidates all older ones.
-	// Atomic — no mutex needed for this field.
-	prioritySeq atomic.Uint64
-	readahead   int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
-	reader      torrent.Reader
-	readerID    uint64
-	wrapper     *readAtWrapper
+	readahead         int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
+	reader            torrent.Reader
+	readerID          uint64
+	wrapper           *readAtWrapper
 }
 
 // Pool manages torrent readers with dynamic readahead management.
 // Callers must call Close() when the pool is no longer needed to stop the background
 // lingering-reader goroutine and release reader resources.
 type Pool struct {
-	closeCh        chan struct{}
-	closed         bool
-	cfg            Config
-	logger         *slog.Logger
-	mu             sync.Mutex
-	nextID         uint64
+	closeCh chan struct{}
+	closed  bool
+	cfg     Config
+	logger  *slog.Logger
+	mu      sync.Mutex
+	nextID  uint64
+	// priorityClaims holds every piece priority claimed by readers and
+	// preloads, keyed by piece.
 	priorityClaims map[priorityPieceKey]*priorityClaim
-	priorityMu     sync.Mutex
 	// preloadQueue holds queued preloads in request order. Entries that are
 	// no longer queued are skipped on dispatch.
 	preloadQueue []*preload
@@ -652,14 +642,11 @@ func (p *Pool) rebalanceLocked() {
 }
 
 // clearReaderClaimsLocked releases every piece priority and eviction
-// protection a reader holds. Bumping prioritySeq invalidates in-flight
-// prioritizeAsync goroutines, and priorityMu serializes with one that is
-// already applying priorities. Must be called with p.mu held.
+// protection a reader holds. A priority update still in flight for the reader
+// finds it inactive or removed and does nothing. Must be called with p.mu held.
 func (p *Pool) clearReaderClaimsLocked(sr *streamReader) {
-	sr.prioritySeq.Add(1)
-	sr.priorityMu.Lock()
-	p.clearReaderPrioritiesLocked(sr)
-	sr.priorityMu.Unlock()
+	p.unclaimLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces)
+	sr.prioritizedPieces = nil
 	if p.cfg.Registry != nil {
 		p.cfg.Registry.ClearActiveRange(sr.infoHash, sr.readerID)
 		p.cfg.Registry.ClearFileBoundaries(sr.infoHash, sr.readerID)
@@ -1062,29 +1049,6 @@ func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceM
 	return planned
 }
 
-// replaceReaderPrioritiesLocked replaces one reader's claims and applies the
-// highest priority still requested for every affected piece. sr.priorityMu
-// must be held by the caller.
-//
-// Note: priorityPieceKey captures file.Torrent() at claim time, and
-// clearReaderPrioritiesLocked recomputes sr.file.Torrent() upon release.
-// This remains consistent because sr.file is set once when the reader is
-// created.
-func (p *Pool) replaceReaderPrioritiesLocked(sr *streamReader, file *torrent.File, planned []prioritizedPiece) {
-	p.priorityMu.Lock()
-	defer p.priorityMu.Unlock()
-	sr.prioritizedPieces = p.replaceClaimsLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces, fileTorrent(file), planned)
-}
-
-// clearReaderPrioritiesLocked removes every priority owned by a reader.
-// sr.priorityMu must be held by the caller.
-func (p *Pool) clearReaderPrioritiesLocked(sr *streamReader) {
-	p.priorityMu.Lock()
-	p.clearClaimsLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces)
-	p.priorityMu.Unlock()
-	sr.prioritizedPieces = nil
-}
-
 // fileTorrent returns file's torrent, or nil for a nil file.
 func fileTorrent(file *torrent.File) *torrent.Torrent {
 	if file == nil {
@@ -1093,35 +1057,34 @@ func fileTorrent(file *torrent.File) *torrent.Torrent {
 	return file.Torrent()
 }
 
-// replaceClaimsLocked replaces the claims owner holds on the owned pieces of
-// oldTorrent with the planned claims on newTorrent, applies the highest
-// priority still requested for every affected piece, and returns the owner's
-// new claimed pieces, reusing owned. p.priorityMu must be held by the caller.
-func (p *Pool) replaceClaimsLocked(owner any, oldTorrent *torrent.Torrent, owned []int, newTorrent *torrent.Torrent, planned []prioritizedPiece) []int {
+// claimLocked replaces the claims owner, a reader or a preload, holds on the
+// owned pieces of tor with the planned claims, applies the highest priority
+// still requested for every affected piece, and returns the owner's new
+// claimed pieces, reusing owned. Must be called with p.mu held.
+func (p *Pool) claimLocked(owner any, tor *torrent.Torrent, owned []int, planned []prioritizedPiece) []int {
+	if tor == nil {
+		return owned[:0]
+	}
 	touched := make(map[priorityPieceKey]struct{}, len(owned)+len(planned))
-	if oldTorrent != nil {
-		for _, index := range owned {
-			key := priorityPieceKey{torrent: oldTorrent, index: index}
-			if claim := p.priorityClaims[key]; claim != nil {
-				delete(claim.owners, owner)
-			}
-			touched[key] = struct{}{}
+	for _, index := range owned {
+		key := priorityPieceKey{torrent: tor, index: index}
+		if claim := p.priorityClaims[key]; claim != nil {
+			delete(claim.owners, owner)
 		}
+		touched[key] = struct{}{}
 	}
 
 	owned = owned[:0]
-	if newTorrent != nil {
-		for _, piece := range planned {
-			key := priorityPieceKey{torrent: newTorrent, index: piece.index}
-			claim := p.priorityClaims[key]
-			if claim == nil {
-				claim = &priorityClaim{owners: make(map[any]torrent.PiecePriority)}
-				p.priorityClaims[key] = claim
-			}
-			claim.owners[owner] = piece.priority
-			owned = append(owned, piece.index)
-			touched[key] = struct{}{}
+	for _, piece := range planned {
+		key := priorityPieceKey{torrent: tor, index: piece.index}
+		claim := p.priorityClaims[key]
+		if claim == nil {
+			claim = &priorityClaim{owners: make(map[any]torrent.PiecePriority)}
+			p.priorityClaims[key] = claim
 		}
+		claim.owners[owner] = piece.priority
+		owned = append(owned, piece.index)
+		touched[key] = struct{}{}
 	}
 
 	for key := range touched {
@@ -1130,11 +1093,11 @@ func (p *Pool) replaceClaimsLocked(owner any, oldTorrent *torrent.Torrent, owned
 	return owned
 }
 
-// clearClaimsLocked removes owner from every owned piece claim on tor and
-// immediately reapplies the highest remaining owner priority. p.priorityMu
-// must be held by the caller. Keeping this separate from replacement avoids
-// allocating a temporary touched-piece map on release and eviction paths.
-func (p *Pool) clearClaimsLocked(owner any, tor *torrent.Torrent, owned []int) {
+// unclaimLocked removes owner from every owned piece claim on tor and
+// immediately reapplies the highest remaining owner priority. Keeping this
+// separate from claimLocked avoids allocating a temporary touched-piece map
+// on release and eviction paths. Must be called with p.mu held.
+func (p *Pool) unclaimLocked(owner any, tor *torrent.Torrent, owned []int) {
 	for _, index := range owned {
 		key := priorityPieceKey{torrent: tor, index: index}
 		if claim := p.priorityClaims[key]; claim != nil {
@@ -1145,7 +1108,7 @@ func (p *Pool) clearClaimsLocked(owner any, tor *torrent.Torrent, owned []int) {
 }
 
 // applyPriorityClaimLocked applies the highest remaining owner claim for a
-// piece. p.priorityMu must be held by the caller.
+// piece. Must be called with p.mu held.
 func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	claim := p.priorityClaims[key]
 	priority := torrent.PiecePriorityNone
@@ -1198,11 +1161,8 @@ func (p *Pool) findReaderLocked(key readerKey) *streamReader {
 // from readAtWrapper when the position moves. Takes pool.mu to protect
 // against concurrent release, Close, and lingering-reader closure.
 //
-// The active-range registration stays under p.mu to preserve atomicity
-// with release/Close.  Piece-priority bumping uses the reader's own
-// priorityMu so it does not block other pool operations (Acquire,
-// release, lingering-reader closure).  A per-reader sequence counter ensures
-// that out-of-order priority goroutines drop stale results.
+// Piece-priority claims are applied by a goroutine, so the reading goroutine
+// never waits on the torrent client's lock for them.
 func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *torrent.File, newOffset int64) {
 	p.mu.Lock()
 
@@ -1235,12 +1195,7 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 	}
 
 	readahead := sr.readahead
-	var prioEnabled bool
-	var seq uint64
-	if p.cfg.PriorityWindowFraction > 0 && !sr.isFileStorage {
-		seq = sr.prioritySeq.Add(1)
-		prioEnabled = true
-	}
+	prioEnabled := p.cfg.PriorityWindowFraction > 0 && !sr.isFileStorage
 
 	if p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
 		start, end := computeRange(file, pieceLength, readahead, newOffset)
@@ -1249,26 +1204,24 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 	p.mu.Unlock()
 
 	if prioEnabled {
-		go p.prioritizeAsync(sr, seq, file, newOffset, readahead)
+		go p.prioritizeAsync(key, currentPiece, file, newOffset, readahead)
 	}
 }
 
-// prioritizeAsync updates piece priorities for a single reader.  It holds
-// sr.priorityMu for the entire body (read-snapshot → compute → conditional
-// write-back) so that in-flight goroutines cannot race each other's
-// SetPriority calls, and release/Close can invalidate them by bumping
-// prioritySeq.
-func (p *Pool) prioritizeAsync(sr *streamReader, seq uint64, file *torrent.File, newOffset, readahead int64) {
-	fraction := p.cfg.PriorityWindowFraction
+// prioritizeAsync claims the pieces just ahead of the reader at key after it
+// reached piece. It does nothing when the reader was released or has since
+// moved to another piece, whose own update then applies, so out-of-order
+// goroutines cannot leave stale claims.
+func (p *Pool) prioritizeAsync(key readerKey, piece int64, file *torrent.File, newOffset, readahead int64) {
+	planned := p.prioritizeNextPieces(file, newOffset, readahead, p.cfg.PriorityWindowFraction)
 
-	sr.priorityMu.Lock()
-	if sr.prioritySeq.Load() != seq {
-		sr.priorityMu.Unlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sr := p.readers[key]
+	if sr == nil || !sr.active || sr.lastPieceIdx != piece {
 		return
 	}
-	planned := p.prioritizeNextPieces(file, newOffset, readahead, fraction)
-	p.replaceReaderPrioritiesLocked(sr, file, planned)
-	sr.priorityMu.Unlock()
+	sr.prioritizedPieces = p.claimLocked(sr, fileTorrent(file), sr.prioritizedPieces, planned)
 }
 
 // ReaderPositions returns positions for all active and lingering readers belonging
