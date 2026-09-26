@@ -728,7 +728,7 @@ func TestClient_SetEvictionHandler(t *testing.T) {
 		// The piece hashes and is evicted before the engine marks it complete.
 		_, err = p.WriteAt(make([]byte, 256), 0)
 		require.NoError(t, err)
-		evictUnprotected(client, 0)
+		evictUnprotectedPieces(client, 0)
 
 		reported := make(chan int, 4)
 		client.SetEvictionHandler(func(_ metainfo.Hash, index int) { reported <- index })
@@ -817,7 +817,7 @@ func TestClient_Counters(t *testing.T) {
 				_, err := pieces[0].WriteAt(full, 0)
 				require.NoError(t, err)
 				require.NoError(t, pieces[0].MarkComplete())
-				evictUnprotected(client, 0)
+				evictUnprotectedPieces(client, 0)
 				_, err = pieces[0].ReadAt(make([]byte, 16), 0)
 				require.ErrorIs(t, err, ErrPieceNotAvailable)
 				require.Error(t, pieces[0].MarkComplete())
@@ -1122,12 +1122,12 @@ func TestClient_EvictLocked(t *testing.T) {
 	t.Run("gives up protection levels in order", func(t *testing.T) {
 		tests := []struct {
 			name         string
-			upTo         evictionProtection
+			deepest      evictionLevel
 			wantResident []int
 		}{
-			{name: "unprotected only", upTo: protectActiveAndBoundaries, wantResident: []int{2, 3}},
-			{name: "boundaries before active ranges", upTo: protectActiveOnly, wantResident: []int{3}},
-			{name: "active ranges last", upTo: protectNone},
+			{name: "unprotected only", deepest: evictUnprotected, wantResident: []int{2, 3}},
+			{name: "boundaries before active ranges", deepest: evictBoundaries, wantResident: []int{3}},
+			{name: "active ranges last", deepest: evictActive},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -1145,7 +1145,7 @@ func TestClient_EvictLocked(t *testing.T) {
 				})
 
 				client.mu.Lock()
-				client.evictLocked(0, tt.upTo, 0)
+				client.evictLocked(0, tt.deepest, 0)
 				client.mu.Unlock()
 
 				assert.ElementsMatch(t, tt.wantResident, residentPieceIndexes(t, client, infoHash))
@@ -1164,8 +1164,8 @@ func TestClient_EvictLocked(t *testing.T) {
 		}
 
 		client.mu.Lock()
-		reusable := client.evictLocked(0, protectNone, 256)
-		missed := client.evictLocked(0, protectNone, 128)
+		reusable := client.evictLocked(0, evictActive, 256)
+		missed := client.evictLocked(0, evictActive, 128)
 		client.mu.Unlock()
 		assert.Len(t, reusable, 256)
 		assert.Nil(t, missed, "nothing is left to reuse")
@@ -1187,7 +1187,7 @@ func TestClient_EvictLocked(t *testing.T) {
 		}
 
 		// Force evict down to 1 piece
-		assert.Equal(t, int64(512), evictUnprotected(client, 256))
+		assert.Equal(t, int64(512), evictUnprotectedPieces(client, 256))
 
 		stats, err := client.TorrentStats(infoHash)
 		require.NoError(t, err)
@@ -1214,7 +1214,7 @@ func TestClient_EvictLocked(t *testing.T) {
 
 		// Eviction must not loop when all pieces are protected.
 		done := make(chan int64, 1)
-		go func() { done <- evictUnprotected(client, 0) }()
+		go func() { done <- evictUnprotectedPieces(client, 0) }()
 
 		select {
 		case reclaimed := <-done:
@@ -2158,7 +2158,7 @@ func TestPieceImplRejectsReadAndHashOfPartiallyWrittenPiece(t *testing.T) {
 	// second chunk lands in a fresh zeroed buffer.
 	_, err = p.WriteAt(data[:128], 0)
 	require.NoError(t, err)
-	evictUnprotected(client, 0)
+	evictUnprotectedPieces(client, 0)
 	_, err = p.WriteAt(data[128:], 128)
 	require.NoError(t, err)
 
@@ -2606,13 +2606,13 @@ func inFileBoundary(client *Client, key pieceKey) bool {
 	return boundary
 }
 
-// evictUnprotected evicts pieces outside every protected range until memory
-// usage is at most target, and returns the bytes reclaimed.
-func evictUnprotected(client *Client, target int64) int64 {
+// evictUnprotectedPieces evicts pieces outside every protected range until
+// memory usage is at most target, and returns the bytes reclaimed.
+func evictUnprotectedPieces(client *Client, target int64) int64 {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	before := client.used
-	client.evictLocked(target, protectActiveAndBoundaries, 0)
+	client.evictLocked(target, evictUnprotected, 0)
 	return before - client.used
 }
 

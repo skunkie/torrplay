@@ -224,17 +224,22 @@ type byteRange struct {
 	end   int64
 }
 
-type evictionProtection uint8
-
 // downloadingPieceGrace is how long after its last write an incomplete piece
 // counts as still downloading, and so is spared while other pieces can be
 // evicted instead. Writes refresh it at most once per touchMinInterval.
 const downloadingPieceGrace = 30 * time.Second
 
+// evictionLevel is how deep eviction may reach into protected pieces. Each
+// level also evicts the pieces of the levels before it.
+type evictionLevel uint8
+
 const (
-	protectActiveAndBoundaries evictionProtection = iota
-	protectActiveOnly
-	protectNone
+	// evictUnprotected evicts pieces outside every protected range.
+	evictUnprotected evictionLevel = iota
+	// evictBoundaries also evicts file boundary pieces.
+	evictBoundaries
+	// evictActive also evicts active range pieces, as a last resort.
+	evictActive
 )
 
 // protectionKey identifies one owner's protection within a torrent.
@@ -634,7 +639,7 @@ func (c *Client) SetMaxMemory(limitBytes int64) error {
 		c.maxMemory = limitBytes
 
 		// Trigger eviction if current usage exceeds the new limit.
-		c.evictLocked(limitBytes, protectNone, 0)
+		c.evictLocked(limitBytes, evictActive, 0)
 
 		used := c.used
 		if used <= limitBytes {
@@ -717,11 +722,11 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 			// range. An unpublished reservation will soon publish or refund
 			// its space, so wait for it below rather than discard pieces a
 			// reader is consuming.
-			evictUpTo := protectActiveOnly
+			deepest := evictBoundaries
 			if c.pendingAllocations == 0 {
-				evictUpTo = protectNone
+				deepest = evictActive
 			}
-			reusable = c.evictLocked(max(c.maxMemory-size, 0), evictUpTo, size)
+			reusable = c.evictLocked(max(c.maxMemory-size, 0), deepest, size)
 
 			if c.used+size > c.maxMemory {
 				// Unprotected pieces have already been exhausted, so an unpublished
@@ -810,12 +815,12 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 
 // evictLocked evicts pieces, least recently used first, until memory usage
 // is at most target. It gives up unprotected pieces first, then file boundary
-// pieces, and last active range pieces, stopping after the upTo level. Within
+// pieces, and last active range pieces, stopping after the deepest level. Within
 // each level, pieces still downloading are spared until nothing else is left,
 // because an evicted partial piece must be downloaded again in full. When
 // reuseSize is positive, the first detached buffer of exactly that length is
 // returned for immediate handoff to an incoming allocation. c.mu must be held.
-func (c *Client) evictLocked(target int64, upTo evictionProtection, reuseSize int64) []byte {
+func (c *Client) evictLocked(target int64, deepest evictionLevel, reuseSize int64) []byte {
 	if c.used <= target {
 		return nil
 	}
@@ -823,12 +828,12 @@ func (c *Client) evictLocked(target int64, upTo evictionProtection, reuseSize in
 	before := c.used
 	downloadingSince := time.Now().Add(-downloadingPieceGrace).UnixNano()
 	var reusable []byte
-	for protection := protectActiveAndBoundaries; protection <= upTo && c.used > target; protection++ {
+	for level := evictUnprotected; level <= deepest && c.used > target; level++ {
 		for _, since := range []int64{downloadingSince, 0} {
 			if c.used <= target {
 				break
 			}
-			if detached := c.evictPassLocked(target, protection, reuseSize, since); reusable == nil && detached != nil {
+			if detached := c.evictPassLocked(target, level, reuseSize, since); reusable == nil && detached != nil {
 				reusable, reuseSize = detached, 0
 			}
 		}
@@ -844,10 +849,10 @@ func (c *Client) evictLocked(target int64, upTo evictionProtection, reuseSize in
 }
 
 // evictPassLocked walks the LRU list from its least recently used end and
-// evicts pieces allowed by protection until target is reached. Incomplete
+// evicts pieces the eviction level allows until target is reached. Incomplete
 // pieces touched after downloadingSince, in Unix nanoseconds, are skipped as
 // still downloading; zero spares none. c.mu must be held.
-func (c *Client) evictPassLocked(target int64, protection evictionProtection, reuseSize, downloadingSince int64) []byte {
+func (c *Client) evictPassLocked(target int64, level evictionLevel, reuseSize, downloadingSince int64) []byte {
 	var reusable []byte
 	for e := c.lru.Back(); e != nil && c.used > target; {
 		key := e.Value.(pieceKey)
@@ -861,18 +866,18 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 			}
 
 			inActiveRange, inFileBoundary := c.pieceProtectionLocked(key)
-			switch protection {
-			case protectActiveAndBoundaries:
+			switch level {
+			case evictUnprotected:
 				if inActiveRange || inFileBoundary {
 					e = next
 					continue
 				}
-			case protectActiveOnly:
+			case evictBoundaries:
 				if inActiveRange {
 					e = next
 					continue
 				}
-			case protectNone:
+			case evictActive:
 			}
 			if downloadingSince > 0 && pd.lastTouchNano.Load() > downloadingSince {
 				pd.mu.RLock()
@@ -883,7 +888,7 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 					continue
 				}
 			}
-			if protection == protectNone && c.logger.Enabled(context.Background(), slog.LevelWarn) && inActiveRange {
+			if level == evictActive && c.logger.Enabled(context.Background(), slog.LevelWarn) && inActiveRange {
 				c.logger.Warn("emergency eviction of active range piece under memory pressure",
 					slog.String("hash", key.infoHash.HexString()),
 					slog.Int("piece", key.index),
@@ -891,7 +896,7 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 			}
 
 			c.queueEvictionLocked(key)
-			c.countEvictionLocked(pd, protection, inActiveRange, inFileBoundary)
+			c.countEvictionLocked(pd, level, inActiveRange, inFileBoundary)
 			detached := c.evictPieceLocked(key, pd)
 			if reusable == nil && int64(dataLen) == reuseSize {
 				reusable = detached
@@ -905,7 +910,7 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 
 // countEvictionLocked records an eviction in the storage counters. c.mu must
 // be held; it acquires pd.mu.
-func (c *Client) countEvictionLocked(pd *pieceData, protection evictionProtection, inActiveRange, inFileBoundary bool) {
+func (c *Client) countEvictionLocked(pd *pieceData, level evictionLevel, inActiveRange, inFileBoundary bool) {
 	pd.mu.RLock()
 	complete, written := pd.complete, pd.writtenBytes
 	pd.mu.RUnlock()
@@ -916,9 +921,9 @@ func (c *Client) countEvictionLocked(pd *pieceData, protection evictionProtectio
 		c.counters.evictedIncompleteBytes.Add(written)
 	}
 	switch {
-	case inActiveRange && protection == protectNone:
+	case inActiveRange && level == evictActive:
 		c.counters.activeRangeEvictions.Add(1)
-	case inFileBoundary && protection != protectActiveAndBoundaries:
+	case inFileBoundary && level != evictUnprotected:
 		c.counters.boundaryEvictions.Add(1)
 	}
 }
@@ -1351,7 +1356,7 @@ func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
 
 	err := p.openErrLocked()
 	if err == nil {
-		c.evictLocked(c.maxMemory, protectNone, 0)
+		c.evictLocked(c.maxMemory, evictActive, 0)
 		if c.used > c.maxMemory {
 			err = ErrInsufficientMemory
 		}
