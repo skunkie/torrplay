@@ -678,6 +678,19 @@ func (c *Client) releaseMemoryLocked(size int64, state *torrentState) {
 	}
 }
 
+// torrentOpenErrLocked returns ErrClientClosed after Close, ErrTorrentClosed
+// when state is no longer the managed state of infoHash, and nil otherwise.
+// c.mu must be held.
+func (c *Client) torrentOpenErrLocked(infoHash metainfo.Hash, state *torrentState) error {
+	if c.closed {
+		return ErrClientClosed
+	}
+	if current, exists := c.torrents[infoHash]; !exists || current != state {
+		return ErrTorrentClosed
+	}
+	return nil
+}
+
 // allocateMemory reserves a given amount of memory for a piece. If the allocation
 // would exceed the memory limit, it attempts to evict least-recently-used pieces
 // to free up space. When eviction detaches an exact-size piece buffer, it returns
@@ -687,13 +700,9 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 	for {
 		c.mu.Lock()
 
-		if c.closed {
+		if err := c.torrentOpenErrLocked(infoHash, state); err != nil {
 			c.mu.Unlock()
-			return nil, ErrClientClosed
-		}
-		if current, exists := c.torrents[infoHash]; !exists || current != state {
-			c.mu.Unlock()
-			return nil, ErrTorrentClosed
+			return nil, err
 		}
 
 		// Check if piece itself is larger than the total maxMemory limit.
@@ -1340,27 +1349,17 @@ func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.closed {
-		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
-		p.finishFailedAllocationLocked(pd)
-		return ErrClientClosed
+	err := p.openErrLocked()
+	if err == nil {
+		c.evictLocked(c.maxMemory, protectNone, 0)
+		if c.used > c.maxMemory {
+			err = ErrInsufficientMemory
+		}
 	}
-	if p.handle.closed.Load() {
+	if err != nil {
 		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
 		p.finishFailedAllocationLocked(pd)
-		return ErrTorrentClosed
-	}
-	if current, exists := c.torrents[p.infoHash]; !exists || current != p.torrent {
-		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
-		p.finishFailedAllocationLocked(pd)
-		return ErrTorrentClosed
-	}
-
-	c.evictLocked(c.maxMemory, protectNone, 0)
-	if c.used > c.maxMemory {
-		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
-		p.finishFailedAllocationLocked(pd)
-		return ErrInsufficientMemory
+		return err
 	}
 
 	pd.mu.Lock()
@@ -1415,14 +1414,8 @@ func (p *pieceImpl) getOrCreatePieceData() (*pieceData, error) {
 	p.client.mu.Lock()
 	defer p.client.mu.Unlock()
 
-	if p.client.closed {
-		return nil, ErrClientClosed
-	}
-	if p.handle.closed.Load() {
-		return nil, ErrTorrentClosed
-	}
-	if current, exists := p.client.torrents[p.infoHash]; !exists || current != p.torrent {
-		return nil, ErrTorrentClosed
+	if err := p.openErrLocked(); err != nil {
+		return nil, err
 	}
 
 	key := p.key()
@@ -1450,11 +1443,8 @@ func (p *pieceImpl) getOrCreatePieceData() (*pieceData, error) {
 func (p *pieceImpl) getPieceData() (*pieceData, error) {
 	p.client.mu.RLock()
 	defer p.client.mu.RUnlock()
-	if p.handle.closed.Load() {
-		return nil, ErrTorrentClosed
-	}
-	if current, exists := p.client.torrents[p.infoHash]; !exists || current != p.torrent {
-		return nil, ErrTorrentClosed
+	if err := p.openErrLocked(); err != nil {
+		return nil, err
 	}
 
 	key := p.key()
@@ -1464,6 +1454,19 @@ func (p *pieceImpl) getPieceData() (*pieceData, error) {
 	}
 
 	return nil, ErrPieceNotAvailable
+}
+
+// openErrLocked returns ErrClientClosed after Close, ErrTorrentClosed once
+// the piece's torrent handle or torrent closed, and nil otherwise. c.mu must
+// be held.
+func (p *pieceImpl) openErrLocked() error {
+	if err := p.client.torrentOpenErrLocked(p.infoHash, p.torrent); err != nil {
+		return err
+	}
+	if p.handle.closed.Load() {
+		return ErrTorrentClosed
+	}
+	return nil
 }
 
 // key generates the unique pieceKey for the current piece.

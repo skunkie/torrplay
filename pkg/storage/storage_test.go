@@ -2615,3 +2615,51 @@ func evictUnprotected(client *Client, target int64) int64 {
 	client.evictLocked(target, protectActiveAndBoundaries, 0)
 	return before - client.used
 }
+
+func TestPieceImpl_OpenErrLocked(t *testing.T) {
+	openErr := func(client *Client, piece storage.PieceImpl) error {
+		client.mu.RLock()
+		defer client.mu.RUnlock()
+		return piece.(*pieceImpl).openErrLocked()
+	}
+
+	t.Run("open", func(t *testing.T) {
+		client := newTestClient(1024)
+		info, infoHash := newTestInfo(256, 1)
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		assert.NoError(t, openErr(client, torrentImpl.Piece(info.Piece(0))))
+	})
+
+	t.Run("closed handle of an open torrent", func(t *testing.T) {
+		client := newTestClient(1024)
+		info, infoHash := newTestInfo(256, 1)
+		closed, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		_, err = client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		require.NoError(t, closed.Close())
+		assert.ErrorIs(t, openErr(client, closed.Piece(info.Piece(0))), ErrTorrentClosed)
+	})
+
+	t.Run("closed torrent", func(t *testing.T) {
+		client := newTestClient(1024)
+		info, infoHash := newTestInfo(256, 1)
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		piece := torrentImpl.Piece(info.Piece(0))
+		require.NoError(t, torrentImpl.Close())
+		_, err = client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		assert.ErrorIs(t, openErr(client, piece), ErrTorrentClosed, "a reopened torrent must not revive old pieces")
+	})
+
+	t.Run("closed client", func(t *testing.T) {
+		client := newTestClient(1024)
+		info, infoHash := newTestInfo(256, 1)
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		require.NoError(t, client.Close())
+		assert.ErrorIs(t, openErr(client, torrentImpl.Piece(info.Piece(0))), ErrClientClosed)
+	})
+}
