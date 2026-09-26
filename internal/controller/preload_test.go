@@ -605,10 +605,24 @@ func TestController_TorrentStorageMode(t *testing.T) {
 	tracked(savedMemory, api.File)
 	tracked(trackedFile, api.File)
 
-	assert.Equal(t, stream.FileStorage, ctrl.torrentStorageMode(savedFile))
-	assert.Equal(t, stream.MemoryStorage, ctrl.torrentStorageMode(savedMemory), "a saved torrent's own storage wins")
-	assert.Equal(t, stream.FileStorage, ctrl.torrentStorageMode(trackedFile))
-	assert.Equal(t, stream.MemoryStorage, ctrl.torrentStorageMode(unknown))
+	tests := []struct {
+		name      string
+		hash      metainfo.Hash
+		wantMode  stream.StorageMode
+		wantSaved bool
+	}{
+		{name: "saved with file storage", hash: savedFile, wantMode: stream.FileStorage, wantSaved: true},
+		{name: "saved storage wins over tracked", hash: savedMemory, wantMode: stream.MemoryStorage, wantSaved: true},
+		{name: "tracked with file storage", hash: trackedFile, wantMode: stream.FileStorage},
+		{name: "unknown", hash: unknown, wantMode: stream.MemoryStorage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mode, saved := ctrl.torrentStorageMode(tt.hash)
+			assert.Equal(t, tt.wantMode, mode)
+			assert.Equal(t, tt.wantSaved, saved)
+		})
+	}
 }
 
 func TestDeleteTorrentClearsPreload(t *testing.T) {

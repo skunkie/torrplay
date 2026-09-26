@@ -233,22 +233,16 @@ func (c *Controller) preloadActive(ih metainfo.Hash) bool {
 // the torrent client is reconfiguring or when to is not the current client's
 // instance of its torrent. It reports whether the torrent now has a preload.
 func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool {
-	if to == nil || to.Info() == nil || file == nil || c.torrentClientUnavailable.Load() {
+	if to == nil || to.Info() == nil || file == nil {
+		return false
+	}
+	pool, current := c.streamPoolForGeneration(to, c.torrentGeneration.Load())
+	if !current {
 		return false
 	}
 	ih := to.InfoHash()
-	c.mu.RLock()
-	pool := c.streamPool.Load()
-	var currentTorrent *torrent.Torrent
-	if c.client != nil {
-		currentTorrent, _ = c.client.Torrent(ih)
-	}
-	c.mu.RUnlock()
-	if pool == nil || currentTorrent != to {
-		return false
-	}
-
-	if _, err := pool.Preload(file, c.torrentStorageMode(ih)); err != nil {
+	mode, _ := c.torrentStorageMode(ih)
+	if _, err := pool.Preload(file, mode); err != nil {
 		if !errors.Is(err, stream.ErrPreloadDoesNotFit) {
 			c.logger.Load().Warn("failed to start preload", "hash", ih, "file", file.Path(), "error", err)
 		}
@@ -261,14 +255,14 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool 
 // stats use: the storage a saved torrent was stored with, otherwise the storage
 // a loaded one was loaded into, and memory storage by default. File storage is
 // only ever chosen for saved torrents, so an unsaved torrent streams from
-// memory.
-func (c *Controller) torrentStorageMode(ih metainfo.Hash) stream.StorageMode {
+// memory. It also reports whether the torrent is saved.
+func (c *Controller) torrentStorageMode(ih metainfo.Hash) (mode stream.StorageMode, saved bool) {
 	t, err := c.db.GetTorrent(ih)
 	if err == nil {
 		if utils.Val(t.Storage) == api.File {
-			return stream.FileStorage
+			return stream.FileStorage, true
 		}
-		return stream.MemoryStorage
+		return stream.MemoryStorage, true
 	}
 	if !errors.Is(err, database.ErrTorrentNotFound) {
 		c.logger.Load().Error("failed to get torrent from database for its storage mode", "err", err, "hash", ih)
@@ -276,9 +270,9 @@ func (c *Controller) torrentStorageMode(ih metainfo.Hash) stream.StorageMode {
 	c.torrentTracker.mu.RLock()
 	defer c.torrentTracker.mu.RUnlock()
 	if info, ok := c.torrentTracker.torrents[ih]; ok && info.storageType == api.File {
-		return stream.FileStorage
+		return stream.FileStorage, false
 	}
-	return stream.MemoryStorage
+	return stream.MemoryStorage, false
 }
 
 // cancelPreload stops a torrent's preload in the current stream pool.

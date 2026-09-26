@@ -1550,7 +1550,8 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		return nil, errors.New("torrent info not available")
 	}
 
-	isFileStorage := c.torrentStorageMode(to.InfoHash()) == stream.FileStorage
+	mode, _ := c.torrentStorageMode(to.InfoHash())
+	isFileStorage := mode == stream.FileStorage
 
 	stats := to.Stats()
 	resp := &api.TorrentStats{
@@ -2028,8 +2029,8 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	mode := c.torrentStorageMode(ih)
-	if _, err := c.db.GetTorrent(ih); err == nil {
+	mode, saved := c.torrentStorageMode(ih)
+	if saved {
 		go func() {
 			err := c.updateTorrent(ih, api.TorrentUpdate{
 				Files: &[]api.TorrentFileUpdate{
