@@ -152,8 +152,8 @@ func TestPoolReaderAcquisitionCycle(t *testing.T) {
 	totalBudget := int64(1024 * 1024)
 
 	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		LingerTimeout: 30 * time.Second,
 	})
 
 	reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
@@ -182,91 +182,91 @@ func TestPoolReaderAcquisitionCycle(t *testing.T) {
 }
 
 func TestPool_Acquire(t *testing.T) {
-	t.Run("reuses idle reader", func(t *testing.T) {
+	t.Run("replaces a lingering reader", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		to, f := addTestTorrent(t, c)
-
-		infoHash := to.InfoHash()
 		totalBudget := int64(1024 * 1024)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
+		defer pool.Close()
 
 		reader1, release1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
 		release1()
 
-		// Second acquire should reuse the idle reader.
-		_, release2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
-
-		// Verify only one reader exists.
 		pool.mu.Lock()
-		count := 0
-		for _, sr := range pool.readers {
-			if sr.infoHash == infoHash {
-				count++
-			}
+		require.Len(t, pool.readers, 1)
+		var lingeringKey readerKey
+		var lingering *streamReader
+		for key, sr := range pool.readers {
+			lingeringKey, lingering = key, sr
 		}
+		assert.False(t, lingering.active)
+		assert.Positive(t, lingering.readahead, "a lingering reader keeps reading ahead")
 		pool.mu.Unlock()
-
-		if count != 1 {
-			t.Fatalf("expected 1 reader (reused), got %d", count)
-		}
 
 		buf := make([]byte, 1)
 		if _, err := reader1.Read(buf); !errors.Is(err, io.ErrClosedPipe) {
-			t.Fatalf("expected released wrapper to be closed after reuse, got %v", err)
+			t.Fatalf("expected released wrapper to be retired, got %v", err)
 		}
 
-		release2()
-		pool.Close()
+		// The next request gets a new reader, and the lingering one closes.
+		_, release2 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
+		defer release2()
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		assert.Len(t, pool.readers, 1)
+		_, stillLingering := pool.readers[lingeringKey]
+		assert.False(t, stillLingering, "new work must close the lingering reader")
+		assert.Nil(t, lingering.reader)
+		for _, sr := range pool.readers {
+			assert.True(t, sr.active)
+			assert.Equal(t, to.InfoHash(), sr.infoHash)
+		}
 	})
 
-	t.Run("does not reuse reader from replaced torrent", func(t *testing.T) {
+	t.Run("closes a released reader while other work is active", func(t *testing.T) {
 		c := newTestTorrentClient(t)
-		metaInfo := createTestMetaInfo(t)
-		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
+		_, f := addTestTorrent(t, c)
+		pool := New(Config{Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))})
+		defer pool.Close()
+		require.True(t, pool.SetReadaheadBudget(1024*1024))
+
+		_, releaseFirst, err := pool.Acquire(f, MemoryStorage)
+		require.NoError(t, err)
+		_, releaseSecond, err := pool.Acquire(f, MemoryStorage)
+		require.NoError(t, err)
+
+		releaseFirst()
+		pool.mu.Lock()
+		assert.Len(t, pool.readers, 1, "a reader released during other work must not linger")
+		pool.mu.Unlock()
+
+		releaseSecond()
+		pool.mu.Lock()
+		assert.Len(t, pool.readers, 1, "the last released reader lingers")
+		pool.mu.Unlock()
+	})
+
+	t.Run("closes a reader of a dropped torrent on release", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, createTestMetaInfo(t))
 		pool := New(Config{
-			Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleCloseTimeout:  -1,
-			IdleParkTimeout:   30 * time.Second,
-			MaxReadersPerFile: -1,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 		t.Cleanup(pool.Close)
 		require.True(t, pool.SetReadaheadBudget(1024*1024))
 
 		_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
 		require.NoError(t, err)
-
-		pool.mu.Lock()
-		var oldReaderID uint64
-		for _, sr := range pool.readers {
-			oldReaderID = sr.readerID
-		}
-		pool.mu.Unlock()
-		require.NotZero(t, oldReaderID)
-
 		oldTorrent.Drop()
 		<-oldTorrent.Closed()
-		newTorrent, newFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
-		require.NotSame(t, oldTorrent, newTorrent)
 
-		// The old reader remains active while the replacement gets its own reader.
-		// Releasing it afterward must close it instead of admitting it to the idle
-		// pool, without requiring another acquisition to trigger cleanup.
-		_, releaseNew, err := pool.Acquire(newFile, MemoryStorage)
-		require.NoError(t, err)
-		releaseNew()
 		releaseOld()
-
-		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		require.Len(t, pool.readers, 1)
-		for _, sr := range pool.readers {
-			assert.NotEqual(t, oldReaderID, sr.readerID)
-			assert.Same(t, newTorrent, sr.file.Torrent())
-		}
+		assert.False(t, pool.HasReaders(oldTorrent.InfoHash()), "a dropped torrent's reader must not linger")
 	})
 
 	t.Run("sets active range", func(t *testing.T) {
@@ -277,9 +277,9 @@ func TestPool_Acquire(t *testing.T) {
 		reg := &testRegistry{}
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
-			Registry:        reg,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
+			Registry:      reg,
 		})
 
 		_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
@@ -308,7 +308,7 @@ func TestPool_Acquire(t *testing.T) {
 
 		pool := New(Config{
 			Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout:    30 * time.Second,
+			LingerTimeout:      30 * time.Second,
 			FileReadaheadBytes: 50 * 1024 * 1024,
 		})
 
@@ -331,7 +331,7 @@ func TestPool_Acquire(t *testing.T) {
 
 		pool := New(Config{
 			Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout:    30 * time.Second,
+			LingerTimeout:      30 * time.Second,
 			FileReadaheadBytes: wantReadahead,
 		})
 
@@ -360,8 +360,8 @@ func TestPool_Acquire(t *testing.T) {
 		_, f := addTestTorrent(t, c)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		pool.Close()
@@ -420,8 +420,8 @@ func TestPool_Acquire(t *testing.T) {
 		iterations := 50
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		var wg sync.WaitGroup
@@ -462,20 +462,18 @@ func TestPool_Acquire(t *testing.T) {
 	})
 }
 
-func TestPoolStaleReaderCannotMoveReusedReader(t *testing.T) {
+func TestPoolStaleReaderCannotMoveLingeringReader(t *testing.T) {
 	c := newTestTorrentClient(t)
 	_, f := addTestTorrent(t, c)
 
 	pool := New(Config{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		IdleParkTimeout: 30 * time.Second,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		LingerTimeout: 30 * time.Second,
 	})
 	t.Cleanup(pool.Close)
 
 	stale, releaseStale := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
 	releaseStale()
-	_, releaseCurrent := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
-	defer releaseCurrent()
 
 	pool.mu.Lock()
 	var sr *streamReader
@@ -483,10 +481,10 @@ func TestPoolStaleReaderCannotMoveReusedReader(t *testing.T) {
 		sr = reader
 	}
 	pool.mu.Unlock()
-	require.NotNil(t, sr)
+	require.NotNil(t, sr, "the released reader lingers")
 
 	// A caller that keeps its reader after release must neither read nor move
-	// the torrent reader that the new lease now owns.
+	// the lingering torrent reader.
 	_, err := stale.Seek(f.Length()/2, io.SeekStart)
 	require.NoError(t, err)
 	_, err = stale.Read(make([]byte, 1))
@@ -506,10 +504,8 @@ func TestPool_AcquirePreloadContext(t *testing.T) {
 		metaInfo := createTestMetaInfo(t)
 		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
 		pool := New(Config{
-			Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleCloseTimeout:  -1,
-			IdleParkTimeout:   30 * time.Second,
-			MaxReadersPerFile: -1,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 		t.Cleanup(pool.Close)
 		require.True(t, pool.SetReadaheadBudget(1024*1024))
@@ -587,11 +583,11 @@ func TestPool_AcquirePreloadContext(t *testing.T) {
 
 		// Reader movement shrinks readahead without claiming priorities. Cache
 		// protection remains controller-owned.
-		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, 64)
+		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, 64)
 		pool.mu.Lock()
 		assert.Equal(t, preloadRange-64, preloadReader.readahead)
 		pool.mu.Unlock()
-		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, preloadRange)
+		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, preloadRange)
 		pool.priorityMu.Lock()
 		assert.Empty(t, pool.priorityClaims)
 		pool.priorityMu.Unlock()
@@ -599,7 +595,7 @@ func TestPool_AcquirePreloadContext(t *testing.T) {
 		assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
 	})
 
-	t.Run("does not consume idle playback reader", func(t *testing.T) {
+	t.Run("closes a lingering playback reader", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
 		pool := New(Config{
@@ -611,37 +607,26 @@ func TestPool_AcquirePreloadContext(t *testing.T) {
 		_, playbackRelease, err := pool.AcquireContext(context.Background(), f, MemoryStorage)
 		require.NoError(t, err)
 		playbackRelease()
-
 		pool.mu.Lock()
 		require.Len(t, pool.readers, 1)
-		var playbackKey readerKey
-		for key := range pool.readers {
-			playbackKey = key
-		}
 		pool.mu.Unlock()
 
 		_, preloadRelease, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, 256)
 		require.NoError(t, err)
 
 		pool.mu.Lock()
-		assert.Len(t, pool.readers, 2, "preload must not take over the parked playback reader")
-		parked, ok := pool.readers[playbackKey]
-		require.True(t, ok)
-		assert.False(t, parked.isPreload)
-		assert.False(t, parked.active)
+		require.Len(t, pool.readers, 1, "a running preload must close the lingering playback reader")
+		for _, sr := range pool.readers {
+			assert.True(t, sr.isPreload)
+			assert.True(t, sr.active)
+		}
 		pool.mu.Unlock()
 
+		// A preload reader closes on release instead of lingering.
 		preloadRelease()
-
-		// The preload reader is closed and removed; the parked playback reader
-		// survives so resumed playback reuses a warm reader.
 		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		assert.Len(t, pool.readers, 1)
-		survivor, ok := pool.readers[playbackKey]
-		require.True(t, ok)
-		assert.False(t, survivor.isPreload)
-		assert.NotNil(t, survivor.reader)
+		assert.Empty(t, pool.readers)
+		pool.mu.Unlock()
 	})
 
 	t.Run("file storage uses requested readahead", func(t *testing.T) {
@@ -676,8 +661,8 @@ func TestPool_ReaderPositions(t *testing.T) {
 		totalBudget := int64(1024 * 1024)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		result := pool.ReaderPositions(infoHash)
@@ -709,8 +694,8 @@ func TestPool_ReaderPositions(t *testing.T) {
 		totalBudget := int64(1024 * 1024)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		_, release1 := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
@@ -732,8 +717,8 @@ func TestPool_ReaderPositions(t *testing.T) {
 		totalBudget := int64(1024 * 1024)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		_, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
@@ -882,8 +867,8 @@ func TestComputeRange(t *testing.T) {
 		totalBudget := int64(1024 * 1024)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
@@ -939,8 +924,8 @@ func TestComputeRange(t *testing.T) {
 		totalBudget := int64(1024 * 1024)
 
 		pool := New(Config{
-			Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			IdleParkTimeout: 30 * time.Second,
+			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+			LingerTimeout: 30 * time.Second,
 		})
 
 		reader, release := acquireTestReader(t, pool, f, MemoryStorage, totalBudget)
@@ -1131,9 +1116,9 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	defer release()
 
 	key := readerKey{infoHash: to.InfoHash(), filePath: file.Path(), readerID: 1}
-	pool.updateActiveRange(to.InfoHash(), key, file, nil, 31)
+	pool.updateActiveRange(to.InfoHash(), key, file, 31)
 	setsBeforeBoundary := reg.sets
-	pool.updateActiveRange(to.InfoHash(), key, file, nil, 32)
+	pool.updateActiveRange(to.InfoHash(), key, file, 32)
 	assert.Equal(t, setsBeforeBoundary+1, reg.sets, "crossing a torrent piece must refresh the active range")
 	assert.Equal(t, 2, reg.last.endPiece, "readahead must follow the actual torrent piece")
 

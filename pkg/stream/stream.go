@@ -47,7 +47,7 @@ type ActiveRangeRegistry interface {
 type ReaderPosition struct {
 	// End is the inclusive end of the reader's readahead window.
 	End int
-	// Position is the reader's current piece index, or its last position while idle.
+	// Position is the reader's current piece index, or its last position while lingering.
 	Position int
 	// Start is the inclusive start of the reader's trailing window.
 	Start int
@@ -91,32 +91,20 @@ var ErrInvalidStorageMode = errors.New("invalid storage mode")
 
 // Config configures the stream pool.
 type Config struct {
-	// IdleCloseTimeout is the maximum time a reader may remain parked before it is
-	// closed and removed from the pool. Zero defaults to 5 minutes. Negative
-	// values disable the idle-close limit entirely.
-	IdleCloseTimeout time.Duration
 	// FileReadaheadBytes is the fixed readahead in bytes for file-storage readers.
 	// Zero defaults to 50 MiB.
 	FileReadaheadBytes int64
 	// Logger receives pool lifecycle and diagnostic messages. Nil uses slog.Default.
 	Logger *slog.Logger
-	// MaxReadersPerFile limits the total number of torrent readers
-	// (active + idle) allowed per (info hash, file path) pair.
-	// A value of 0 uses the default of 10. Set a negative value to disable the
-	// cap entirely.
-	// The cap is best-effort and soft: active readers are never terminated mid-stream,
-	// allowing bursts of concurrent active readers to temporarily exceed the limit.
-	// When readers are released to idle (or upon reuse in Acquire), excess idle readers
-	// are evicted to reconcile the pool back down to the configured cap.
-	MaxReadersPerFile int
+	// LingerTimeout is how long a released playback reader stays open, still
+	// reading ahead, while no other work is active. Zero defaults to 30
+	// seconds. Memory pressure may shorten it.
+	LingerTimeout time.Duration
 	// MemoryUsage returns the current memory usage ratio (0.0–1.0).
-	// When set, idle readers are parked faster under memory pressure to
+	// When set, lingering readers close sooner under memory pressure to
 	// prevent pieces from being downloaded and immediately evicted.
-	// When nil, a fixed IdleParkTimeout is used.
+	// When nil, a fixed LingerTimeout is used.
 	MemoryUsage func() float64
-	// IdleParkTimeout is the idle duration after which a reader's readahead is set
-	// to zero. Zero defaults to 30 seconds. Memory pressure may shorten it.
-	IdleParkTimeout time.Duration
 	// PriorityWindowFraction, when > 0, raises the pieces just ahead of a
 	// playback reader to PiecePriorityNow. The fraction applies to the
 	// readahead window size in pieces, and at least one piece is claimed. The
@@ -187,27 +175,10 @@ type readAtWrapper struct {
 	onOffsetChange func(newOffset int64)
 }
 
-func (rw *readAtWrapper) Close() error {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	if rw.closed {
-		return nil
-	}
-	rw.closed = true
-	rw.onOffsetChange = nil
-	rw.cacheBuf = nil
-	rw.cacheLen = 0
-	rw.cacheStart = 0
-	rw.offset = 0
-	if rw.reader == nil {
-		return nil
-	}
-	return rw.reader.Close()
-}
-
-// retire prevents a released wrapper from accessing a torrent reader that has
-// been reassigned to a new pool lease. The shared reader remains open for the
-// replacement wrapper.
+// retire detaches a released wrapper from its torrent reader, so a stale
+// caller can neither read nor move a lingering reader, and frees its buffer.
+// The pool closes the torrent reader itself. It is safe to call more than
+// once.
 func (rw *readAtWrapper) retire() {
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
@@ -399,16 +370,15 @@ func (r *seekNotifyingReader) Seek(offset int64, whence int) (int64, error) {
 
 // streamReader wraps a torrent.Reader with lifecycle management.
 type streamReader struct {
-	active         bool
-	cancel         context.CancelFunc
-	closeOnRelease bool
-	ctx            context.Context
-	file           *torrent.File
-	infoHash       metainfo.Hash
-	idleSince      time.Time
-	isFileStorage  bool
-	isPreload      bool
-	preloadEnd     int64
+	active        bool
+	cancel        context.CancelFunc
+	file          *torrent.File
+	infoHash      metainfo.Hash
+	isFileStorage bool
+	isPreload     bool
+	// lingerSince is when a released reader started lingering.
+	lingerSince time.Time
+	preloadEnd  int64
 	// lastOffset is the last byte offset reported by the onOffsetChange
 	// callback. Updated under pool.mu only, so code holding pool.mu can
 	// read it without acquiring wrapper.mu.
@@ -428,15 +398,15 @@ type streamReader struct {
 	// high-water mark — any newer dispatch invalidates all older ones.
 	// Atomic — no mutex needed for this field.
 	prioritySeq atomic.Uint64
-	readahead   int64 // current readahead in bytes (updated by refreshReadaheadLocked, Acquire, and parkIdleReaders)
+	readahead   int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
 	reader      torrent.Reader
 	readerID    uint64
 	wrapper     *readAtWrapper
 }
 
-// Pool manages a bounded set of torrent readers with dynamic readahead management.
+// Pool manages torrent readers with dynamic readahead management.
 // Callers must call Close() when the pool is no longer needed to stop the background
-// idle-GC goroutine and release reader resources.
+// lingering-reader goroutine and release reader resources.
 type Pool struct {
 	closeCh         chan struct{}
 	closed          bool
@@ -451,7 +421,8 @@ type Pool struct {
 	readers         map[readerKey]*streamReader
 }
 
-// New creates a new stream pool and starts a background idle-GC goroutine.
+// New creates a new stream pool and starts a background goroutine that closes
+// expired lingering readers.
 // Callers must call Close() when the pool is no longer needed to terminate
 // the background goroutine and avoid resource leakage.
 func New(cfg Config) *Pool {
@@ -459,19 +430,11 @@ func New(cfg Config) *Pool {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if cfg.IdleCloseTimeout == 0 {
-		cfg.IdleCloseTimeout = 5 * time.Minute
-	}
 	if cfg.FileReadaheadBytes == 0 {
 		cfg.FileReadaheadBytes = 50 * 1024 * 1024
 	}
-	if cfg.MaxReadersPerFile == 0 {
-		cfg.MaxReadersPerFile = 10
-	} else if cfg.MaxReadersPerFile < 0 {
-		cfg.MaxReadersPerFile = 0
-	}
-	if cfg.IdleParkTimeout == 0 {
-		cfg.IdleParkTimeout = 30 * time.Second
+	if cfg.LingerTimeout == 0 {
+		cfg.LingerTimeout = 30 * time.Second
 	}
 
 	p := &Pool{
@@ -535,93 +498,6 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		return nil, nil, ErrPoolClosed
 	}
 
-	// Try to reuse an idle reader for the same torrent file. Preload readers
-	// never reuse one: they are one-shot range workers that close on release,
-	// so taking a parked playback reader would both retarget it away from the
-	// playback position and destroy it once the preload finishes.
-	var reusableKey readerKey
-	var reusableSR *streamReader
-	for key, sr := range p.readers {
-		if key.infoHash != infoHash || key.filePath != file.Path() {
-			continue
-		}
-
-		// A torrent can be explicitly dropped and re-added with the same
-		// info hash and file path. Its old readers remain bound to the closed
-		// torrent instance and must never be reused for the replacement. Remove
-		// idle readers immediately and retire active readers when their caller
-		// releases them. This reconciliation applies to preload acquisitions too,
-		// even though preload readers themselves are never reused.
-		if sr.file == nil || sr.file.Torrent() != file.Torrent() {
-			if sr.active {
-				sr.closeOnRelease = true
-				continue
-			}
-			p.removeReaderLocked(key, sr)
-			continue
-		}
-
-		if !isPreload && !sr.active && reusableSR == nil {
-			reusableKey = key
-			reusableSR = sr
-		}
-	}
-
-	if reusableSR != nil {
-		sr := reusableSR
-		key := reusableKey
-		// Retire the old wrapper before touching the shared torrent reader so a
-		// stale caller cannot race the new lease's context or position reset.
-		if sr.wrapper != nil {
-			sr.wrapper.retire()
-		}
-		readerCtx, cancel := context.WithCancel(ctx)
-		sr.active = true
-		sr.cancel = cancel
-		sr.ctx = readerCtx
-		sr.reader.SetContext(readerCtx)
-		sr.idleSince = time.Time{}
-		sr.isFileStorage = isFileStorage
-		sr.isPreload = isPreload
-		sr.preloadEnd = preloadEnd
-		sr.file = file
-
-		// Reset lastOffset so refreshReadaheadLocked/ReaderPositions don't
-		// read a stale offset from a previous activation.
-		_, _ = sr.reader.Seek(0, io.SeekStart)
-		sr.lastOffset = 0
-		sr.lastPieceIdx = -1
-		// Reader reuse does not need to bump prioritySeq or clear old claims here
-		// because readers only transition active -> idle -> active through release(),
-		// which already bumped prioritySeq and cleared claims under priorityMu.
-		sr.wrapper = p.newReaderWrapper(sr.reader, key, file)
-
-		// No preload arm here: the reuse search above is skipped entirely for
-		// preload readers, so isPreload is always false on this path.
-		if isFileStorage {
-			sr.readahead = p.cfg.FileReadaheadBytes
-			sr.reader.SetReadahead(p.cfg.FileReadaheadBytes)
-			p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, DefaultFileBoundaryBytes)
-			p.parkCompetingIdleReadersLocked()
-		} else {
-			p.refreshReadaheadLocked(p.readaheadBudget)
-		}
-
-		// Readers left over from earlier concurrent bursts may exceed the cap.
-		p.trimIdleReadersLocked(infoHash, file.Path())
-
-		p.logger.Debug("reused idle reader",
-			slog.String("hash", infoHash.HexString()),
-			slog.String("file", file.Path()),
-			slog.Uint64("readerID", sr.readerID),
-			slog.Int64("readahead", sr.readahead))
-
-		return p.newReadSeeker(sr.wrapper, file.Length(), mode, isPreload), p.releaseFunc(key), nil
-	}
-
-	// No idle reader found for reuse. All existing readers for this file are active.
-	// The MaxReadersPerFile cap is enforced on the reuse and release paths only;
-	// active readers are never interrupted to satisfy the cap.
 	p.nextID++
 	readerID := p.nextID
 	key := readerKey{infoHash: infoHash, filePath: file.Path(), readerID: readerID}
@@ -638,7 +514,6 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	sr := &streamReader{
 		active:        true,
 		cancel:        cancel,
-		ctx:           readerCtx,
 		file:          file,
 		infoHash:      infoHash,
 		isFileStorage: isFileStorage,
@@ -655,12 +530,12 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	case isPreload:
 		sr.readahead = preloadEnd - preloadStart
 		reader.SetReadaheadFunc(preloadReadaheadFunc(preloadEnd))
-		p.parkCompetingIdleReadersLocked()
+		p.closeLingeringReadersLocked()
 	case isFileStorage:
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
 		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, DefaultFileBoundaryBytes)
-		p.parkCompetingIdleReadersLocked()
+		p.closeLingeringReadersLocked()
 	default:
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	}
@@ -679,7 +554,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 func (p *Pool) newReaderWrapper(reader io.ReadSeekCloser, key readerKey, file *torrent.File) *readAtWrapper {
 	wrapper := &readAtWrapper{reader: reader}
 	wrapper.onOffsetChange = func(newOffset int64) {
-		p.updateActiveRange(key.infoHash, key, file, wrapper, newOffset)
+		p.updateActiveRange(key.infoHash, key, file, newOffset)
 	}
 	return wrapper
 }
@@ -708,8 +583,8 @@ func preloadReadaheadFunc(end int64) torrent.ReadaheadFunc {
 	}
 }
 
-// closeStreamReaderLocked cancels and closes a reader while serializing with
-// any in-flight ReadAt operation through its wrapper. The caller must hold
+// closeStreamReaderLocked cancels and closes a reader. Retiring the wrapper
+// first serializes with any in-flight ReadAt operation. The caller must hold
 // Pool.mu so no new pool-owned use can begin while closure is in progress.
 func closeStreamReaderLocked(sr *streamReader) {
 	if sr.cancel != nil {
@@ -717,30 +592,27 @@ func closeStreamReaderLocked(sr *streamReader) {
 		sr.cancel = nil
 	}
 	if sr.wrapper != nil {
-		_ = sr.wrapper.Close()
-	} else if sr.reader != nil {
+		sr.wrapper.retire()
+	}
+	if sr.reader != nil {
 		_ = sr.reader.Close()
 	}
 	sr.reader = nil
 }
 
-// release marks a reader as idle and clears active ranges.
-// Called immediately after the HTTP request ends (via defer in streamFile).
+// release ends a reader's lease. Called immediately after the HTTP request
+// ends (via defer in streamFile).
 //
-// The reader's context is intentionally NOT cancelled here. The final reader
-// may continue warming its read window while no other work is active. As soon
-// as another playback or preload reader is active, competing idle readers are
-// parked so stale windows cannot consume bandwidth outside the shared budget.
-// The context is cancelled only when the reader is evicted by idleGC or when
-// the pool is closed.
+// A released playback reader lingers: it stays open with its readahead, so
+// the torrent client keeps fetching the pieces just past where the player
+// stopped for the player's next range request. It lingers only while no other
+// playback or preload reader is active, so it cannot download outside the
+// shared budget, and at most LingerTimeout. The next request creates a new
+// reader, which finds those pieces cached. Preload readers and readers of a
+// closed torrent close immediately.
 //
-// Note: ClearActiveRange is called unconditionally here, which tears down
-// eviction protection the moment the reader becomes idle. During the gap
-// between release and parkIdleReaders (when the reader is still prefetching),
-// pieces being fetched are no longer protected from eviction under memory
-// pressure. This is a best-effort tradeoff — under normal conditions the
-// reader's readahead window still keeps recently-fetched pieces alive, and
-// the window is only briefly unprotected.
+// A lingering reader holds no eviction protection or priority claims, so its
+// prefetched pieces compete with other cached pieces under memory pressure.
 func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -752,50 +624,49 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 	}
 
 	sr.active = false
-	if sr.isPreload || sr.closeOnRelease {
-		// Preload readers are one-shot range workers, and readers belonging to a
-		// replaced torrent generation must not enter the idle reuse pool. Closing
-		// either immediately clears anacrolix's current-piece claim and prevents
-		// stale readers from keeping the current torrent alive through HasReaders.
+	if sr.isPreload || torrentClosed(sr.file) {
 		p.removeReaderLocked(key, sr)
 		p.rebalanceLocked()
 		return
 	}
 
-	// Restore piece priorities to None so they no longer compete with
-	// other readers' readahead windows.
 	p.clearReaderClaimsLocked(sr)
-	sr.idleSince = time.Now()
-
-	// Clear cacheBuf to reclaim buffer memory while the reader is idle in the pool.
+	// The caller is done with its reader, so a stale call cannot move the
+	// lingering reader's position.
 	if sr.wrapper != nil {
-		sr.wrapper.mu.Lock()
-		sr.wrapper.cacheBuf = nil
-		sr.wrapper.cacheLen = 0
-		sr.wrapper.cacheStart = 0
-		sr.wrapper.mu.Unlock()
+		sr.wrapper.retire()
 	}
-
-	p.logger.Debug("reader released to idle",
+	sr.lingerSince = time.Now()
+	p.logger.Debug("reader lingering",
 		slog.String("hash", infoHash.HexString()),
 		slog.String("file", filePath),
 		slog.Uint64("readerID", readerID))
 
-	// A burst of concurrent active readers may have exceeded the cap. If this
-	// reader is the only idle one when the count is over the limit, it may be
-	// evicted immediately.
-	p.trimIdleReadersLocked(infoHash, filePath)
+	// Closes this reader too when other work is active.
 	p.rebalanceLocked()
 }
 
+// torrentClosed reports whether file's torrent has been dropped.
+func torrentClosed(file *torrent.File) bool {
+	if file == nil || file.Torrent() == nil {
+		return false
+	}
+	select {
+	case <-file.Torrent().Closed():
+		return true
+	default:
+		return false
+	}
+}
+
 // rebalanceLocked redistributes the readahead budget after a reader stops
-// being active, or only parks competing idle readers while no budget is set.
+// being active, or only closes lingering readers while no budget is set.
 // Must be called with p.mu held.
 func (p *Pool) rebalanceLocked() {
 	if p.readaheadBudget > 0 {
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	} else {
-		p.parkCompetingIdleReadersLocked()
+		p.closeLingeringReadersLocked()
 	}
 }
 
@@ -822,65 +693,10 @@ func (p *Pool) removeReaderLocked(key readerKey, sr *streamReader) {
 	delete(p.readers, key)
 }
 
-// trimIdleReadersLocked evicts the oldest idle readers of a file until its
-// reader count is within MaxReadersPerFile. Active readers are never evicted,
-// so the count may remain above the cap. Must be called with p.mu held.
-func (p *Pool) trimIdleReadersLocked(infoHash metainfo.Hash, filePath string) {
-	if p.cfg.MaxReadersPerFile <= 0 {
-		return
-	}
-	for count := p.countReadersLocked(infoHash, filePath); count > p.cfg.MaxReadersPerFile; count-- {
-		if !p.evictOldestIdleLocked(infoHash, filePath) {
-			return
-		}
-	}
-}
-
-// evictOldestIdleLocked removes the idle reader with the oldest idleSince
-// for the given (info hash, file path). It returns true if a reader was evicted.
-// Only idle readers are evicted — active readers are never killed mid-stream.
-// This means the MaxReadersPerFile cap is soft when no idle readers exist.
-// Must be called with p.mu held.
-func (p *Pool) evictOldestIdleLocked(infoHash metainfo.Hash, filePath string) bool {
-	var oldest *streamReader
-	var oldestKey readerKey
-	for key, sr := range p.readers {
-		if key.infoHash == infoHash && key.filePath == filePath && !sr.active {
-			if oldest == nil || sr.idleSince.Before(oldest.idleSince) {
-				oldest = sr
-				oldestKey = key
-			}
-		}
-	}
-	if oldest != nil {
-		p.removeReaderLocked(oldestKey, oldest)
-		p.logger.Debug("evicted idle reader to make room",
-			slog.String("hash", infoHash.HexString()),
-			slog.String("file", filePath),
-			slog.Uint64("readerID", oldest.readerID))
-		return true
-	}
-	return false
-}
-
-// countReadersLocked returns the number of active and idle readers for the
-// given (info hash, file path).
-// Must be called with p.mu held.
-func (p *Pool) countReadersLocked(infoHash metainfo.Hash, filePath string) int {
-	count := 0
-	for key := range p.readers {
-		if key.infoHash == infoHash && key.filePath == filePath {
-			count++
-		}
-	}
-	return count
-}
-
 // refreshReadaheadLocked recalculates and applies readahead for all active readers.
 // File-storage readers keep their fixed readahead and are never divided.
 // Must be called with p.mu held.
 func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
-	p.parkCompetingIdleReadersLocked()
 	plan := p.planReadaheadLocked(totalReadaheadBudget)
 
 	for key, sr := range p.readers {
@@ -908,19 +724,22 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		p.registerActiveRangeLocked(sr.infoHash, key, sr.file, readahead, sr.lastOffset, boundaryBytes)
 	}
 
+	// Close lingering readers only after active readers have their windows,
+	// so pieces both want keep a reader's priority throughout.
+	p.closeLingeringReadersLocked()
+
 	p.logger.Debug("refreshed readahead",
 		slog.Int64("totalPool", totalReadaheadBudget),
 		slog.Int64("perReaderShare", plan.share))
 }
 
-// parkCompetingIdleReadersLocked stops stale read windows whenever playback
-// or preload work is active. An idle reader can remain warm only while it is
-// the pool's sole work, preserving fast reuse without allowing released HTTP
-// range requests to accumulate unbudgeted downloads. A running preload is
-// active work through its own readers; a preload reservation alone is not,
-// because a completed preload that still holds one downloads nothing. Must be
-// called with p.mu held.
-func (p *Pool) parkCompetingIdleReadersLocked() {
+// closeLingeringReadersLocked closes every lingering reader whenever playback
+// or preload work is active. A reader lingers only while it is the pool's sole
+// work, so released HTTP range requests cannot accumulate unbudgeted
+// downloads. A running preload is active work through its own readers; a
+// preload reservation alone is not, because a completed preload that still
+// holds one downloads nothing. Must be called with p.mu held.
+func (p *Pool) closeLingeringReadersLocked() {
 	hasActiveWork := false
 	for _, sr := range p.readers {
 		if sr.active {
@@ -932,15 +751,12 @@ func (p *Pool) parkCompetingIdleReadersLocked() {
 		return
 	}
 
-	for _, sr := range p.readers {
-		if sr.active || sr.readahead <= 0 {
+	for key, sr := range p.readers {
+		if sr.active {
 			continue
 		}
-		sr.readahead = 0
-		if sr.reader != nil {
-			sr.reader.SetReadahead(0)
-		}
-		p.logger.Debug("parked competing idle reader",
+		p.removeReaderLocked(key, sr)
+		p.logger.Debug("closed lingering reader for active work",
 			slog.String("hash", sr.infoHash.HexString()),
 			slog.Uint64("readerID", sr.readerID))
 	}
@@ -1430,8 +1246,8 @@ func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceM
 //
 // Note: priorityPieceKey captures file.Torrent() at claim time, and
 // clearReaderPrioritiesLocked recomputes sr.file.Torrent() upon release.
-// This remains consistent because sr.file is only modified during reader
-// acquisition/reuse under p.mu, never while active.
+// This remains consistent because sr.file is set once when the reader is
+// created.
 func (p *Pool) replaceReaderPrioritiesLocked(sr *streamReader, file *torrent.File, planned []prioritizedPiece) {
 	p.priorityMu.Lock()
 	defer p.priorityMu.Unlock()
@@ -1554,22 +1370,20 @@ func (p *Pool) findReaderLocked(key readerKey) *streamReader {
 
 // updateActiveRange recalculates and refreshes the eviction-protection
 // window for a reader based on its new read offset. Called asynchronously
-// from readAtWrapper when the position moves. origin identifies the specific
-// wrapper that issued the callback to discard stale notifications across reader reuse.
-// Takes pool.mu to protect against concurrent release / Close / parkIdleReaders.
+// from readAtWrapper when the position moves. Takes pool.mu to protect
+// against concurrent release, Close, and lingering-reader closure.
 //
 // The active-range registration stays under p.mu to preserve atomicity
 // with release/Close.  Piece-priority bumping uses the reader's own
 // priorityMu so it does not block other pool operations (Acquire,
-// release, parkIdleReaders).  A per-reader sequence counter ensures
+// release, lingering-reader closure).  A per-reader sequence counter ensures
 // that out-of-order priority goroutines drop stale results.
-func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *torrent.File, origin *readAtWrapper, newOffset int64) {
+func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *torrent.File, newOffset int64) {
 	p.mu.Lock()
 
-	// If the reader was already released, deleted, or reassigned to a new wrapper on reuse, skip.
-	// Note: origin check verifies wrapper identity; origin != nil allows test stubs lacking wrappers.
+	// Skip a reader that was already released or closed.
 	sr := p.findReaderLocked(key)
-	if sr == nil || !sr.active || (origin != nil && sr.wrapper != origin) {
+	if sr == nil || !sr.active {
 		p.mu.Unlock()
 		return
 	}
@@ -1635,7 +1449,7 @@ func (p *Pool) prioritizeAsync(sr *streamReader, seq uint64, file *torrent.File,
 	sr.priorityMu.Unlock()
 }
 
-// ReaderPositions returns positions for all active and idle readers belonging
+// ReaderPositions returns positions for all active and lingering readers belonging
 // to the given info hash. The result order is unspecified.
 func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 	p.mu.Lock()
@@ -1676,11 +1490,11 @@ func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 	return result
 }
 
-// HasReaders returns true if there is at least one reader (active or idle)
-// for the given info hash. This intentionally includes idle readers
-// because pooled readers are still valid resources that should prevent
-// torrent expiration. Callers that need to distinguish active playback
-// from idle pool members should use HasActiveReaders instead.
+// HasReaders returns true if there is at least one reader (active or
+// lingering) for the given info hash. This intentionally includes lingering
+// readers, which are still downloading for the player's next request.
+// Callers that need to distinguish active playback from lingering readers
+// should use HasActiveReaders instead.
 func (p *Pool) HasReaders(infoHash metainfo.Hash) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1729,9 +1543,8 @@ func (p *Pool) Close() {
 	p.logger.Debug("stream pool closed")
 }
 
-// idleGC periodically runs parkIdleReaders, which parks (readahead → 0) readers
-// idle longer than the configured timeout and closes those idle longer than
-// IdleCloseTimeout.
+// idleGC periodically closes readers that have lingered past the effective
+// linger timeout.
 func (p *Pool) idleGC() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -1741,26 +1554,24 @@ func (p *Pool) idleGC() {
 		case <-p.closeCh:
 			return
 		case <-ticker.C:
-			p.parkIdleReaders()
+			p.closeExpiredLingeringReaders()
 		}
 	}
 }
 
-// effectiveParkTimeout returns the park timeout for the given memory usage.
-// usage < 0 means "no memory-usage callback configured" and returns
-// p.cfg.IdleParkTimeout.
-func (p *Pool) effectiveParkTimeout(usage float64) time.Duration {
+// effectiveLingerTimeout returns the linger timeout for the given memory
+// usage. usage < 0 means "no memory-usage callback configured" and returns
+// p.cfg.LingerTimeout. Pressure only ever shortens the configured timeout.
+func (p *Pool) effectiveLingerTimeout(usage float64) time.Duration {
 	switch {
-	case usage < 0:
-		return p.cfg.IdleParkTimeout
 	case usage >= 0.90:
-		return 1 * time.Second
+		return min(p.cfg.LingerTimeout, 1*time.Second)
 	case usage >= 0.75:
-		return 5 * time.Second
+		return min(p.cfg.LingerTimeout, 5*time.Second)
 	case usage >= 0.50:
-		return 10 * time.Second
+		return min(p.cfg.LingerTimeout, 10*time.Second)
 	default:
-		return p.cfg.IdleParkTimeout
+		return p.cfg.LingerTimeout
 	}
 }
 
@@ -1773,85 +1584,27 @@ func (p *Pool) sampleMemoryPressure() float64 {
 	return p.cfg.MemoryUsage()
 }
 
-// parkIdleReaders sets readahead to 0 for readers that have been idle
-// longer than the effective timeout, and closes readers that have been
-// idle longer than IdleCloseTimeout (the close check runs before the park check
-// in the same loop iteration, so a reader can be closed without ever being
-// parked — this matters when IdleParkTimeout >= IdleCloseTimeout under unusual configs).
-// Under memory pressure the close timeout is also shortened proportionally.
-//
-// It collects the actions to take first, then applies them while still
-// holding the lock, to keep the critical section minimal.
-func (p *Pool) parkIdleReaders() {
+// closeExpiredLingeringReaders closes readers that have lingered at least the
+// effective linger timeout. Lingering readers hold no share of the readahead
+// budget, so closing them needs no rebalance.
+func (p *Pool) closeExpiredLingeringReaders() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Sample memory pressure once per tick for consistent policy decisions.
-	usage := p.sampleMemoryPressure()
-
-	timeout := p.effectiveParkTimeout(usage)
+	timeout := p.effectiveLingerTimeout(p.sampleMemoryPressure())
 	now := time.Now()
-
-	type closeAction struct {
-		key  readerKey
-		sr   *streamReader
-		idle time.Duration
-	}
-	var toClose []closeAction
-	var toPark []*streamReader
-
 	for key, sr := range p.readers {
-		if sr.active || sr.idleSince.IsZero() {
+		if sr.active {
 			continue
 		}
-		idle := now.Sub(sr.idleSince)
-
-		// Under memory pressure, shrink the close deadline to reclaim
-		// memory faster. A negative IdleCloseTimeout means "never close" even
-		// under pressure; the pressure path only activates when a deadline is
-		// set (IdleCloseTimeout > 0).
-		closeDeadline := p.cfg.IdleCloseTimeout
-		if p.cfg.IdleCloseTimeout > 0 && usage >= 0 {
-			if usage >= 0.90 {
-				closeDeadline = min(closeDeadline, 30*time.Second)
-			} else if usage >= 0.75 {
-				closeDeadline = min(closeDeadline, 60*time.Second)
-			}
-		}
-
-		if closeDeadline > 0 && idle >= closeDeadline {
-			toClose = append(toClose, closeAction{key: key, sr: sr, idle: idle})
+		lingered := now.Sub(sr.lingerSince)
+		if lingered < timeout {
 			continue
 		}
-
-		if sr.readahead > 0 && idle >= timeout {
-			toPark = append(toPark, sr)
-		}
-	}
-
-	// Apply close actions.
-	for _, c := range toClose {
-		p.removeReaderLocked(c.key, c.sr)
-		p.logger.Debug("closed idle reader",
-			slog.String("hash", c.sr.infoHash.HexString()),
-			slog.Uint64("readerID", c.sr.readerID),
-			slog.Duration("idle", c.idle))
-	}
-
-	for _, sr := range toPark {
-		sr.readahead = 0
-		if sr.reader != nil {
-			sr.reader.SetReadahead(0)
-		}
-		p.logger.Debug("parked idle reader",
+		p.removeReaderLocked(key, sr)
+		p.logger.Debug("closed lingering reader",
 			slog.String("hash", sr.infoHash.HexString()),
 			slog.Uint64("readerID", sr.readerID),
-			slog.Duration("effectiveParkTimeout", timeout))
-	}
-
-	// Rebalance readahead among active readers now that idle readers
-	// have been parked (their readahead was set to 0).
-	if (len(toPark) > 0 || len(toClose) > 0) && p.readaheadBudget > 0 {
-		p.refreshReadaheadLocked(p.readaheadBudget)
+			slog.Duration("lingered", lingered))
 	}
 }

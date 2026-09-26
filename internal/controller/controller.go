@@ -1023,10 +1023,8 @@ func (c *Controller) configureTorrentClient() error {
 	// by registering readahead windows with the storage layer.
 	pool := stream.New(stream.Config{
 		FileReadaheadBytes:     fileStorageReadahead,
-		IdleCloseTimeout:       5 * time.Minute,
-		IdleParkTimeout:        30 * time.Second,
+		LingerTimeout:          30 * time.Second,
 		Logger:                 logger,
-		MaxReadersPerFile:      10,
 		PriorityWindowFraction: 0.15,
 		MemoryUsage: func() float64 {
 			stats := storageClient.MemoryStats()

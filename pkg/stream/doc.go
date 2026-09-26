@@ -4,24 +4,30 @@
 
 // Package stream provides a pooled reader manager for torrent file streaming.
 //
-// It multiplexes multiple concurrent readers per torrent file, manages idle
-// reader parking (readahead = 0), and coordinates with the storage layer via
-// the ActiveRangeRegistry interface to protect actively-read pieces from eviction.
+// It multiplexes multiple concurrent readers per torrent file, keeps a released
+// reader reading ahead briefly for the player's next request, and coordinates
+// with the storage layer via the ActiveRangeRegistry interface to protect
+// actively-read pieces from eviction.
 //
 // # Overview
 //
 // The Pool type is the central manager. Each torrent file can have multiple
-// readers acquired simultaneously. On Acquire the pool either reactivates an
-// idle reader or creates a new one. The caller receives an io.ReadSeeker
-// backed by an io.SectionReader so that http.ServeContent can serve Range
-// requests without blocking on sequential reads.
+// readers acquired simultaneously, and every Acquire creates a new reader. The
+// caller receives an io.ReadSeeker backed by an io.SectionReader so that
+// http.ServeContent can serve Range requests without blocking on sequential
+// reads.
 //
-// # Idle Reader Reuse
+// # Lingering Readers
 //
-// When an HTTP request ends, the reader is released to idle state. A
-// subsequent Acquire for the same (info hash, file path) pair reuses the
-// idle reader instead of creating a new one, avoiding duplicate download
-// progress from the torrent client.
+// When an HTTP request ends, its playback reader lingers: it stays open with
+// its readahead, so the torrent client keeps fetching the pieces just past
+// where the player stopped. A player that fetches a file in consecutive range
+// requests, or reconnects after a pause, then finds those pieces cached by the
+// time its next request's reader reaches them. A reader lingers only while no
+// other playback or preload reader is active; new work closes it after taking
+// over its own readahead window, so released requests never download outside
+// the shared budget. Readers still lingering after LingerTimeout are closed.
+// Preload readers and readers of a dropped torrent close on release.
 //
 // # Active Range Protection
 //
@@ -45,17 +51,9 @@
 // or is released. Pool-level claim aggregation preserves the highest priority
 // requested by overlapping readers.
 //
-// # Reader Cap and Eviction
-//
-// MaxReadersPerFile limits the total number of
-// active and idle readers per (info hash, file path) pair. Each file has an
-// independent soft cap: active readers are never terminated, so bursts of
-// concurrent requests may temporarily exceed the limit. Excess idle readers
-// are removed as requests finish.
-//
 // # Readahead Rebalancing
 //
-// When a reader is acquired, released, or parked, the pool redistributes the total
+// When a reader is acquired or released, the pool redistributes the total
 // memory readahead budget among active memory-storage readers. Storage protects
 // whole pieces, so the division is made in pieces: head and tail boundaries use
 // at most half of the budget and shrink, or are dropped, until their pieces fit,
@@ -64,12 +62,8 @@
 // only the piece it is reading. A file whose held preload reservation covers
 // both its head and tail gets no reader boundaries, because the preload already
 // protects them within that reservation. File-storage
-// readers retain their configured FileReadaheadBytes while active. Competing idle
-// readers are parked immediately whenever playback or preload work is active, so
-// released HTTP range requests cannot keep downloading outside the shared budget.
-// The last idle reader may remain warm until its normal park timeout. This ensures
-// no stale reader monopolizes the torrent client's download capacity while active
-// work starves.
+// readers retain their configured FileReadaheadBytes while active. Lingering
+// readers hold no share of the budget.
 //
 // # Preload Reservations
 //
@@ -83,19 +77,12 @@
 // range. SetReadaheadBudget refuses a new budget whose preload share cannot
 // hold the existing reservations.
 //
-// # Idle GC
+// # Memory Pressure
 //
-// Readers that remain idle longer than the effective timeout are parked
-// by having their readahead set to zero. This allows the torrent client
-// to reclaim piece memory. Readers that remain idle for CloseTimeout are
-// closed and removed from the pool; a negative IdleCloseTimeout disables removal.
-//
-// When MemoryUsage is configured, the idle park timeout scales down
-// automatically under memory pressure (e.g., 1 s at ≥90 %, 5 s at ≥75 %,
-// 10 s at ≥50 %). This prevents pieces from being downloaded and
-// immediately evicted. When IdleCloseTimeout is positive, the close deadline
-// is also capped at 30 s at ≥90 % and 60 s at ≥75 %. Without MemoryUsage the fixed IdleParkTimeout (default 30 s)
-// and IdleCloseTimeout (default 5 minutes) are used.
+// When MemoryUsage is configured, the linger timeout shortens under memory
+// pressure (1 s at ≥90 %, 5 s at ≥75 %, 10 s at ≥50 %), so pieces are not
+// downloaded only to be evicted. Without MemoryUsage the fixed LingerTimeout
+// (default 30 s) is used.
 //
 // # Thread Safety
 //
@@ -115,9 +102,8 @@
 //	func main() {
 //		pool := stream.New(stream.Config{
 //			FileReadaheadBytes: 50 * 1024 * 1024, // 50 MiB
-//			IdleParkTimeout:    30 * time.Second,
+//			LingerTimeout:      30 * time.Second,
 //			Logger:             slog.Default(),
-//			MaxReadersPerFile:  10,
 //			Registry:           nil, // pass a storage.Client here to enable eviction protection
 //		})
 //		defer pool.Close()

@@ -1835,9 +1835,9 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 }
 
 // hasTorrentReaders returns true if the torrent has any stream pool readers
-// (active or idle) or is being downloaded by the background downloader.
-// Idle readers are included because they can be resumed and should keep the
-// torrent alive — see stream.Pool.HasReaders for details.
+// (active or lingering) or is being downloaded by the background downloader.
+// Lingering readers are included because they are still downloading for the
+// player's next request — see stream.Pool.HasReaders for details.
 func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
 	isStreaming, isDownloading := c.torrentActivity(ih)
 	return isStreaming || isDownloading
