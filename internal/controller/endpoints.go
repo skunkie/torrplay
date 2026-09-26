@@ -1843,7 +1843,7 @@ func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloadi
 		isStreaming = pool.HasReaders(ih) || c.preloadActive(ih)
 	}
 	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
-		isDownloading = activeDownloader.IsActive(ih)
+		isDownloading = activeDownloader.IsDownloading(ih)
 	}
 	return isStreaming, isDownloading
 }
@@ -2067,16 +2067,7 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	dlna.AddHeader(w, r)
 
 	c.metrics.IncStreamRequests()
-	activeDownloader := c.downloader.Load()
-	if activeDownloader != nil {
-		activeDownloader.AddStreaming(ih)
-	}
-	defer func() {
-		c.metrics.DecStreamRequests()
-		if activeDownloader != nil {
-			activeDownloader.RemoveStreaming(ih)
-		}
-	}()
+	defer c.metrics.DecStreamRequests()
 
 	// For streaming endpoints, it is important to disable the read and write timeouts.
 	rc := http.NewResponseController(w)

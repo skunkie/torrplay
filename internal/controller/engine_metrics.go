@@ -109,3 +109,10 @@ func (c *Controller) streamingTorrentCount() int {
 	}
 	return pool.StreamingTorrentCount()
 }
+
+// isStreaming reports whether any file is being streamed, including by a
+// reader lingering between a player's range requests. The background
+// downloader pauses while it does.
+func (c *Controller) isStreaming() bool {
+	return c.streamingTorrentCount() > 0
+}

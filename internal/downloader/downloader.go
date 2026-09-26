@@ -38,13 +38,16 @@ type Downloader struct {
 	metrics         *metrics.Metrics
 	mu              sync.Mutex
 	pieceCompletion storage.PieceCompletion
-	streamings      map[metainfo.Hash]int
 	stop            chan struct{}
-	trackers        [][]string
+	// streaming reports whether any file is being streamed. Background
+	// downloads pause while it does, so playback keeps the bandwidth.
+	streaming func() bool
+	trackers  [][]string
 }
 
-// New creates a new Downloader.
-func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string) *Downloader {
+// New creates a new Downloader. streaming reports whether any file is being
+// streamed, which pauses background downloads; nil means never.
+func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, streaming func() bool) *Downloader {
 	return &Downloader{
 		client:          client,
 		db:              db,
@@ -53,41 +56,18 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		logger:          logger,
 		metrics:         m,
 		pieceCompletion: pc,
-		streamings:      make(map[metainfo.Hash]int),
+		streaming:       streaming,
 		trackers:        trackers,
 	}
 }
 
-// AddStreaming increases the count of streaming sessions for a torrent.
-func (d *Downloader) AddStreaming(hash metainfo.Hash) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.streamings[hash]++
-}
-
-// RemoveStreaming decreases the count of streaming sessions for a torrent.
-func (d *Downloader) RemoveStreaming(hash metainfo.Hash) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.streamings[hash]--
-	if d.streamings[hash] <= 0 {
-		delete(d.streamings, hash)
-	}
-}
-
-// hasStreamings returns true if there are any active streaming sessions.
-func (d *Downloader) hasStreamings() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return len(d.streamings) > 0
-}
-
-// IsActive returns true if the torrent is currently being downloaded or streamed.
-func (d *Downloader) IsActive(hash metainfo.Hash) bool {
+// IsDownloading reports whether the torrent is being downloaded in the
+// background.
+func (d *Downloader) IsDownloading(hash metainfo.Hash) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	_, isDownloading := d.downloading[hash]
-	return isDownloading || d.streamings[hash] > 0
+	return isDownloading
 }
 
 // Start starts the background downloader.
@@ -169,7 +149,7 @@ func (d *Downloader) processTorrents() {
 	}
 
 	downloaderEnabled := utils.Val(settings.EnableDownloader)
-	isStreaming := d.hasStreamings()
+	isStreaming := d.streaming != nil && d.streaming()
 
 	if !downloaderEnabled {
 		d.logger.Debug("background downloader is disabled, stopping all background downloads")

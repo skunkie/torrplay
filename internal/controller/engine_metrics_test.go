@@ -68,12 +68,15 @@ func TestEngineStatsCountTorrentsWithStreamReaders(t *testing.T) {
 		releases = append(releases, release)
 	}
 	assert.Equal(t, 2, ctrl.engineStats().StreamingTorrents, "each torrent counts once")
+	assert.True(t, ctrl.isStreaming())
 
 	for _, release := range releases {
 		release()
 	}
+	assert.True(t, ctrl.isStreaming(), "a lingering reader still pauses background downloads")
 	pool.Close()
 	assert.Zero(t, ctrl.engineStats().StreamingTorrents)
+	assert.False(t, ctrl.isStreaming())
 }
 
 func TestEngineStatsSplitLoadedTorrentsByReason(t *testing.T) {

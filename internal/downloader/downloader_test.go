@@ -120,7 +120,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		client := newTestTorrentClient(t, td)
 
 		// Create the downloader instance.
-		downloader := New(client, db, logger, m, pc, td, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil)
 		originalGotInfoTimeout := gotInfoTimeout
 		gotInfoTimeout = 1 * time.Millisecond
 		defer func() {
@@ -173,7 +173,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 
 		client := newTestTorrentClient(t, td)
 
-		downloader := New(client, db, logger, m, pc, td, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil)
 		downloader.downloading[testHash] = struct{}{}
 
 		to, err := client.AddTorrent(testMetaInfo)
@@ -216,9 +216,8 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 
 		client := newTestTorrentClient(t, td)
 
-		downloader := New(client, db, logger, m, pc, td, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, func() bool { return true })
 		downloader.downloading[testHash] = struct{}{}
-		downloader.AddStreaming(testHash)
 
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
@@ -234,40 +233,12 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 	})
 }
 
-func TestDownloaderAddAndRemoveStreaming(t *testing.T) {
-	d := &Downloader{
-		streamings: make(map[metainfo.Hash]int),
-	}
-
+func TestDownloader_IsDownloading(t *testing.T) {
 	hash := newTestTorrent(t, 1).HashInfoBytes()
-
-	d.AddStreaming(hash)
-	assert.Equal(t, 1, d.streamings[hash])
-
-	d.AddStreaming(hash)
-	assert.Equal(t, 2, d.streamings[hash])
-
-	d.RemoveStreaming(hash)
-	assert.Equal(t, 1, d.streamings[hash])
-
-	d.RemoveStreaming(hash)
-	_, exists := d.streamings[hash]
-	assert.False(t, exists)
-}
-
-func TestDownloader_HasStreamings(t *testing.T) {
-	d := &Downloader{
-		streamings: make(map[metainfo.Hash]int),
-	}
-
-	assert.False(t, d.hasStreamings())
-
-	hash := newTestTorrent(t, 1).HashInfoBytes()
-	d.AddStreaming(hash)
-	assert.True(t, d.hasStreamings())
-
-	d.RemoveStreaming(hash)
-	assert.False(t, d.hasStreamings())
+	d := &Downloader{downloading: make(map[metainfo.Hash]struct{})}
+	assert.False(t, d.IsDownloading(hash))
+	d.downloading[hash] = struct{}{}
+	assert.True(t, d.IsDownloading(hash))
 }
 
 func TestDownloader_Stop(t *testing.T) {
@@ -288,7 +259,7 @@ func TestDownloader_Stop(t *testing.T) {
 		db := &MockDB{
 			settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
 		}
-		downloader := New(client, db, logger, m, pc, td, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil)
 		downloader.downloading[testHash] = struct{}{}
 
 		to, err := client.AddTorrent(testMetaInfo)
@@ -320,7 +291,7 @@ func TestDownloader_Stop(t *testing.T) {
 
 		client := newTestTorrentClient(t, td)
 
-		downloader := New(client, db, logger, m, pc, td, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil)
 
 		// Start and stop multiple times in quick succession
 		for range 5 {
