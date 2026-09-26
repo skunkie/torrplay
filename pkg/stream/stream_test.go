@@ -1927,42 +1927,69 @@ func TestPoolMaxReadersPerFile(t *testing.T) {
 			t.Fatalf("expected -1 to disable the cap (0), got %d", p.cfg.MaxReadersPerFile)
 		}
 	})
+}
 
-	t.Run("single eviction loop", func(t *testing.T) {
-		p := newTestPool(t, Config{
-			Logger:            testLogger(),
-			MaxReadersPerFile: 2,
-		})
-		infoHash := metainfo.Hash{4}
-
-		// Insert 1 idle + 2 active readers — cap is 2.
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = &streamReader{
-			active:    false,
-			infoHash:  infoHash,
-			file:      &torrent.File{},
-			readerID:  1,
-			idleSince: time.Now(),
+func TestPool_TrimIdleReadersLocked(t *testing.T) {
+	infoHash := metainfo.Hash{4}
+	now := time.Now()
+	newPool := func(t *testing.T, maxReaders int, idle, active int) *Pool {
+		t.Helper()
+		p := newTestPool(t, Config{Logger: testLogger(), MaxReadersPerFile: maxReaders})
+		id := uint64(0)
+		for i := range idle {
+			id++
+			p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: id}] = &streamReader{
+				file:      &torrent.File{},
+				idleSince: now.Add(time.Duration(i) * time.Second),
+				infoHash:  infoHash,
+				readerID:  id,
+			}
 		}
-		for i := uint64(2); i <= 3; i++ {
-			p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: i}] = &streamReader{
+		for range active {
+			id++
+			p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: id}] = &streamReader{
 				active:   true,
-				infoHash: infoHash,
 				file:     &torrent.File{},
-				readerID: i,
+				infoHash: infoHash,
+				readerID: id,
 			}
 		}
+		return p
+	}
 
-		// Evict loop: first iteration evicts idle reader, second iteration
-		// finds no idle readers and breaks (soft cap).
-		for p.countReadersLocked(infoHash, "f") >= p.cfg.MaxReadersPerFile {
-			if !p.evictOldestIdleLocked(infoHash, "f") {
-				break
+	t.Run("evicts oldest idle readers down to the cap", func(t *testing.T) {
+		p := newPool(t, 2, 3, 1)
+		p.trimIdleReadersLocked(infoHash, "f")
+		if got := p.countReadersLocked(infoHash, "f"); got != 2 {
+			t.Fatalf("expected 2 readers, got %d", got)
+		}
+		// Readers 1 and 2 are the oldest idle readers.
+		for _, id := range []uint64{1, 2} {
+			if _, ok := p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: id}]; ok {
+				t.Errorf("expected reader %d to be evicted", id)
 			}
 		}
+	})
 
-		count := p.countReadersLocked(infoHash, "f")
-		if count != 2 {
-			t.Fatalf("expected 2 readers (cap soft when no idle), got %d", count)
+	t.Run("keeps active readers above the cap", func(t *testing.T) {
+		p := newPool(t, 2, 1, 2)
+		p.trimIdleReadersLocked(infoHash, "f")
+		if got := p.countReadersLocked(infoHash, "f"); got != 2 {
+			t.Fatalf("expected 2 active readers, got %d", got)
+		}
+
+		p = newPool(t, 1, 0, 3)
+		p.trimIdleReadersLocked(infoHash, "f")
+		if got := p.countReadersLocked(infoHash, "f"); got != 3 {
+			t.Fatalf("expected soft cap to keep 3 active readers, got %d", got)
+		}
+	})
+
+	t.Run("disabled cap keeps every reader", func(t *testing.T) {
+		p := newPool(t, -1, 3, 0)
+		p.trimIdleReadersLocked(infoHash, "f")
+		if got := p.countReadersLocked(infoHash, "f"); got != 3 {
+			t.Fatalf("expected 3 readers, got %d", got)
 		}
 	})
 }
