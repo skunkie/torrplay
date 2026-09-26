@@ -5,6 +5,7 @@
 package storage
 
 import (
+	"cmp"
 	"container/list"
 	"context"
 	"crypto/sha1"
@@ -346,11 +347,6 @@ func (c *Client) Closed() <-chan struct{} {
 	return c.closeCh
 }
 
-// isClosed reports whether the client has been closed. c.mu must be held.
-func (c *Client) isClosed() bool {
-	return c.closed
-}
-
 // SetEvictionHandler registers handler to be told about every piece that
 // eviction removes, and about every piece that is already gone when the
 // torrent engine marks it complete. The engine caches piece completion, and
@@ -563,8 +559,8 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 	}
 
 	// Sort pieces by index for consistent output.
-	sort.Slice(stats.Pieces, func(i, j int) bool {
-		return stats.Pieces[i].Index < stats.Pieces[j].Index
+	slices.SortFunc(stats.Pieces, func(a, b PieceStats) int {
+		return cmp.Compare(a.Index, b.Index)
 	})
 
 	return stats, nil
@@ -576,7 +572,7 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.isClosed() {
+	if c.closed {
 		return storage.TorrentImpl{}, ErrClientClosed
 	}
 
@@ -631,7 +627,7 @@ func (c *Client) SetMaxMemory(limitBytes int64) error {
 
 	for {
 		c.mu.Lock()
-		if c.isClosed() {
+		if c.closed {
 			c.mu.Unlock()
 			return ErrClientClosed
 		}
@@ -691,7 +687,7 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 	for {
 		c.mu.Lock()
 
-		if c.isClosed() {
+		if c.closed {
 			c.mu.Unlock()
 			return nil, ErrClientClosed
 		}
@@ -1344,7 +1340,7 @@ func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.isClosed() {
+	if c.closed {
 		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
 		p.finishFailedAllocationLocked(pd)
 		return ErrClientClosed
@@ -1419,7 +1415,7 @@ func (p *pieceImpl) getOrCreatePieceData() (*pieceData, error) {
 	p.client.mu.Lock()
 	defer p.client.mu.Unlock()
 
-	if p.client.isClosed() {
+	if p.client.closed {
 		return nil, ErrClientClosed
 	}
 	if p.handle.closed.Load() {
