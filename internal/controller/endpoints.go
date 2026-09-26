@@ -1286,7 +1286,7 @@ func (c *Controller) applyLoggerSettings() {
 // applyMemoryLimit resizes memory storage and the stream readahead budget to
 // the current settings without replacing the torrent client, so streams and
 // cached pieces survive. When preload reservations exceed a smaller budget,
-// they are released one at a time until the budget fits.
+// the stream pool evicts preloads until they fit.
 func (c *Controller) applyMemoryLimit() error {
 	c.torrentConfigMu.Lock()
 	defer c.torrentConfigMu.Unlock()
@@ -1300,16 +1300,7 @@ func (c *Controller) applyMemoryLimit() error {
 	// Shrink the protected readahead first so eviction can reclaim what it
 	// no longer covers.
 	budget := readaheadBudget(maxMemory)
-	// Hold preloadsMu so dispatch cannot reserve released memory again.
-	c.preloadsMu.Lock()
-	for !pool.SetReadaheadBudget(budget) {
-		if !c.releaseOnePreloadReservationLocked() {
-			c.preloadsMu.Unlock()
-			return errors.New("preload reservations exceed the new readahead budget")
-		}
-	}
-	c.dispatchPreloadsLocked()
-	c.preloadsMu.Unlock()
+	pool.SetReadaheadBudget(budget)
 	return storageClient.SetMaxMemory(maxMemory)
 }
 
@@ -1835,20 +1826,21 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 }
 
 // hasTorrentReaders returns true if the torrent has any stream pool readers
-// (active or lingering) or is being downloaded by the background downloader.
-// Lingering readers are included because they are still downloading for the
-// player's next request — see stream.Pool.HasReaders for details.
+// (active or lingering), a queued or running preload, or is being downloaded
+// by the background downloader. Lingering readers are included because they
+// are still downloading for the player's next request — see
+// stream.Pool.HasReaders for details.
 func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
 	isStreaming, isDownloading := c.torrentActivity(ih)
 	return isStreaming || isDownloading
 }
 
-// torrentActivity reports whether the torrent has stream pool readers and
-// whether the background downloader is working on it. It takes no controller
-// lock, so callers may hold c.mu.
+// torrentActivity reports whether the torrent has stream pool readers or a
+// queued or running preload, and whether the background downloader is working
+// on it. It takes no controller lock, so callers may hold c.mu.
 func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloading bool) {
 	if pool := c.streamPool.Load(); pool != nil {
-		isStreaming = pool.HasReaders(ih)
+		isStreaming = pool.HasReaders(ih) || c.preloadActive(ih)
 	}
 	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
 		isDownloading = activeDownloader.IsActive(ih)
@@ -2061,23 +2053,6 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	if isFileStorage {
 		mode = stream.FileStorage
 	}
-	// Live playback cancels running preload workers because both compete for
-	// the same download bandwidth. Unrelated ready memory preloads release
-	// their speculative leases; a ready preload for this file transfers its
-	// lease to the playback session, which spans the player's separate range
-	// requests. New preload requests stay queued until the session ends. The
-	// reader does not wait for cancelled workers to exit: they hold no piece
-	// priorities or memory reservation, and their readahead ends as soon as
-	// their reads observe the cancellation.
-	c.preloadsMu.Lock()
-	session := c.beginPlaybackLocked(ih, file.Path())
-	c.preloadsMu.Unlock()
-	defer func() {
-		c.preloadsMu.Lock()
-		c.endPlaybackRequestLocked(session)
-		c.preloadsMu.Unlock()
-	}()
-
 	reader, release, err := pool.AcquireContext(r.Context(), file, mode)
 	if err != nil {
 		status := http.StatusInternalServerError

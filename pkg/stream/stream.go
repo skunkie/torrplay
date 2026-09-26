@@ -113,10 +113,15 @@ type Config struct {
 	// makes the nearest pieces download first. Values above 1 are clamped to 1.
 	// A non-positive value disables prioritization.
 	PriorityWindowFraction float64
-	// ReadObserver, when set, is called after every Read of a playback reader
-	// with the reader's storage mode and how long the Read took, including
-	// any wait for torrent data. Preload reads are not reported. It runs on
-	// the reading goroutine, so it must return quickly.
+	// PreloadReadyTTL is how long a ready preload stays cached after its file
+	// last had a reader, and how long a failed or evicted preload keeps
+	// reporting its final state. Zero defaults to 5 minutes. Negative values
+	// keep them until they are replaced, cancelled, or evicted.
+	PreloadReadyTTL time.Duration
+	// ReadObserver, when set, is called after every Read of a reader with the
+	// reader's storage mode and how long the Read took, including any wait
+	// for torrent data. It runs on the reading goroutine, so it must return
+	// quickly.
 	ReadObserver func(mode StorageMode, duration time.Duration)
 	// Registry tracks active read ranges for piece eviction protection.
 	// Nil disables active-range tracking.
@@ -142,7 +147,9 @@ type priorityPieceKey struct {
 }
 
 type priorityClaim struct {
-	owners map[*streamReader]torrent.PiecePriority
+	// owners maps each claim owner, a *streamReader or a *preload, to the
+	// priority it requests.
+	owners map[any]torrent.PiecePriority
 }
 
 const defaultWrapperBufSize = 256 * 1024
@@ -164,10 +171,6 @@ type readAtWrapper struct {
 	cacheBuf   []byte
 	cacheStart int64 // start byte offset of cached window
 	cacheLen   int   // valid byte count in cacheBuf
-	// fillLimit, when positive, is the exclusive byte offset past which cache
-	// refills do not read ahead. Bounded readers such as preloads set it so a
-	// refill never blocks on, or downloads, data outside their range.
-	fillLimit int64
 
 	// onOffsetChange is called when the read position moves, allowing the
 	// caller to update the active eviction-protection range. The parameter
@@ -285,12 +288,7 @@ func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
 		rw.cacheBuf = make([]byte, defaultWrapperBufSize)
 	}
 
-	fillLen := int64(len(rw.cacheBuf))
-	if rw.fillLimit > 0 {
-		// Always satisfy the caller's request, but do not read ahead past the limit.
-		fillLen = min(fillLen, max(rw.fillLimit-off, int64(len(p))))
-	}
-	fill := rw.cacheBuf[:fillLen]
+	fill := rw.cacheBuf
 	readBytes := 0
 	var readErr error
 	for readBytes < len(fill) {
@@ -375,10 +373,8 @@ type streamReader struct {
 	file          *torrent.File
 	infoHash      metainfo.Hash
 	isFileStorage bool
-	isPreload     bool
 	// lingerSince is when a released reader started lingering.
 	lingerSince time.Time
-	preloadEnd  int64
 	// lastOffset is the last byte offset reported by the onOffsetChange
 	// callback. Updated under pool.mu only, so code holding pool.mu can
 	// read it without acquiring wrapper.mu.
@@ -408,15 +404,23 @@ type streamReader struct {
 // Callers must call Close() when the pool is no longer needed to stop the background
 // lingering-reader goroutine and release reader resources.
 type Pool struct {
-	closeCh         chan struct{}
-	closed          bool
-	cfg             Config
-	logger          *slog.Logger
-	mu              sync.Mutex
-	nextID          uint64
-	priorityClaims  map[priorityPieceKey]*priorityClaim
-	priorityMu      sync.Mutex
-	preloadBudgets  map[metainfo.Hash]preloadReservation
+	closeCh        chan struct{}
+	closed         bool
+	cfg            Config
+	logger         *slog.Logger
+	mu             sync.Mutex
+	nextID         uint64
+	priorityClaims map[priorityPieceKey]*priorityClaim
+	priorityMu     sync.Mutex
+	// preloadQueue holds queued preloads in request order. Entries that are
+	// no longer queued are skipped on dispatch.
+	preloadQueue []*preload
+	// preloadWatchers tracks the goroutines that follow running and ready
+	// preloads, so Close can wait for them.
+	preloadWatchers sync.WaitGroup
+	// preloads holds each torrent's preload, including a failed or evicted
+	// one that still reports its final state.
+	preloads        map[metainfo.Hash]*preload
 	readaheadBudget int64 // current total readahead budget, updated by SetReadaheadBudget
 	readers         map[readerKey]*streamReader
 }
@@ -436,13 +440,16 @@ func New(cfg Config) *Pool {
 	if cfg.LingerTimeout == 0 {
 		cfg.LingerTimeout = 30 * time.Second
 	}
+	if cfg.PreloadReadyTTL == 0 {
+		cfg.PreloadReadyTTL = defaultPreloadReadyTTL
+	}
 
 	p := &Pool{
 		closeCh:        make(chan struct{}),
 		cfg:            cfg,
 		logger:         logger,
 		priorityClaims: make(map[priorityPieceKey]*priorityClaim),
-		preloadBudgets: make(map[metainfo.Hash]preloadReservation),
+		preloads:       make(map[metainfo.Hash]*preload),
 		readers:        make(map[readerKey]*streamReader),
 	}
 
@@ -464,21 +471,6 @@ func (p *Pool) Acquire(file *torrent.File, mode StorageMode) (io.ReadSeeker, Rel
 // FileStorage readers use Config.FileReadaheadBytes. AcquireContext returns an error
 // for an invalid file or mode, or after the pool has been closed.
 func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode StorageMode) (io.ReadSeeker, ReleaseFunc, error) {
-	return p.acquireContext(ctx, file, mode, false, 0, 0)
-}
-
-// AcquirePreloadContext acquires a reader with dynamic readahead bounded to
-// [start, end). The torrent client prioritizes that readahead window, and the
-// preload controller owns eviction protection for the range.
-func (p *Pool) AcquirePreloadContext(ctx context.Context, file *torrent.File, mode StorageMode, start, end int64) (io.ReadSeeker, ReleaseFunc, error) {
-	if file != nil {
-		start = min(max(start, 0), file.Length())
-		end = min(max(end, start), file.Length())
-	}
-	return p.acquireContext(ctx, file, mode, true, start, end)
-}
-
-func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode StorageMode, isPreload bool, preloadStart, preloadEnd int64) (io.ReadSeeker, ReleaseFunc, error) {
 	if file == nil || file.Torrent() == nil {
 		return nil, nil, ErrInvalidFile
 	}
@@ -507,9 +499,6 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	reader.SetContext(readerCtx)
 
 	wrapper := p.newReaderWrapper(reader, key, file)
-	if isPreload {
-		wrapper.fillLimit = preloadEnd
-	}
 
 	sr := &streamReader{
 		active:        true,
@@ -517,8 +506,6 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		file:          file,
 		infoHash:      infoHash,
 		isFileStorage: isFileStorage,
-		isPreload:     isPreload,
-		preloadEnd:    preloadEnd,
 		lastPieceIdx:  -1,
 		reader:        reader,
 		readerID:      readerID,
@@ -526,17 +513,12 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 	}
 	p.readers[key] = sr
 
-	switch {
-	case isPreload:
-		sr.readahead = preloadEnd - preloadStart
-		reader.SetReadaheadFunc(preloadReadaheadFunc(preloadEnd))
-		p.closeLingeringReadersLocked()
-	case isFileStorage:
+	if isFileStorage {
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
 		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, DefaultFileBoundaryBytes)
 		p.closeLingeringReadersLocked()
-	default:
+	} else {
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	}
 
@@ -546,7 +528,7 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		slog.Uint64("readerID", readerID),
 		slog.Int64("readahead", sr.readahead))
 
-	return p.newReadSeeker(wrapper, file.Length(), mode, isPreload), p.releaseFunc(key), nil
+	return p.newReadSeeker(wrapper, file.Length(), mode), p.releaseFunc(key), nil
 }
 
 // newReaderWrapper returns a wrapper for reader whose position changes update
@@ -568,19 +550,13 @@ func (p *Pool) releaseFunc(key readerKey) ReleaseFunc {
 }
 
 // newReadSeeker returns the bounded view of wrapper handed to callers. Reads
-// of playback readers are timed for Config.ReadObserver.
-func (p *Pool) newReadSeeker(wrapper *readAtWrapper, length int64, mode StorageMode, isPreload bool) io.ReadSeeker {
+// are timed for Config.ReadObserver.
+func (p *Pool) newReadSeeker(wrapper *readAtWrapper, length int64, mode StorageMode) io.ReadSeeker {
 	r := &seekNotifyingReader{ReadSeeker: io.NewSectionReader(wrapper, 0, length), onSeek: wrapper.notifyOffsetChange}
-	if observe := p.cfg.ReadObserver; observe != nil && !isPreload {
+	if observe := p.cfg.ReadObserver; observe != nil {
 		r.observeRead = func(d time.Duration) { observe(mode, d) }
 	}
 	return r
-}
-
-func preloadReadaheadFunc(end int64) torrent.ReadaheadFunc {
-	return func(ctx torrent.ReadaheadContext) int64 {
-		return max(end-ctx.CurrentPos, 0)
-	}
 }
 
 // closeStreamReaderLocked cancels and closes a reader. Retiring the wrapper
@@ -606,10 +582,10 @@ func closeStreamReaderLocked(sr *streamReader) {
 // A released playback reader lingers: it stays open with its readahead, so
 // the torrent client keeps fetching the pieces just past where the player
 // stopped for the player's next range request. It lingers only while no other
-// playback or preload reader is active, so it cannot download outside the
+// reader is active, so it cannot download outside the
 // shared budget, and at most LingerTimeout. The next request creates a new
-// reader, which finds those pieces cached. Preload readers and readers of a
-// closed torrent close immediately.
+// reader, which finds those pieces cached. Readers of a closed torrent close
+// immediately.
 //
 // A lingering reader holds no eviction protection or priority claims, so its
 // prefetched pieces compete with other cached pieces under memory pressure.
@@ -624,7 +600,7 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 	}
 
 	sr.active = false
-	if sr.isPreload || torrentClosed(sr.file) {
+	if torrentClosed(sr.file) {
 		p.removeReaderLocked(key, sr)
 		p.rebalanceLocked()
 		return
@@ -691,6 +667,10 @@ func (p *Pool) removeReaderLocked(key readerKey, sr *streamReader) {
 	p.clearReaderClaimsLocked(sr)
 	closeStreamReaderLocked(sr)
 	delete(p.readers, key)
+	// A ready preload's TTL runs from when its file was last read.
+	if pl := p.preloads[sr.infoHash]; pl != nil && pl.state == PreloadReady && pl.file == sr.file {
+		pl.idleSince = time.Now()
+	}
 }
 
 // refreshReadaheadLocked recalculates and applies readahead for all active readers.
@@ -705,11 +685,6 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		}
 		// File-storage readers use the fixed value; do not overwrite.
 		if sr.isFileStorage {
-			continue
-		}
-		// Preload readers have a dynamic, range-bounded readahead backed by
-		// an explicit reservation. Do not redistribute their budget here.
-		if sr.isPreload {
 			continue
 		}
 		readahead := readaheadForShare(plan.share, filePieceLength(sr.file))
@@ -733,12 +708,12 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		slog.Int64("perReaderShare", plan.share))
 }
 
-// closeLingeringReadersLocked closes every lingering reader whenever playback
-// or preload work is active. A reader lingers only while it is the pool's sole
-// work, so released HTTP range requests cannot accumulate unbudgeted
-// downloads. A running preload is active work through its own readers; a
-// preload reservation alone is not, because a completed preload that still
-// holds one downloads nothing. Must be called with p.mu held.
+// closeLingeringReadersLocked closes every lingering reader whenever another
+// reader is active. A reader lingers only while it is the pool's sole reader,
+// so released HTTP range requests cannot accumulate unbudgeted downloads.
+// Preloads do not close lingering readers: they download below readahead
+// priority, so a lingering reader keeps its warm window for its player. Must
+// be called with p.mu held.
 func (p *Pool) closeLingeringReadersLocked() {
 	hasActiveWork := false
 	for _, sr := range p.readers {
@@ -764,138 +739,19 @@ func (p *Pool) closeLingeringReadersLocked() {
 
 // SetReadaheadBudget recalculates readahead for all active memory-storage
 // readers using the provided total budget. Negative budgets are treated as
-// zero. File-storage readers keep their fixed readahead. It returns false and
-// leaves the previous budget unchanged if existing preload reservations would
-// exceed the new preload share.
-func (p *Pool) SetReadaheadBudget(budgetBytes int64) bool {
+// zero. File-storage readers keep their fixed readahead. When preload
+// reservations exceed the preload share of the new budget, preloads are
+// evicted until they fit, and a larger budget lets queued preloads start.
+func (p *Pool) SetReadaheadBudget(budgetBytes int64) {
 	if budgetBytes < 0 {
 		budgetBytes = 0
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	reserved := int64(0)
-	for _, reservation := range p.preloadBudgets {
-		reserved += reservation.bytes
-	}
-	if reserved > preloadProtectionCapacity(budgetBytes) {
-		return false
-	}
 	p.readaheadBudget = budgetBytes
+	p.shrinkPreloadsLocked()
 	p.refreshReadaheadLocked(budgetBytes)
-	return true
-}
-
-// ReservePreload admits a preload of file into the same global protection
-// budget used by streaming readahead, and protects the whole pieces holding the
-// file-relative byte ranges [0, headEnd) and [tailStart, tailEnd) from eviction
-// until ReleasePreload. An empty tail range protects only the head. Replacing a
-// reservation for the same torrent is atomic. When the ranges reach both ends
-// of the file, playback readers of that file skip their own boundary
-// protection while the reservation is held instead of paying for those pieces
-// twice. A preload that protects only the head, such as one trimmed to a small
-// budget, leaves reader boundaries in place so the tail stays protected.
-// Preloads may use otherwise-idle capacity but always leave a bounded playback
-// reserve, so a newly acquired stream cannot be reduced to the one-byte
-// minimum by completed preload leases. It returns false, and holds no
-// reservation for the torrent, when the pieces do not fit the preload capacity
-// left by other reservations or the file has no piece metadata.
-func (p *Pool) ReservePreload(file *torrent.File, headEnd, tailStart, tailEnd int64) bool {
-	headStart, headEndPiece, tailStartPiece, tailEndPiece, ok := FilePieceRanges(file, headEnd, tailStart, tailEnd)
-	if !ok {
-		return false
-	}
-	reservation := preloadReservation{
-		bytes:            BoundaryPieceBytes(file.Torrent().Info(), headStart, headEndPiece, tailStartPiece, tailEndPiece),
-		coversBoundaries: preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
-		filePath:         file.Path(),
-		headStart:        headStart,
-		headEnd:          headEndPiece,
-		tailStart:        tailStartPiece,
-		tailEnd:          tailEndPiece,
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.reservePreloadLocked(file.Torrent().InfoHash(), reservation)
-}
-
-// preloadCoversBoundaries reports whether the head range [0, headEnd) and the
-// tail range [tailStart, tailEnd) reach both ends of a file of fileLength
-// bytes. A preload trimmed to part of its head leaves the tail to playback
-// boundary protection; one whose head spans the whole file covers the tail as
-// well.
-func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool {
-	return headEnd > 0 && (headEnd >= fileLength || (tailEnd > tailStart && tailEnd >= fileLength))
-}
-
-// reservePreloadLocked admits reservation for infoHash when it fits the
-// preload capacity left by other torrents' reservations, and protects its
-// pieces. A replaced reservation keeps its protection IDs, so its pieces stay
-// protected throughout. Must be called with p.mu held.
-func (p *Pool) reservePreloadLocked(infoHash metainfo.Hash, reservation preloadReservation) bool {
-	reserved := int64(0)
-	for hash, other := range p.preloadBudgets {
-		if hash != infoHash {
-			reserved += other.bytes
-		}
-	}
-	if reservation.bytes > preloadProtectionCapacity(p.readaheadBudget)-reserved {
-		p.releasePreloadLocked(infoHash)
-		return false
-	}
-	if previous, ok := p.preloadBudgets[infoHash]; ok {
-		reservation.headID, reservation.tailID = previous.headID, previous.tailID
-	} else {
-		p.nextID++
-		reservation.headID = p.nextID
-		p.nextID++
-		reservation.tailID = p.nextID
-	}
-	p.preloadBudgets[infoHash] = reservation
-	if p.cfg.Registry != nil {
-		p.cfg.Registry.SetActiveRange(infoHash, reservation.headID, reservation.headStart, reservation.headEnd)
-		p.cfg.Registry.SetActiveRange(infoHash, reservation.tailID, reservation.tailStart, reservation.tailEnd)
-	}
-	p.refreshReadaheadLocked(p.readaheadBudget)
-	return true
-}
-
-// PreloadCapacity returns the total bytes that preload reservations may hold
-// under the current readahead budget. The remainder of the budget is kept for
-// playback readers.
-func (p *Pool) PreloadCapacity() int64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return preloadProtectionCapacity(p.readaheadBudget)
-}
-
-// ReleasePreload removes a torrent's preload reservation, ends the eviction
-// protection of its pieces, and restores the freed capacity to active stream
-// readers.
-func (p *Pool) ReleasePreload(infoHash metainfo.Hash) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.releasePreloadLocked(infoHash)
-}
-
-// releasePreloadLocked removes a torrent's preload reservation and its piece
-// protection, if it holds one. Must be called with p.mu held.
-func (p *Pool) releasePreloadLocked(infoHash metainfo.Hash) {
-	reservation, ok := p.preloadBudgets[infoHash]
-	if !ok {
-		return
-	}
-	delete(p.preloadBudgets, infoHash)
-	p.clearPreloadProtectionLocked(infoHash, reservation)
-	p.refreshReadaheadLocked(p.readaheadBudget)
-}
-
-// clearPreloadProtectionLocked ends the eviction protection of a reservation's
-// pieces. Must be called with p.mu held.
-func (p *Pool) clearPreloadProtectionLocked(infoHash metainfo.Hash, reservation preloadReservation) {
-	if p.cfg.Registry != nil {
-		p.cfg.Registry.ClearActiveRange(infoHash, reservation.headID)
-		p.cfg.Registry.ClearActiveRange(infoHash, reservation.tailID)
-	}
+	p.dispatchPreloadsLocked()
 }
 
 // readaheadPlan divides the protection budget among active memory-storage
@@ -915,14 +771,14 @@ type readaheadPlan struct {
 // dropped when even one piece per boundary does not. A file whose held preload
 // reservation covers both its head and tail gets no boundaries, because the
 // preload already protects them within that reservation. The remainder is shared
-// evenly by the readers. File-storage and preload readers are excluded because
-// they have their own readahead. Must be called with p.mu held.
+// evenly by the readers. File-storage readers are excluded because they have
+// their own readahead. Must be called with p.mu held.
 func (p *Pool) planReadaheadLocked(totalBudget int64) readaheadPlan {
 	available := p.availableProtectionBudgetLocked(totalBudget)
 	activeCount := 0
 	activeFiles := make(map[readerFileKey]*torrent.File)
 	for _, sr := range p.readers {
-		if sr.active && !sr.isFileStorage && !sr.isPreload {
+		if sr.active && !sr.isFileStorage {
 			activeCount++
 			if sr.file != nil && !p.preloadCoversFileLocked(sr.infoHash, sr.file.Path()) {
 				activeFiles[readerFileKey{infoHash: sr.infoHash, filePath: sr.file.Path()}] = sr.file
@@ -947,13 +803,6 @@ func (p *Pool) planReadaheadLocked(totalBudget int64) readaheadPlan {
 	}
 	plan.share = max(available-boundaryCost, 0) / int64(activeCount)
 	return plan
-}
-
-// preloadCoversFileLocked reports whether a held preload reservation protects
-// both the given file's head and tail. Must be called with p.mu held.
-func (p *Pool) preloadCoversFileLocked(infoHash metainfo.Hash, filePath string) bool {
-	reservation, ok := p.preloadBudgets[infoHash]
-	return ok && reservation.coversBoundaries && reservation.filePath == filePath
 }
 
 // fitFileBoundaries returns the largest per-boundary size, at most half of
@@ -1017,34 +866,7 @@ func filePieceLength(file *torrent.File) int64 {
 // availableProtectionBudgetLocked returns the protection capacity not already
 // reserved by preload ranges. Must be called with p.mu held.
 func (p *Pool) availableProtectionBudgetLocked(totalBudget int64) int64 {
-	for _, reservation := range p.preloadBudgets {
-		totalBudget -= reservation.bytes
-	}
-	return max(totalBudget, 0)
-}
-
-// preloadProtectionCapacity returns the portion of the shared protection
-// budget that speculative preload leases may reserve. The remainder is kept
-// available for playback readers.
-func preloadProtectionCapacity(totalBudget int64) int64 {
-	playbackReserve := min(totalBudget/2, 2*int64(DefaultFileBoundaryBytes))
-	return max(totalBudget-playbackReserve, 0)
-}
-
-// preloadReservation is the protection budget held by a torrent's preload,
-// the file and pieces it protects, and whether it protects both that file's
-// head and tail.
-type preloadReservation struct {
-	bytes            int64
-	coversBoundaries bool
-	filePath         string
-	// headStart, headEnd, tailStart, and tailEnd are the inclusive piece
-	// ranges protected from eviction while the reservation is held.
-	headStart, headEnd, tailStart, tailEnd int
-	// headID and tailID identify the reservation's protected ranges in the
-	// registry. They are drawn from the reader ID sequence, so they never
-	// collide with a reader's own range.
-	headID, tailID uint64
+	return max(totalBudget-p.reservedPreloadBytesLocked(), 0)
 }
 
 type readerFileKey struct {
@@ -1174,9 +996,6 @@ func (p *Pool) registerActiveRangeLocked(infoHash metainfo.Hash, key readerKey, 
 	if file.EndPieceIndex() <= file.BeginPieceIndex() {
 		return
 	}
-	if sr := p.readers[key]; sr != nil && sr.isPreload {
-		return
-	}
 	pieceLength := file.Torrent().Info().PieceLength
 	start, end := computeRange(file, pieceLength, readahead, byteOffset)
 	p.cfg.Registry.SetActiveRange(infoHash, key.readerID, start, end)
@@ -1248,37 +1067,53 @@ func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceM
 func (p *Pool) replaceReaderPrioritiesLocked(sr *streamReader, file *torrent.File, planned []prioritizedPiece) {
 	p.priorityMu.Lock()
 	defer p.priorityMu.Unlock()
+	sr.prioritizedPieces = p.replaceClaimsLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces, fileTorrent(file), planned)
+}
 
-	touched := make(map[priorityPieceKey]struct{}, len(sr.prioritizedPieces)+len(planned))
-	oldTorrent := (*torrent.Torrent)(nil)
-	if sr.file != nil {
-		oldTorrent = sr.file.Torrent()
+// clearReaderPrioritiesLocked removes every priority owned by a reader.
+// sr.priorityMu must be held by the caller.
+func (p *Pool) clearReaderPrioritiesLocked(sr *streamReader) {
+	p.priorityMu.Lock()
+	p.clearClaimsLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces)
+	p.priorityMu.Unlock()
+	sr.prioritizedPieces = nil
+}
+
+// fileTorrent returns file's torrent, or nil for a nil file.
+func fileTorrent(file *torrent.File) *torrent.Torrent {
+	if file == nil {
+		return nil
 	}
+	return file.Torrent()
+}
+
+// replaceClaimsLocked replaces the claims owner holds on the owned pieces of
+// oldTorrent with the planned claims on newTorrent, applies the highest
+// priority still requested for every affected piece, and returns the owner's
+// new claimed pieces, reusing owned. p.priorityMu must be held by the caller.
+func (p *Pool) replaceClaimsLocked(owner any, oldTorrent *torrent.Torrent, owned []int, newTorrent *torrent.Torrent, planned []prioritizedPiece) []int {
+	touched := make(map[priorityPieceKey]struct{}, len(owned)+len(planned))
 	if oldTorrent != nil {
-		for _, index := range sr.prioritizedPieces {
+		for _, index := range owned {
 			key := priorityPieceKey{torrent: oldTorrent, index: index}
 			if claim := p.priorityClaims[key]; claim != nil {
-				delete(claim.owners, sr)
+				delete(claim.owners, owner)
 			}
 			touched[key] = struct{}{}
 		}
 	}
 
-	sr.prioritizedPieces = sr.prioritizedPieces[:0]
-	newTorrent := (*torrent.Torrent)(nil)
-	if file != nil {
-		newTorrent = file.Torrent()
-	}
+	owned = owned[:0]
 	if newTorrent != nil {
 		for _, piece := range planned {
 			key := priorityPieceKey{torrent: newTorrent, index: piece.index}
 			claim := p.priorityClaims[key]
 			if claim == nil {
-				claim = &priorityClaim{owners: make(map[*streamReader]torrent.PiecePriority)}
+				claim = &priorityClaim{owners: make(map[any]torrent.PiecePriority)}
 				p.priorityClaims[key] = claim
 			}
-			claim.owners[sr] = piece.priority
-			sr.prioritizedPieces = append(sr.prioritizedPieces, piece.index)
+			claim.owners[owner] = piece.priority
+			owned = append(owned, piece.index)
 			touched[key] = struct{}{}
 		}
 	}
@@ -1286,37 +1121,24 @@ func (p *Pool) replaceReaderPrioritiesLocked(sr *streamReader, file *torrent.Fil
 	for key := range touched {
 		p.applyPriorityClaimLocked(key)
 	}
+	return owned
 }
 
-// clearReaderPrioritiesLocked removes every priority owned by a reader.
-// sr.priorityMu must be held by the caller.
-func (p *Pool) clearReaderPrioritiesLocked(sr *streamReader) {
-	oldTorrent := (*torrent.Torrent)(nil)
-	if sr.file != nil {
-		oldTorrent = sr.file.Torrent()
-	}
-
-	p.priorityMu.Lock()
-	p.clearPriorityClaimsLocked(sr, oldTorrent)
-	p.priorityMu.Unlock()
-	sr.prioritizedPieces = nil
-}
-
-// clearPriorityClaimsLocked removes a reader from every listed piece claim and
-// immediately reapplies the highest remaining owner priority. p.priorityMu must
-// be held by the caller. Keeping this separate from replacement avoids allocating
-// a temporary touched-piece map on release and eviction paths.
-func (p *Pool) clearPriorityClaimsLocked(sr *streamReader, tor *torrent.Torrent) {
-	for _, index := range sr.prioritizedPieces {
+// clearClaimsLocked removes owner from every owned piece claim on tor and
+// immediately reapplies the highest remaining owner priority. p.priorityMu
+// must be held by the caller. Keeping this separate from replacement avoids
+// allocating a temporary touched-piece map on release and eviction paths.
+func (p *Pool) clearClaimsLocked(owner any, tor *torrent.Torrent, owned []int) {
+	for _, index := range owned {
 		key := priorityPieceKey{torrent: tor, index: index}
 		if claim := p.priorityClaims[key]; claim != nil {
-			delete(claim.owners, sr)
+			delete(claim.owners, owner)
 		}
 		p.applyPriorityClaimLocked(key)
 	}
 }
 
-// applyPriorityClaimLocked applies the highest remaining reader claim for a
+// applyPriorityClaimLocked applies the highest remaining owner claim for a
 // piece. p.priorityMu must be held by the caller.
 func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	claim := p.priorityClaims[key]
@@ -1389,9 +1211,6 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
 	// wrapper.mu — preserving the lock order.
 	sr.lastOffset = newOffset
-	if sr.isPreload {
-		sr.readahead = max(sr.preloadEnd-newOffset, 0)
-	}
 	pieceLength := int64(1)
 	if file != nil && file.Torrent() != nil && file.Torrent().Info() != nil && file.Torrent().Info().PieceLength > 0 {
 		pieceLength = file.Torrent().Info().PieceLength
@@ -1412,12 +1231,12 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 	readahead := sr.readahead
 	var prioEnabled bool
 	var seq uint64
-	if p.cfg.PriorityWindowFraction > 0 && !sr.isFileStorage && !sr.isPreload {
+	if p.cfg.PriorityWindowFraction > 0 && !sr.isFileStorage {
 		seq = sr.prioritySeq.Add(1)
 		prioEnabled = true
 	}
 
-	if !sr.isPreload && p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
+	if p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
 		start, end := computeRange(file, pieceLength, readahead, newOffset)
 		p.cfg.Registry.SetActiveRange(infoHash, key.readerID, start, end)
 	}
@@ -1517,13 +1336,25 @@ func (p *Pool) HasActiveReaders(infoHash metainfo.Hash) bool {
 	return false
 }
 
+// StreamingTorrentCount returns the number of torrents with an active or
+// lingering reader, counting a torrent once however many of its files are
+// being read.
+func (p *Pool) StreamingTorrentCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	torrents := make(map[metainfo.Hash]struct{})
+	for _, sr := range p.readers {
+		torrents[sr.infoHash] = struct{}{}
+	}
+	return len(torrents)
+}
+
 // Close shuts down the pool, closes all readers, and clears active ranges.
 // It is safe to call multiple times.
 func (p *Pool) Close() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.closed {
+		p.mu.Unlock()
 		return
 	}
 	p.closed = true
@@ -1532,16 +1363,20 @@ func (p *Pool) Close() {
 	for key, sr := range p.readers {
 		p.removeReaderLocked(key, sr)
 	}
-	for infoHash, reservation := range p.preloadBudgets {
-		p.clearPreloadProtectionLocked(infoHash, reservation)
+	for infoHash := range p.preloads {
+		p.removePreloadLocked(infoHash)
 	}
-	clear(p.preloadBudgets)
+	p.preloadQueue = nil
+	p.mu.Unlock()
 
+	// Watchers take p.mu to record progress, so wait for them after
+	// releasing it.
+	p.preloadWatchers.Wait()
 	p.logger.Debug("stream pool closed")
 }
 
 // idleGC periodically closes readers that have lingered past the effective
-// linger timeout.
+// linger timeout and expires preloads.
 func (p *Pool) idleGC() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -1552,6 +1387,7 @@ func (p *Pool) idleGC() {
 			return
 		case <-ticker.C:
 			p.closeExpiredLingeringReaders()
+			p.expirePreloads()
 		}
 	}
 }

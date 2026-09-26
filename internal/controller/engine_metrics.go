@@ -6,7 +6,6 @@ package controller
 
 import (
 	"github.com/anacrolix/torrent"
-	"github.com/anacrolix/torrent/metainfo"
 	"github.com/torrplay/torrplay/internal/metrics"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 )
@@ -100,14 +99,13 @@ func (c *Controller) loadedTorrentCounts(client *torrent.Client) (background, on
 	return background, onDemand
 }
 
-// streamingTorrentCount returns the number of torrents with an open playback
-// session, counting a torrent once however many of its files are playing.
+// streamingTorrentCount returns the number of torrents with an active or
+// lingering stream reader, counting a torrent once however many of its files
+// are playing.
 func (c *Controller) streamingTorrentCount() int {
-	c.preloadsMu.Lock()
-	defer c.preloadsMu.Unlock()
-	torrents := make(map[metainfo.Hash]struct{}, len(c.playbackSessions))
-	for key := range c.playbackSessions {
-		torrents[key.infoHash] = struct{}{}
+	pool := c.streamPool.Load()
+	if pool == nil {
+		return 0
 	}
-	return len(torrents)
+	return pool.StreamingTorrentCount()
 }

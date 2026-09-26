@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
-	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -456,57 +455,6 @@ func TestReadAtWrapper_ReadAt(t *testing.T) {
 		}
 	})
 
-	t.Run("fill limit stops readahead", func(t *testing.T) {
-		const (
-			totalSize = 300 * 1024
-			limit     = 1000
-		)
-		data := make([]byte, totalSize)
-		for i := range data {
-			data[i] = byte(i % 251)
-		}
-		s := newMemReader(data)
-		rw := &readAtWrapper{reader: s, fillLimit: limit}
-		consumed := func(r *memReadSeekCloser) int64 { return r.Size() - int64(r.Len()) }
-
-		buf := make([]byte, 10)
-		n, err := rw.ReadAt(buf, 0)
-		if err != nil || n != 10 {
-			t.Fatalf("read failed: %d, %v", n, err)
-		}
-		if !bytes.Equal(buf, data[:10]) {
-			t.Fatal("data mismatch")
-		}
-		if got := consumed(s); got != limit {
-			t.Fatalf("cache refill consumed %d bytes, want %d", got, limit)
-		}
-
-		// A request crossing the limit is still satisfied in full, without
-		// reading ahead beyond what the caller asked for.
-		off := int64(limit - 10)
-		spanBuf := make([]byte, 20)
-		n, err = rw.ReadAt(spanBuf, off)
-		if err != nil || n != 20 {
-			t.Fatalf("spanning read failed: %d, %v", n, err)
-		}
-		if !bytes.Equal(spanBuf, data[off:off+20]) {
-			t.Fatal("data mismatch in limit-spanning read")
-		}
-		if got := consumed(s); got != off+20 {
-			t.Fatalf("limit-spanning read consumed %d bytes, want %d", got, off+20)
-		}
-
-		// Without a limit, a refill reads a full cache buffer.
-		unbounded := newMemReader(data)
-		rw = &readAtWrapper{reader: unbounded}
-		if _, err := rw.ReadAt(buf, 0); err != nil {
-			t.Fatalf("unbounded read failed: %v", err)
-		}
-		if got := consumed(unbounded); got != defaultWrapperBufSize {
-			t.Fatalf("unbounded refill consumed %d bytes, want %d", got, defaultWrapperBufSize)
-		}
-	})
-
 	t.Run("concurrent reads", func(t *testing.T) {
 		data := make([]byte, 1024)
 		for i := range data {
@@ -596,19 +544,18 @@ func TestPool_NewReadSeeker(t *testing.T) {
 		}
 		observed = append(observed, mode)
 	}}}
-	read := func(pool *Pool, mode StorageMode, isPreload bool) {
+	read := func(pool *Pool, mode StorageMode) {
 		t.Helper()
 		wrapper := &readAtWrapper{reader: newMemReader([]byte("abcdef"))}
-		reader := pool.newReadSeeker(wrapper, 6, mode, isPreload)
+		reader := pool.newReadSeeker(wrapper, 6, mode)
 		if _, err := reader.Read(make([]byte, 3)); err != nil {
 			t.Fatalf("read failed: %v", err)
 		}
 	}
 
-	read(pool, FileStorage, false)
-	read(pool, MemoryStorage, false)
-	read(pool, MemoryStorage, true) // preload reads run in the background
-	read(&Pool{}, MemoryStorage, false)
+	read(pool, FileStorage)
+	read(pool, MemoryStorage)
+	read(&Pool{}, MemoryStorage)
 
 	if want := []StorageMode{FileStorage, MemoryStorage}; !slices.Equal(observed, want) {
 		t.Fatalf("expected observed reads %v, got %v", want, observed)
@@ -943,262 +890,6 @@ func TestReadaheadForShare(t *testing.T) {
 	}
 }
 
-// reservePreloadBytes reserves a byte-sized preload budget that protects no
-// file, for tests of the pool's budget accounting.
-func reservePreloadBytes(p *Pool, infoHash metainfo.Hash, size int64) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.reservePreloadLocked(infoHash, preloadReservation{bytes: size})
-}
-
-func TestPool_ReservePreload(t *testing.T) {
-	t.Run("caps aggregate reservations", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		if !p.SetReadaheadBudget(1000) {
-			t.Fatal("expected initial readahead budget to be accepted")
-		}
-		firstHash := metainfo.Hash{1}
-		secondHash := metainfo.Hash{2}
-
-		if !reservePreloadBytes(p, firstHash, 300) {
-			t.Fatal("expected first preload to reserve 300 bytes")
-		}
-		if reservePreloadBytes(p, secondHash, 300) {
-			t.Fatal("expected a second 300-byte preload to exceed the 200-byte remaining preload share")
-		}
-		if !reservePreloadBytes(p, secondHash, 200) {
-			t.Fatal("expected a second preload to reserve the remaining 200 bytes")
-		}
-
-		p.ReleasePreload(secondHash)
-		if !reservePreloadBytes(p, firstHash, 400) {
-			t.Fatal("expected released preload capacity to become available to a replacement")
-		}
-		p.mu.Lock()
-		available := p.availableProtectionBudgetLocked(p.readaheadBudget)
-		boundaryBytes := p.boundaryBytesPerFileLocked(available, 1)
-		p.mu.Unlock()
-		if available != 600 || boundaryBytes != 150 {
-			t.Fatalf("expected playback to retain 600 bytes with 150-byte boundaries, got available=%d boundary=%d", available, boundaryBytes)
-		}
-	})
-
-	t.Run("failed replacement releases the reservation", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		require.True(t, p.SetReadaheadBudget(1000))
-		infoHash := metainfo.Hash{1}
-		require.True(t, reservePreloadBytes(p, infoHash, 300))
-
-		require.False(t, reservePreloadBytes(p, infoHash, 600))
-		p.mu.Lock()
-		_, held := p.preloadBudgets[infoHash]
-		p.mu.Unlock()
-		assert.False(t, held, "a reservation that no longer fits must not keep the old one")
-	})
-
-	t.Run("protects reserved pieces until release", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		// Ten 64-byte pieces.
-		to, file := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-		reg := newProtectionRegistry()
-		pool := New(Config{Registry: reg, Logger: testLogger()})
-		defer pool.Close()
-		require.True(t, pool.SetReadaheadBudget(1<<20))
-		protected := func() []activeRange {
-			reg.mu.Lock()
-			defer reg.mu.Unlock()
-			ranges := make([]activeRange, 0, len(reg.ranges))
-			for _, r := range reg.ranges {
-				ranges = append(ranges, r)
-			}
-			slices.SortFunc(ranges, func(a, b activeRange) int { return a.startPiece - b.startPiece })
-			return ranges
-		}
-
-		require.True(t, pool.ReservePreload(file, 100, 600, 640))
-		assert.Equal(t, []activeRange{{startPiece: 0, endPiece: 1}, {startPiece: 9, endPiece: 9}}, protected())
-		pool.mu.Lock()
-		assert.Equal(t, int64(3*64), pool.preloadBudgets[to.InfoHash()].bytes)
-		pool.mu.Unlock()
-
-		// A replacement reuses the reservation's ranges, and an empty tail
-		// repeats the head.
-		require.True(t, pool.ReservePreload(file, 64, 0, 0))
-		assert.Equal(t, []activeRange{{startPiece: 0, endPiece: 0}, {startPiece: 0, endPiece: 0}}, protected())
-
-		pool.ReleasePreload(to.InfoHash())
-		assert.Empty(t, protected())
-
-		require.True(t, pool.ReservePreload(file, 64, 0, 0))
-		pool.Close()
-		assert.Empty(t, protected(), "closing the pool must end preload protection")
-	})
-
-	t.Run("rejects a file without piece metadata", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		require.True(t, p.SetReadaheadBudget(1<<20))
-		assert.False(t, p.ReservePreload(&torrent.File{}, 64, 0, 0))
-	})
-
-	t.Run("replaces file boundaries", func(t *testing.T) {
-		const (
-			budget      = int64(32 << 20)
-			pieceLength = int64(1 << 20)
-			preload     = int64(16 << 20)
-		)
-		length := int64(8 << 30)
-		info := metainfo.Info{
-			Name:        "movie.mkv",
-			PieceLength: pieceLength,
-			Length:      length,
-			Pieces:      make([]byte, length/pieceLength*sha1.Size),
-		}
-		infoBytes, err := bencode.Marshal(info)
-		require.NoError(t, err)
-		c := newTestTorrentClient(t)
-		to, file := addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
-
-		reg := newProtectionRegistry()
-		pool := New(Config{Registry: reg, Logger: testLogger()})
-		defer pool.Close()
-		require.True(t, pool.SetReadaheadBudget(budget))
-		_, release, err := pool.Acquire(file, MemoryStorage)
-		require.NoError(t, err)
-		defer release()
-
-		readahead := func() int64 {
-			pool.mu.Lock()
-			defer pool.mu.Unlock()
-			for _, sr := range pool.readers {
-				return sr.readahead
-			}
-			return 0
-		}
-		boundaries := func() int {
-			reg.mu.Lock()
-			defer reg.mu.Unlock()
-			return len(reg.boundaries)
-		}
-		require.Equal(t, 1, boundaries())
-
-		// A preload for another file of the torrent protects nothing this reader
-		// needs, so the reader keeps its boundaries and pays for the reservation.
-		pool.mu.Lock()
-		require.True(t, pool.reservePreloadLocked(to.InfoHash(), preloadReservation{bytes: preload, coversBoundaries: true, filePath: "other.mkv"}))
-		pool.mu.Unlock()
-		assert.Equal(t, 1, boundaries())
-		withOtherPreload := readahead()
-
-		// A head-only preload of the playing file leaves its tail unprotected, so
-		// the reader keeps its boundaries.
-		require.True(t, pool.ReservePreload(file, preload, 0, 0))
-		assert.Equal(t, 1, boundaries(), "a head-only preload must not suppress the tail boundary")
-
-		// A preload for the playing file already protects its head and tail.
-		const boundary = preload / 2
-		require.True(t, pool.ReservePreload(file, boundary, length-boundary, length))
-		assert.Zero(t, boundaries(), "the reservation replaces the reader's boundaries")
-		assert.Greater(t, readahead(), withOtherPreload, "boundaries must not be charged twice")
-
-		pool.ReleasePreload(to.InfoHash())
-		assert.Equal(t, 1, boundaries(), "releasing the reservation restores the reader's boundaries")
-	})
-}
-
-func TestPreloadCoversBoundaries(t *testing.T) {
-	tests := []struct {
-		name                        string
-		headEnd, tailStart, tailEnd int64
-		want                        bool
-	}{
-		{name: "head and tail", headEnd: 10, tailStart: 90, tailEnd: 100, want: true},
-		{name: "head only", headEnd: 10, want: false},
-		{name: "head spans whole file", headEnd: 100, want: true},
-		{name: "tail short of file end", headEnd: 10, tailStart: 80, tailEnd: 90, want: false},
-		{name: "nothing protected", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, preloadCoversBoundaries(100, tt.headEnd, tt.tailStart, tt.tailEnd))
-		})
-	}
-}
-
-// TestPool_PreloadCapacity verifies that PreloadCapacity keeps a playback reserve.
-func TestPool_PreloadCapacity(t *testing.T) {
-	const mib = int64(1 << 20)
-	tests := []struct {
-		budget, want int64
-	}{
-		{budget: 0, want: 0},
-		{budget: 32 * mib, want: 16 * mib},   // half kept for playback
-		{budget: 256 * mib, want: 240 * mib}, // reserve capped at two boundaries
-	}
-	for _, tt := range tests {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		if !p.SetReadaheadBudget(tt.budget) {
-			t.Fatalf("budget %d rejected", tt.budget)
-		}
-		if got := p.PreloadCapacity(); got != tt.want {
-			t.Errorf("PreloadCapacity() with budget %d = %d, want %d", tt.budget, got, tt.want)
-		}
-		// The whole capacity must be reservable by a single preload.
-		if !reservePreloadBytes(p, metainfo.Hash{1}, tt.want) {
-			t.Errorf("reserving %d bytes failed", tt.want)
-		}
-	}
-}
-
-// TestPool_ReleasePreload verifies that ReleasePreload restores readahead for concurrent readers.
-func TestPool_ReleasePreload(t *testing.T) {
-	p := newTestPool(t, Config{Logger: testLogger()})
-	const totalBudget = int64(1200)
-	if !p.SetReadaheadBudget(totalBudget) {
-		t.Fatal("expected initial readahead budget to be accepted")
-	}
-
-	for i := uint64(1); i <= 3; i++ {
-		p.readers[readerKey{infoHash: metainfo.Hash{byte(i)}, filePath: "f", readerID: i}] = &streamReader{
-			active:   true,
-			infoHash: metainfo.Hash{byte(i)},
-			readerID: i,
-			reader:   &mockReader{},
-		}
-	}
-
-	preloadHash := metainfo.Hash{9}
-	if !reservePreloadBytes(p, preloadHash, 600) {
-		t.Fatal("expected 600-byte preload reservation")
-	}
-	for _, sr := range p.readers {
-		if sr.readahead != 160 {
-			t.Fatalf("expected preload-reduced readahead 160, got %d", sr.readahead)
-		}
-	}
-
-	p.ReleasePreload(preloadHash)
-	for _, sr := range p.readers {
-		if sr.readahead != 320 {
-			t.Fatalf("expected restored readahead 320, got %d", sr.readahead)
-		}
-	}
-}
-
-// TestPreloadReadaheadFunc verifies that preloadReadaheadFunc stops at the end of the range.
-func TestPreloadReadaheadFunc(t *testing.T) {
-	readahead := preloadReadaheadFunc(1024)
-
-	if got := readahead(torrent.ReadaheadContext{CurrentPos: 256}); got != 768 {
-		t.Fatalf("expected 768 bytes remaining, got %d", got)
-	}
-	if got := readahead(torrent.ReadaheadContext{CurrentPos: 1024}); got != 0 {
-		t.Fatalf("expected no readahead at range end, got %d", got)
-	}
-	if got := readahead(torrent.ReadaheadContext{CurrentPos: 2048}); got != 0 {
-		t.Fatalf("expected no readahead past range end, got %d", got)
-	}
-}
-
 func TestPool_Release(t *testing.T) {
 	t.Run("starts lingering", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
@@ -1220,31 +911,6 @@ func TestPool_Release(t *testing.T) {
 		}
 		if sr.lingerSince.IsZero() {
 			t.Fatal("expected lingerSince to be set")
-		}
-	})
-
-	t.Run("removes preload reader", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		infoHash := metainfo.Hash{1}
-		readerCtx, cancel := context.WithCancel(context.Background())
-		sr := &streamReader{
-			active:    true,
-			cancel:    cancel,
-			infoHash:  infoHash,
-			isPreload: true,
-			reader:    &mockReader{},
-			readerID:  1,
-		}
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
-		p.readers[key] = sr
-
-		p.release(infoHash, "f", 1)
-
-		if _, ok := p.readers[key]; ok {
-			t.Fatal("expected preload reader to be removed instead of pooled idle")
-		}
-		if !errors.Is(readerCtx.Err(), context.Canceled) {
-			t.Fatalf("expected preload reader context cancellation, got %v", readerCtx.Err())
 		}
 	})
 
@@ -1481,32 +1147,6 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 		}
 		if _, lingering := p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}]; lingering {
 			t.Fatal("expected competing lingering reader to be closed")
-		}
-	})
-
-	t.Run("rejects preload overcommit", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		if !p.SetReadaheadBudget(1000) {
-			t.Fatal("expected initial readahead budget to be accepted")
-		}
-		infoHash := metainfo.Hash{1}
-		if !reservePreloadBytes(p, infoHash, 400) {
-			t.Fatal("expected 400-byte preload reservation")
-		}
-
-		if p.SetReadaheadBudget(600) {
-			t.Fatal("expected budget reduction to reject an existing 400-byte reservation")
-		}
-		p.mu.Lock()
-		budgetAfterRejection := p.readaheadBudget
-		availableAfterRejection := p.availableProtectionBudgetLocked(p.readaheadBudget)
-		p.mu.Unlock()
-		if budgetAfterRejection != 1000 || availableAfterRejection != 600 {
-			t.Fatalf("rejected update changed the pool: budget=%d available=%d", budgetAfterRejection, availableAfterRejection)
-		}
-		p.ReleasePreload(infoHash)
-		if !p.SetReadaheadBudget(600) {
-			t.Fatal("expected budget reduction after releasing preload reservation")
 		}
 	})
 }
@@ -1791,47 +1431,6 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 			t.Fatalf("closing without a budget should not redistribute active reader readahead, got %d", remaining.readahead)
 		}
 	})
-}
-
-func TestPoolPreloadClosesLingeringReaderOnlyWhileReading(t *testing.T) {
-	p := newTestPool(t, Config{Logger: testLogger()})
-	infoHash := metainfo.Hash{7}
-	mr := &mockReader{readahead: 8000}
-	sr := &streamReader{
-		infoHash:  infoHash,
-		readerID:  1,
-		readahead: 8000,
-		reader:    mr,
-	}
-	p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
-	p.readaheadBudget = 10000
-
-	// A reservation alone, such as one a completed preload keeps for its
-	// cache, downloads nothing, so the reader may keep lingering.
-	preloadHash := metainfo.Hash{8}
-	if !reservePreloadBytes(p, preloadHash, 5000) {
-		t.Fatal("expected 5000-byte preload reservation")
-	}
-	if sr.readahead != 8000 || mr.getReadahead() != 8000 {
-		t.Fatalf("a held reservation must not stop the lingering reader, got reader=%d underlying=%d", sr.readahead, mr.getReadahead())
-	}
-
-	// A preload that is reading competes for bandwidth, so the lingering
-	// reader closes.
-	p.mu.Lock()
-	p.readers[readerKey{infoHash: preloadHash, filePath: "f", readerID: 2}] = &streamReader{
-		active:    true,
-		infoHash:  preloadHash,
-		isPreload: true,
-		readerID:  2,
-		reader:    &mockReader{},
-	}
-	p.closeLingeringReadersLocked()
-	_, lingering := p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}]
-	p.mu.Unlock()
-	if lingering || !mr.closed.Load() {
-		t.Fatalf("a reading preload should close the lingering reader, got lingering=%v closed=%v", lingering, mr.closed.Load())
-	}
 }
 
 func TestPoolPriorityWindowFraction(t *testing.T) {
@@ -2408,7 +2007,7 @@ func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 			claims := make([]*priorityClaim, claimCount)
 			for i := range sr.prioritizedPieces {
 				sr.prioritizedPieces[i] = i
-				claims[i] = &priorityClaim{owners: make(map[*streamReader]torrent.PiecePriority, 1)}
+				claims[i] = &priorityClaim{owners: make(map[any]torrent.PiecePriority, 1)}
 			}
 			refill := func() {
 				sr.prioritizedPieces = sr.prioritizedPieces[:claimCount]

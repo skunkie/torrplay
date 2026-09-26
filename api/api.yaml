@@ -2260,7 +2260,7 @@ components:
         completed_bytes:
           type: integer
           format: int64
-          description: Number of bytes completed toward the target, including the final count when playback supersedes preloading. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
+          description: Number of bytes completed toward the target, including the final count of a preload that failed or was evicted. When readiness applies to an already complete torrent rather than a selected file, this is the torrent size.
           minimum: 0
           example: 10485760
         download_rate:
@@ -2272,7 +2272,7 @@ components:
         file_index:
           type: integer
           minimum: -1
-          description: 0-based index of the file currently preloaded or held by playback, or -1 when idle, superseded, failed, or when readiness applies to the fully downloaded torrent rather than one file.
+          description: 0-based index of the file currently preloaded, or -1 when idle, evicted, failed, or when readiness applies to the fully downloaded torrent rather than one file.
           example: 0
         file_path:
           type: string
@@ -2285,13 +2285,14 @@ components:
           example: 0.33
         status:
           type: string
-          description: Current preload status. A failed preload stopped with an error before reaching its target and reports the progress it had made.
+          description: Current preload status. A queued preload waits for a free preload slot or for memory, and a preloading one is downloading. A failed preload could not reserve memory, and an evicted preload gave up its memory to another preload or to a smaller memory limit; both report the progress they had made.
           enum:
+            - "evicted"
             - "failed"
             - "idle"
             - "preloading"
+            - "queued"
             - "ready"
-            - "superseded"
           example: "preloading"
         target_bytes:
           type: integer

@@ -20,9 +20,10 @@ interface TorrentPlayerDialogProps {
 }
 
 // isInactivePreloadStatus reports whether the server has stopped preloading, so
-// the player should stop polling and play without waiting.
+// the player should stop polling and play without waiting. A queued preload is
+// still active: it starts once a preload slot or memory frees up.
 function isInactivePreloadStatus(status: PreloadResponse['status']): boolean {
-  return status === 'failed' || status === 'idle' || status === 'superseded';
+  return status === 'evicted' || status === 'failed' || status === 'idle';
 }
 
 function computeVideoFiles(torrent: Torrent | null): { videoFiles: TorrentFile[], selectedFile: TorrentFile | null } {

@@ -78,17 +78,13 @@ type controllerRuntimeConfig struct {
 	configureClient  func(*torrent.ClientConfig)
 	fetchTrackers    func(context.Context, *httpclient.Client) ([][]string, error)
 	gotInfoTimeout   time.Duration
-	// playbackGracePeriod keeps a playback session open between HTTP range
-	// requests. Zero closes it as soon as its last request ends.
-	playbackGracePeriod time.Duration
 }
 
 func defaultControllerRuntimeConfig() controllerRuntimeConfig {
 	return controllerRuntimeConfig{
-		clientCloseDelay:    500 * time.Millisecond,
-		fetchTrackers:       utils.FetchTrackers,
-		gotInfoTimeout:      30 * time.Second,
-		playbackGracePeriod: defaultPlaybackGracePeriod,
+		clientCloseDelay: 500 * time.Millisecond,
+		fetchTrackers:    utils.FetchTrackers,
+		gotInfoTimeout:   30 * time.Second,
 	}
 }
 
@@ -130,7 +126,6 @@ type Controller struct {
 	metrics              *metrics.Metrics
 	mu                   sync.RWMutex
 	pieceCompletion      piececompletion.DeletablePieceCompletion
-	playbackSessions     map[playbackKey]*playbackSession
 	port                 int
 	posterCleanupDone    chan struct{}
 	posterCleanupTicker  *time.Ticker
@@ -139,28 +134,13 @@ type Controller struct {
 	posterWorkersMu      sync.Mutex
 	posterWorkersStopped bool
 	postersPath          string
-	// preloadPlaybackCount is the number of open playback sessions. Preload
-	// dispatch is paused while it is positive.
-	preloadPlaybackCount int
-	preloadQueue         []*preloadTask
-	preloadReadyTTL      time.Duration
-	// preloadRequests counts preload tasks created by explicit requests. A
-	// playback session that sees it change knows the viewer has moved on.
-	preloadRequests  uint64
-	preloadSnapshots sync.Map
-	// preloadWorkers are the tasks whose workers are running, including
-	// cancelled ones that have not exited yet. Each holds a scheduling slot
-	// until its worker exits. Guarded by preloadsMu.
-	preloadWorkers   []*preloadTask
-	preloads         sync.Map
-	preloadsMu       sync.Mutex
-	profilerAddr     string
-	profilerListener net.Listener
-	profilerMu       sync.Mutex
-	profilerServer   *http.Server
-	router           *chi.Mux
-	runtimeConfig    controllerRuntimeConfig
-	settings         atomic.Pointer[api.Settings]
+	profilerAddr         string
+	profilerListener     net.Listener
+	profilerMu           sync.Mutex
+	profilerServer       *http.Server
+	router               *chi.Mux
+	runtimeConfig        controllerRuntimeConfig
+	settings             atomic.Pointer[api.Settings]
 	// settingsUpdateMu serializes settings updates from read through apply.
 	settingsUpdateMu sync.Mutex
 	shutdownOnce     sync.Once
@@ -197,10 +177,6 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	if runtimeConfig.clientCloseDelay < 0 {
 		runtimeConfig.clientCloseDelay = defaults.clientCloseDelay
 	}
-	// A zero grace period intentionally closes playback sessions immediately.
-	if runtimeConfig.playbackGracePeriod < 0 {
-		runtimeConfig.playbackGracePeriod = defaults.playbackGracePeriod
-	}
 
 	dbSettings, err := dbClient.GetSettings()
 	if err != nil {
@@ -235,7 +211,6 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
-		preloadReadyTTL:   defaultPreloadReadyTTL,
 		profilerAddr:      profilerAddress,
 		speedMonitor:      newSpeedMonitor(),
 		startedAt:         time.Now(),
@@ -696,7 +671,6 @@ func (c *Controller) Shutdown() {
 		}
 
 		_ = c.dlna.Stop()
-		c.cancelAllPreloads()
 		if pool := c.streamPool.Load(); pool != nil {
 			pool.Close()
 		}
@@ -958,9 +932,6 @@ func (c *Controller) configureTorrentClient() error {
 
 	if oldClient != nil {
 		c.torrentClientUnavailable.Store(true)
-		// Preload tasks reference the outgoing client, pool, and storage. Retire
-		// them before those close so none keeps reporting a vanished cache.
-		c.cancelAllPreloads()
 		_ = oldClient.Close()
 		<-oldClient.Closed()
 		if c.runtimeConfig.clientCloseDelay > 0 {
@@ -1042,11 +1013,7 @@ func (c *Controller) configureTorrentClient() error {
 		},
 		Registry: storageClient,
 	})
-	if !pool.SetReadaheadBudget(readaheadBudget(*currentSettings.MaxMemory)) {
-		pool.Close()
-		_ = client.Close()
-		return errors.New("failed to set initial stream readahead budget")
-	}
+	pool.SetReadaheadBudget(readaheadBudget(*currentSettings.MaxMemory))
 	// Evicted pieces must stop counting as downloaded, or a torrent read in
 	// full looks complete to the client, which then drops its peers.
 	storageClient.SetEvictionHandler(memstorage.ClientEvictionHandler(client))

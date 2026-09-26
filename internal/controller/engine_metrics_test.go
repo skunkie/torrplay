@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 )
 
 func TestEngineStatsKeepCountersAcrossClientReconfiguration(t *testing.T) {
@@ -52,28 +53,26 @@ func TestEngineStatsKeepCountersAcrossClientReconfiguration(t *testing.T) {
 	assert.Contains(t, string(body), "torrplay_torrent_banned_peers 0")
 }
 
-func TestEngineStatsCountTorrentsWithOpenPlaybackSessions(t *testing.T) {
+func TestEngineStatsCountTorrentsWithStreamReaders(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 	assert.Zero(t, ctrl.engineStats().StreamingTorrents)
 
-	series, movie := metainfo.Hash{1}, metainfo.Hash{2}
-	ctrl.preloadsMu.Lock()
-	sessions := []*playbackSession{
-		ctrl.beginPlaybackLocked(series, "episode1.mkv"),
-		ctrl.beginPlaybackLocked(series, "episode2.mkv"),
-		ctrl.beginPlaybackLocked(movie, "movie.mkv"),
-		// A second request for the same file joins its session.
-		ctrl.beginPlaybackLocked(movie, "movie.mkv"),
+	series := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+	movie := addSyntheticTorrent(t, ctrl, 1<<30+1, 1<<20)
+	pool := ctrl.streamPool.Load()
+	releases := make([]func(), 0, 3)
+	for _, file := range []*torrent.File{series.Files()[0], series.Files()[0], movie.Files()[0]} {
+		_, release, err := pool.Acquire(file, stream.MemoryStorage)
+		require.NoError(t, err)
+		releases = append(releases, release)
 	}
-	ctrl.preloadsMu.Unlock()
 	assert.Equal(t, 2, ctrl.engineStats().StreamingTorrents, "each torrent counts once")
 
-	ctrl.preloadsMu.Lock()
-	for _, session := range sessions {
-		ctrl.closePlaybackSessionLocked(session)
+	for _, release := range releases {
+		release()
 	}
-	ctrl.preloadsMu.Unlock()
+	pool.Close()
 	assert.Zero(t, ctrl.engineStats().StreamingTorrents)
 }
 

@@ -5,7 +5,6 @@
 package stream
 
 import (
-	"context"
 	"crypto/sha1"
 	"errors"
 	"fmt"
@@ -82,19 +81,6 @@ func createTestMetaInfo(t *testing.T) *metainfo.MetaInfo {
 		InfoBytes: infoBytes,
 	}
 	return mi
-}
-
-func createMultiPieceTestMetaInfo(t *testing.T) *metainfo.MetaInfo {
-	t.Helper()
-	info := &metainfo.Info{
-		Name:        "test-torrent",
-		PieceLength: 64,
-		Length:      640,
-		Pieces:      make([]byte, 200), // 10 pieces * 20-byte SHA1 hashes
-	}
-	infoBytes, err := bencode.Marshal(info)
-	require.NoError(t, err)
-	return &metainfo.MetaInfo{InfoBytes: infoBytes}
 }
 
 func createMisalignedFileTestMetaInfo(t *testing.T) *metainfo.MetaInfo {
@@ -232,7 +218,7 @@ func TestPool_Acquire(t *testing.T) {
 		_, f := addTestTorrent(t, c)
 		pool := New(Config{Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))})
 		defer pool.Close()
-		require.True(t, pool.SetReadaheadBudget(1024*1024))
+		pool.SetReadaheadBudget(1024 * 1024)
 
 		_, releaseFirst, err := pool.Acquire(f, MemoryStorage)
 		require.NoError(t, err)
@@ -258,7 +244,7 @@ func TestPool_Acquire(t *testing.T) {
 			LingerTimeout: 30 * time.Second,
 		})
 		t.Cleanup(pool.Close)
-		require.True(t, pool.SetReadaheadBudget(1024*1024))
+		pool.SetReadaheadBudget(1024 * 1024)
 
 		_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
 		require.NoError(t, err)
@@ -496,160 +482,6 @@ func TestPoolStaleReaderCannotMoveLingeringReader(t *testing.T) {
 	pool.mu.Lock()
 	assert.Zero(t, sr.lastOffset)
 	pool.mu.Unlock()
-}
-
-func TestPool_AcquirePreloadContext(t *testing.T) {
-	t.Run("purges reader from replaced torrent", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		metaInfo := createTestMetaInfo(t)
-		oldTorrent, oldFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
-		pool := New(Config{
-			Logger:        slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			LingerTimeout: 30 * time.Second,
-		})
-		t.Cleanup(pool.Close)
-		require.True(t, pool.SetReadaheadBudget(1024*1024))
-
-		_, releaseOld, err := pool.Acquire(oldFile, MemoryStorage)
-		require.NoError(t, err)
-		releaseOld()
-
-		oldTorrent.Drop()
-		<-oldTorrent.Closed()
-		newTorrent, newFile := addTestTorrentFromMetaInfo(t, c, metaInfo)
-		require.NotSame(t, oldTorrent, newTorrent)
-
-		_, releasePreload, err := pool.AcquirePreloadContext(
-			context.Background(), newFile, MemoryStorage, 0, newFile.Length(),
-		)
-		require.NoError(t, err)
-
-		pool.mu.Lock()
-		require.Len(t, pool.readers, 1)
-		for _, sr := range pool.readers {
-			assert.True(t, sr.isPreload)
-			assert.Same(t, newTorrent, sr.file.Torrent())
-		}
-		pool.mu.Unlock()
-
-		releasePreload()
-		assert.False(t, pool.HasReaders(newTorrent.InfoHash()))
-	})
-
-	t.Run("uses bounded readahead without speculative protection", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-		reg := &testRegistry{}
-		pool := New(Config{
-			Logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			Registry: reg,
-		})
-		pool.SetReadaheadBudget(1024 * 1024)
-
-		const preloadRange = int64(256)
-		_, release, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, preloadRange)
-		require.NoError(t, err)
-		defer release()
-		defer pool.Close()
-
-		pool.mu.Lock()
-		var key readerKey
-		var preloadReader *streamReader
-		for candidateKey, sr := range pool.readers {
-			key = candidateKey
-			preloadReader = sr
-			assert.True(t, sr.isPreload)
-			assert.Equal(t, preloadRange, sr.readahead)
-			assert.Equal(t, preloadRange, sr.wrapper.fillLimit)
-		}
-		pool.mu.Unlock()
-		require.NotNil(t, preloadReader)
-
-		// Rebalancing playback readers must not erase the preload's reserved,
-		// range-sized scheduling window.
-		pool.SetReadaheadBudget(2 * 1024 * 1024)
-		pool.mu.Lock()
-		assert.Equal(t, preloadRange, preloadReader.readahead)
-		pool.mu.Unlock()
-
-		// Preload readers rely on their range-sized readahead instead of piece
-		// priority claims.
-		preloadReader.priorityMu.Lock()
-		assert.Empty(t, preloadReader.prioritizedPieces)
-		preloadReader.priorityMu.Unlock()
-		pool.priorityMu.Lock()
-		assert.Empty(t, pool.priorityClaims)
-		pool.priorityMu.Unlock()
-
-		// Reader movement shrinks readahead without claiming priorities. Cache
-		// protection remains controller-owned.
-		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, 64)
-		pool.mu.Lock()
-		assert.Equal(t, preloadRange-64, preloadReader.readahead)
-		pool.mu.Unlock()
-		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, preloadRange)
-		pool.priorityMu.Lock()
-		assert.Empty(t, pool.priorityClaims)
-		pool.priorityMu.Unlock()
-		assert.Zero(t, reg.setCalls.Load(), "controller owns preload range protection")
-		assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
-	})
-
-	t.Run("closes a lingering playback reader", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-		pool := New(Config{
-			Logger: slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		})
-		defer pool.Close()
-		pool.SetReadaheadBudget(1024 * 1024)
-
-		_, playbackRelease, err := pool.AcquireContext(context.Background(), f, MemoryStorage)
-		require.NoError(t, err)
-		playbackRelease()
-		pool.mu.Lock()
-		require.Len(t, pool.readers, 1)
-		pool.mu.Unlock()
-
-		_, preloadRelease, err := pool.AcquirePreloadContext(context.Background(), f, MemoryStorage, 0, 256)
-		require.NoError(t, err)
-
-		pool.mu.Lock()
-		require.Len(t, pool.readers, 1, "a running preload must close the lingering playback reader")
-		for _, sr := range pool.readers {
-			assert.True(t, sr.isPreload)
-			assert.True(t, sr.active)
-		}
-		pool.mu.Unlock()
-
-		// A preload reader closes on release instead of lingering.
-		preloadRelease()
-		pool.mu.Lock()
-		assert.Empty(t, pool.readers)
-		pool.mu.Unlock()
-	})
-
-	t.Run("file storage uses requested readahead", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-		pool := New(Config{
-			Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-			FileReadaheadBytes: 50 * 1024 * 1024,
-		})
-		defer pool.Close()
-
-		const preloadRange = int64(192)
-		_, release, err := pool.AcquirePreloadContext(context.Background(), f, FileStorage, 64, 64+preloadRange)
-		require.NoError(t, err)
-		defer release()
-
-		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		for _, sr := range pool.readers {
-			assert.True(t, sr.isPreload)
-			assert.Equal(t, preloadRange, sr.readahead)
-		}
-	})
 }
 
 func TestPool_ReaderPositions(t *testing.T) {
@@ -1064,7 +896,7 @@ func TestPoolProtectedPiecesFitReadaheadBudget(t *testing.T) {
 				reg := newProtectionRegistry()
 				pool := New(Config{Registry: reg, Logger: testLogger()})
 				defer pool.Close()
-				require.True(t, pool.SetReadaheadBudget(budget))
+				pool.SetReadaheadBudget(budget)
 
 				for range readers {
 					_, release, err := pool.Acquire(file, MemoryStorage)
@@ -1080,7 +912,7 @@ func TestPoolProtectedPiecesFitReadaheadBudget(t *testing.T) {
 					offset += 1 << 30
 				}
 				pool.mu.Unlock()
-				require.True(t, pool.SetReadaheadBudget(budget))
+				pool.SetReadaheadBudget(budget)
 
 				pieces := reg.protectedPieces()
 				reg.mu.Lock()

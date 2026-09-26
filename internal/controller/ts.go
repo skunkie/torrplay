@@ -24,6 +24,7 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
+	"github.com/torrplay/torrplay/pkg/stream"
 )
 
 func (c *Controller) TSCache(w http.ResponseWriter, r *http.Request) {
@@ -697,39 +698,26 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 		resp.LoadedSize = stats.CompletedSize
 		resp.PreloadSize = stats.CompletedSize
 		resp.PreloadedBytes = stats.CompletedSize
-		c.preloadsMu.Lock()
-		preload := c.currentPreloadLocked(to.InfoHash())
-		if preload == nil {
-			preload = c.playbackLeaseLocked(to.InfoHash())
-		}
-		snapshotValue, snapshotted := c.preloadSnapshots.Load(to.InfoHash())
-		c.preloadsMu.Unlock()
+		preload, hasPreload := c.preloadStatus(to.InfoHash())
 
 		switch {
 		case to.Info() == nil:
 			resp.Stat = tsStatGettingInfo
 			resp.StatString = "Torrent getting info"
-		case preload != nil && preload.ready.Load():
-			// TorrServer reports a finished preload as a working torrent.
-			resp.TorrentSize = to.Length()
-			resp.Stat = tsStatWorking
-			resp.StatString = "Torrent working"
-			resp.PreloadSize = preload.targetBytes
-			resp.PreloadedBytes = preload.targetBytes
-		case preload != nil:
+		case hasPreload && (preload.State == stream.PreloadQueued || preload.State == stream.PreloadRunning):
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatPreload
 			resp.StatString = "Torrent preload"
-			resp.PreloadSize = preload.targetBytes
-			resp.PreloadedBytes = preload.progressBytes()
-		case snapshotted:
+			resp.PreloadSize = preload.TargetBytes
+			resp.PreloadedBytes = preload.CompletedBytes
+		case hasPreload:
+			// TorrServer reports a finished preload, and one that ended early,
+			// as a working torrent.
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatWorking
 			resp.StatString = "Torrent working"
-			if snapshot, isSnapshot := snapshotValue.(*preloadStatusSnapshot); isSnapshot && snapshot != nil {
-				resp.PreloadSize = snapshot.targetBytes
-				resp.PreloadedBytes = snapshot.completedBytes
-			}
+			resp.PreloadSize = preload.TargetBytes
+			resp.PreloadedBytes = preload.CompletedBytes
 		default:
 			resp.TorrentSize = to.Length()
 			resp.Stat = tsStatWorking
@@ -758,7 +746,7 @@ func (c *Controller) startPreloadByFileIndex(to *torrent.Torrent, fileIndex *int
 		idx = 0
 	}
 
-	c.startPreload(to, files[idx], idx)
+	c.startPreload(to, files[idx])
 }
 
 func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int, error) {

@@ -8,12 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/api"
+	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
 )
 
@@ -23,7 +24,7 @@ func preloadCapacityFor(t *testing.T, maxMemory int64) int64 {
 	t.Helper()
 	pool := stream.New(stream.Config{})
 	defer pool.Close()
-	require.True(t, pool.SetReadaheadBudget(readaheadBudget(maxMemory)))
+	pool.SetReadaheadBudget(readaheadBudget(maxMemory))
 	return pool.PreloadCapacity()
 }
 
@@ -61,26 +62,26 @@ func TestUpdateSettingsResizesMemoryInPlace(t *testing.T) {
 	}
 }
 
-func TestUpdateSettingsMemoryShrinkCancelsPreloadsThatNoLongerFit(t *testing.T) {
+func TestUpdateSettingsMemoryShrinkEvictsPreloadsThatNoLongerFit(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
 	require.Equal(t, http.StatusNoContent, patchMaxMemory(t, ctrl, 512<<20).Recorder.Code)
 	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
-	preload := ctrl.startPreload(to, to.Files()[0], 0)
-	require.NotNil(t, preload)
-	require.Eventually(t, func() bool {
-		ctrl.preloadsMu.Lock()
-		defer ctrl.preloadsMu.Unlock()
-		return preload.active
-	}, 5*time.Second, 10*time.Millisecond, "the preload must be dispatched and hold its reservation")
+	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	preload, ok := ctrl.preloadStatus(to.InfoHash())
+	require.True(t, ok)
+	require.Equal(t, stream.PreloadRunning, preload.State, "the preload must run and hold its reservation")
 	const smaller = 32 << 20
-	require.Greater(t, preload.reserveBytes, preloadCapacityFor(t, smaller), "the reservation must not fit the smaller budget")
+	// Its whole 1 MiB pieces make the reservation equal to the target.
+	require.Greater(t, preload.TargetBytes, preloadCapacityFor(t, smaller), "the reservation must not fit the smaller budget")
 
 	rr := patchMaxMemory(t, ctrl, smaller).Recorder
 	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
-	_, ok := ctrl.preloads.Load(to.InfoHash())
-	assert.False(t, ok, "a preload that no longer fits must be cancelled")
+	preload, ok = ctrl.preloadStatus(to.InfoHash())
+	require.True(t, ok)
+	assert.Equal(t, stream.PreloadEvicted, preload.State, "a preload that no longer fits must be evicted")
+	assert.Equal(t, api.Evicted, ctrl.getPreloadStatus(to.InfoHash()).Status)
 	assert.Equal(t, int64(smaller), ctrl.storageClient.Load().MemoryStats().LimitBytes)
 	assert.Equal(t, preloadCapacityFor(t, smaller), ctrl.streamPool.Load().PreloadCapacity())
 }
@@ -92,16 +93,14 @@ func TestUpdateSettingsRollsBackFailedMemoryResize(t *testing.T) {
 	oldMaxMemory := *ctrl.settings.Load().MaxMemory
 	pool := ctrl.streamPool.Load()
 	oldCapacity := pool.PreloadCapacity()
-	// A reservation the controller does not track cannot be cancelled, so the
-	// smaller budget cannot be applied.
-	const pieceLength = 1 << 20
-	to := addSyntheticTorrent(t, ctrl, 1<<30, pieceLength)
-	headEnd := oldCapacity - oldCapacity%pieceLength
-	require.Greater(t, headEnd, preloadCapacityFor(t, 32<<20), "the reservation must not fit the smaller budget")
-	require.True(t, pool.ReservePreload(to.Files()[0], headEnd, 0, 0))
-	defer pool.ReleasePreload(to.InfoHash())
+	// A closed memory storage cannot be resized, so the update fails after
+	// the stream budget was already shrunk and must be rolled back.
+	closedStorage := memstorage.New(oldMaxMemory, nil)
+	require.NoError(t, closedStorage.Close())
+	storageClient := ctrl.storageClient.Swap(closedStorage)
 
 	rr := patchMaxMemory(t, ctrl, 32<<20).Recorder
+	ctrl.storageClient.Store(storageClient)
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
 	assert.Contains(t, rr.Body.String(), "failed to resize memory storage")
 
@@ -113,67 +112,30 @@ func TestUpdateSettingsRollsBackFailedMemoryResize(t *testing.T) {
 	assert.Equal(t, oldCapacity, pool.PreloadCapacity())
 }
 
-func TestReleaseOnePreloadReservationLockedReleasesCheapestFirst(t *testing.T) {
-	ctrl := &Controller{preloadReadyTTL: time.Hour}
-	var released []string
-	newTask := func(name string, hash metainfo.Hash) *preloadTask {
-		task := &preloadTask{
-			cancel:        func() {},
-			done:          make(chan struct{}),
-			infoHash:      hash,
-			releaseBudget: func() { released = append(released, name) },
-		}
-		task.doneOnce.Do(func() { close(task.done) })
-		return task
-	}
-
-	ready := newTask("ready", metainfo.Hash{1})
-	ready.ready.Store(true)
-	ctrl.preloads.Store(ready.infoHash, ready)
-	running := newTask("running", metainfo.Hash{2})
-	running.active = true
-	ctrl.preloadWorkers = []*preloadTask{running}
-	ctrl.preloads.Store(running.infoHash, running)
-	lease := newTask("lease", metainfo.Hash{3})
-	lease.ready.Store(true)
-	session := &playbackSession{key: playbackKey{infoHash: lease.infoHash}, lease: lease}
-	ctrl.playbackSessions = map[playbackKey]*playbackSession{session.key: session}
-
-	ctrl.preloadsMu.Lock()
-	defer ctrl.preloadsMu.Unlock()
-	for range 3 {
-		require.True(t, ctrl.releaseOnePreloadReservationLocked())
-	}
-	assert.False(t, ctrl.releaseOnePreloadReservationLocked(), "nothing is left to release")
-	assert.Equal(t, []string{"ready", "running", "lease"}, released)
-	assert.Nil(t, session.lease)
-	assert.Len(t, ctrl.preloadWorkers, 1, "the cancelled worker keeps its slot until it exits")
-}
-
-func TestUpdateSettingsMemoryShrinkReleasesOnlyPreloadsThatDoNotFit(t *testing.T) {
+func TestUpdateSettingsMemoryShrinkEvictsOnlyPreloadsThatDoNotFit(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
 
 	require.Equal(t, http.StatusNoContent, patchMaxMemory(t, ctrl, 512<<20).Recorder.Code)
 	lengths := []int64{1 << 30, 1<<30 + 1<<20}
-	preloads := make([]*preloadTask, 0, len(lengths))
+	hashes := make([]metainfo.Hash, 0, len(lengths))
+	reserved := make([]int64, 0, len(lengths))
 	for _, length := range lengths {
 		to := addSyntheticTorrent(t, ctrl, length, 1<<20)
-		preload := ctrl.startPreload(to, to.Files()[0], 0)
-		require.NotNil(t, preload)
-		preloads = append(preloads, preload)
+		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		preload, ok := ctrl.preloadStatus(to.InfoHash())
+		require.True(t, ok)
+		require.Equal(t, stream.PreloadRunning, preload.State, "both preloads must hold reservations")
+		hashes = append(hashes, to.InfoHash())
+		// Their whole 1 MiB pieces make each reservation equal to its target.
+		reserved = append(reserved, preload.TargetBytes)
 	}
-	require.Eventually(t, func() bool {
-		ctrl.preloadsMu.Lock()
-		defer ctrl.preloadsMu.Unlock()
-		return preloads[0].active && preloads[1].active
-	}, 5*time.Second, 10*time.Millisecond, "both preloads must hold reservations")
 
 	// Pick a limit whose preload share fits one reservation but not both.
-	largest := max(preloads[0].reserveBytes, preloads[1].reserveBytes)
+	largest := max(reserved[0], reserved[1])
 	var maxMemory int64
 	for candidate := int64(32 << 20); candidate < 512<<20; candidate += 1 << 20 {
-		if capacity := preloadCapacityFor(t, candidate); capacity >= largest && capacity < preloads[0].reserveBytes+preloads[1].reserveBytes {
+		if capacity := preloadCapacityFor(t, candidate); capacity >= largest && capacity < reserved[0]+reserved[1] {
 			maxMemory = candidate
 			break
 		}
@@ -183,10 +145,10 @@ func TestUpdateSettingsMemoryShrinkReleasesOnlyPreloadsThatDoNotFit(t *testing.T
 	rr := patchMaxMemory(t, ctrl, maxMemory).Recorder
 	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
 	kept := 0
-	for _, preload := range preloads {
-		if current, ok := ctrl.preloads.Load(preload.infoHash); ok && current == preload {
+	for _, ih := range hashes {
+		if preload, ok := ctrl.preloadStatus(ih); ok && preload.State == stream.PreloadRunning {
 			kept++
 		}
 	}
-	assert.Equal(t, 1, kept, "only the preloads that do not fit may be released")
+	assert.Equal(t, 1, kept, "only the preloads that do not fit may be evicted")
 }

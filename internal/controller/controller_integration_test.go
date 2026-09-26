@@ -438,11 +438,6 @@ func TestIntegrationStreamClientDisconnectReleasesBlockedReader(t *testing.T) {
 	<-streamDone
 	require.Eventually(t, func() bool { return !ctrl.streamPool.Load().HasActiveReaders(ih) }, 5*time.Second, time.Millisecond,
 		"disconnected stream kept its reader active")
-	require.Eventually(t, func() bool {
-		ctrl.preloadsMu.Lock()
-		defer ctrl.preloadsMu.Unlock()
-		return ctrl.preloadPlaybackCount == 0
-	}, time.Second, time.Millisecond, "disconnected stream kept preloads paused")
 }
 
 func TestIntegrationDeleteWhileStreamingUsesStateSynchronization(t *testing.T) {
@@ -570,9 +565,6 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	fixture := newLocalWebseedFixture(t, false)
 	defer fixture.release()
 	ctrl := newIntegrationTestController(t)
-	// Keep the playback session open after the range request so the test can
-	// observe the preload it holds between a player's requests.
-	ctrl.runtimeConfig.playbackGracePeriod = time.Minute
 	ih := addLocalWebseedTorrent(t, ctrl, fixture)
 
 	server := httptest.NewServer(ctrl.router)
@@ -590,7 +582,7 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	invalidPlayback := httptest.NewRecorder()
 	ctrl.streamFile(invalidPlayback, httptest.NewRequest(http.MethodGet, "/stream/invalid", http.NoBody), ih, 99, nil)
 	assert.Equal(t, http.StatusBadRequest, invalidPlayback.Code)
-	_, stillPreloading := ctrl.preloads.Load(ih)
+	_, stillPreloading := ctrl.preloadStatus(ih)
 	assert.True(t, stillPreloading, "invalid playback should not cancel the active preload")
 	ctrl.cancelPreload(ih)
 
@@ -621,19 +613,6 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	assert.Equal(t, readyState.TargetBytes, readyState.CompletedBytes)
 	assert.Positive(t, readyState.DownloadRate, "webseed payload rate must be included")
 
-	unrelatedHash := metainfo.Hash{0xff}
-	unrelatedBudgetReleases := 0
-	unrelatedPreload := &preloadTask{
-		infoHash: unrelatedHash,
-		cancel:   func() {},
-		done:     make(chan struct{}),
-		releaseBudget: func() {
-			unrelatedBudgetReleases++
-		},
-	}
-	unrelatedPreload.ready.Store(true)
-	unrelatedPreload.doneOnce.Do(func() { close(unrelatedPreload.done) })
-	ctrl.preloads.Store(unrelatedHash, unrelatedPreload)
 	streamRequest, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, ih), http.NoBody)
 	require.NoError(t, err)
 	streamRequest.Header.Set("Range", "bytes=0-1023")
@@ -641,27 +620,21 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, streamResponse.Body.Close())
 	assert.Equal(t, http.StatusPartialContent, streamResponse.StatusCode)
-	_, stillPreloading = ctrl.preloads.Load(ih)
-	assert.False(t, stillPreloading, "playback should retire its ready preload")
-	ctrl.preloadsMu.Lock()
-	lease := ctrl.playbackLeaseLocked(ih)
-	openSessions := ctrl.preloadPlaybackCount
-	ctrl.preloadsMu.Unlock()
-	assert.NotNil(t, lease, "the playback session must hold the preload after the range request ends")
-	assert.Equal(t, 1, openSessions, "the playback session must stay open between range requests")
+
+	// Playback keeps using the ready preload; its lingering reader pins the
+	// cache between the player's range requests.
+	assert.True(t, ctrl.streamPool.Load().HasReaders(ih), "the released reader must linger")
 	retainedResponse, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
 	require.NoError(t, err)
 	var retainedState api.PreloadResponse
 	require.NoError(t, json.NewDecoder(retainedResponse.Body).Decode(&retainedState))
 	require.NoError(t, retainedResponse.Body.Close())
-	assert.Equal(t, api.Ready, retainedState.Status, "a preload held by playback remains ready")
+	assert.Equal(t, api.Ready, retainedState.Status, "a preload being played remains ready")
 	assert.Equal(t, 0, retainedState.FileIndex)
 	assert.Equal(t, float32(1), retainedState.Progress)
 	assert.Equal(t, readyState.TargetBytes, retainedState.TargetBytes)
 	assert.Equal(t, readyState.CompletedBytes, retainedState.CompletedBytes)
-	_, unrelatedStillPreloading := ctrl.preloads.Load(unrelatedHash)
-	assert.False(t, unrelatedStillPreloading, "playback should release unrelated ready memory preloads")
-	assert.Equal(t, 1, unrelatedBudgetReleases)
+	ctrl.cancelPreload(ih)
 }
 
 func TestIntegrationControllerLifecycle(t *testing.T) {

@@ -478,37 +478,31 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 		storageStats, err := ctrl.storageClient.Load().TorrentStats(to.InfoHash())
 		require.NoError(t, err)
 
-		preload := &preloadTask{targetBytes: 1048576}
-		preload.bytesRead.Store(storageStats.WrittenBytes + 512)
-		ctrl.preloads.Store(to.InfoHash(), preload)
-		defer ctrl.preloads.Delete(to.InfoHash())
+		assert.Positive(t, storageStats.WrittenBytes)
+
+		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		defer ctrl.cancelPreload(to.InfoHash())
+		preload, ok := ctrl.preloadStatus(to.InfoHash())
+		require.True(t, ok)
+		require.Positive(t, preload.TargetBytes)
 
 		resp := ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
 		assert.Equal(t, tsStatPreload, resp.Stat)
 		assert.Equal(t, "Torrent preload", resp.StatString)
-		assert.Equal(t, int64(1048576), resp.PreloadSize)
-		assert.Positive(t, storageStats.WrittenBytes)
-		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
+		assert.Equal(t, preload.TargetBytes, resp.PreloadSize)
+		assert.Equal(t, preload.CompletedBytes, resp.PreloadedBytes)
 
-		// A finished preload reports the torrent as working, as TorrServer does.
-		preload.ready.Store(true)
+		// A preload that ended early reports the torrent as working with the
+		// progress it had made, as TorrServer does for a finished preload.
+		pool := ctrl.streamPool.Load()
+		budget := readaheadBudget(*ctrl.settings.Load().MaxMemory)
+		pool.SetReadaheadBudget(0)
+		defer pool.SetReadaheadBudget(budget)
 		resp = ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
 		assert.Equal(t, tsStatWorking, resp.Stat)
 		assert.Equal(t, "Torrent working", resp.StatString)
-		assert.Equal(t, int64(1048576), resp.PreloadSize)
-		assert.Equal(t, int64(1048576), resp.PreloadedBytes)
-
-		ctrl.preloads.Delete(to.InfoHash())
-		ctrl.preloadSnapshots.Store(to.InfoHash(), &preloadStatusSnapshot{
-			completedBytes: storageStats.WrittenBytes + 512,
-			targetBytes:    1048576,
-		})
-		defer ctrl.preloadSnapshots.Delete(to.InfoHash())
-		resp = ctrl.buildTSTorrentResponse(torrentToMetadata(to), to)
-		assert.Equal(t, tsStatWorking, resp.Stat)
-		assert.Equal(t, "Torrent working", resp.StatString)
-		assert.Equal(t, int64(1048576), resp.PreloadSize)
-		assert.Equal(t, storageStats.WrittenBytes+512, resp.PreloadedBytes)
+		assert.Equal(t, preload.TargetBytes, resp.PreloadSize)
+		assert.Equal(t, preload.CompletedBytes, resp.PreloadedBytes)
 	})
 }
 

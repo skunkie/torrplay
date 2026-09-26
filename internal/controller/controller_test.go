@@ -1715,36 +1715,56 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 		assert.True(t, recentTracked, "a torrent used within thirty minutes must stay loaded")
 	})
 
-	t.Run("releases completed preload", func(t *testing.T) {
+	t.Run("keeps a torrent with a running preload", func(t *testing.T) {
 		ctrl, cleanup := newTestController(t)
 		defer cleanup()
 
-		ih := metainfo.Hash{1}
+		to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+		ih := to.InfoHash()
 		ctrl.torrentTracker.mu.Lock()
 		ctrl.torrentTracker.torrents[ih] = torrentInfo{
 			lastUsedAt:  time.Now().Add(-4 * time.Hour),
 			storageType: api.Memory,
 		}
 		ctrl.torrentTracker.mu.Unlock()
-
-		released := false
-		task := &preloadTask{
-			infoHash:      ih,
-			cancel:        func() {},
-			releaseBudget: func() { released = true },
-		}
-		task.ready.Store(true)
-		ctrl.preloads.Store(ih, task)
+		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		defer ctrl.cancelPreload(ih)
 
 		ctrl.cleanupExpiredTorrents()
 
-		_, preloading := ctrl.preloads.Load(ih)
+		ctrl.torrentTracker.mu.RLock()
+		_, tracked := ctrl.torrentTracker.torrents[ih]
+		ctrl.torrentTracker.mu.RUnlock()
+		assert.True(t, tracked, "a torrent must not expire while it is preloading")
+	})
+
+	t.Run("clears a finished preload", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+
+		to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+		ih := to.InfoHash()
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{
+			lastUsedAt:  time.Now().Add(-4 * time.Hour),
+			storageType: api.Memory,
+		}
+		ctrl.torrentTracker.mu.Unlock()
+		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		// A smaller budget evicts the preload, which then only reports its
+		// final state.
+		pool := ctrl.streamPool.Load()
+		pool.SetReadaheadBudget(0)
+		defer pool.SetReadaheadBudget(readaheadBudget(*ctrl.settings.Load().MaxMemory))
+
+		ctrl.cleanupExpiredTorrents()
+
+		_, preloading := ctrl.preloadStatus(ih)
 		assert.False(t, preloading)
 		ctrl.torrentTracker.mu.RLock()
 		_, tracked := ctrl.torrentTracker.torrents[ih]
 		ctrl.torrentTracker.mu.RUnlock()
 		assert.False(t, tracked)
-		assert.True(t, released, "the preload's reservation must be returned to the pool")
 	})
 }
 

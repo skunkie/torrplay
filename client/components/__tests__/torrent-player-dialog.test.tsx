@@ -758,7 +758,44 @@ describe('TorrentPlayerDialog', () => {
       expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
     });
 
-    it('stops polling without clearing status when playback supersedes the task', async () => {
+    it('keeps polling while the preload is queued', async () => {
+      vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 0,
+        progress: 0,
+        status: 'queued',
+        activePeers: 0,
+        downloadRate: 0,
+        totalPeers: 0,
+      });
+      const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue({
+        fileIndex: 0,
+        targetBytes: 1000,
+        completedBytes: 0,
+        progress: 0,
+        status: 'queued',
+        activePeers: 0,
+        downloadRate: 0,
+        totalPeers: 0,
+      });
+
+      render(
+        <TorrentPlayerDialog
+          torrent={mockTorrentSingleVideo}
+          open={true}
+          onOpenChange={vi.fn()}
+          enablePreload={true}
+        />,
+      );
+
+      await waitFor(() => {
+        expect(getPreloadSpy).toHaveBeenCalled();
+      });
+      expect(screen.getByTestId('player-preload-badge')).toBeInTheDocument();
+    });
+
+    it('stops polling without clearing status when the preload is evicted', async () => {
       vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
         fileIndex: 0,
         targetBytes: 1000,
@@ -774,7 +811,7 @@ describe('TorrentPlayerDialog', () => {
         targetBytes: 0,
         completedBytes: 0,
         progress: 0,
-        status: 'superseded',
+        status: 'evicted',
         activePeers: 0,
         downloadRate: 0,
         totalPeers: 0,

@@ -2,12 +2,15 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Package stream provides a pooled reader manager for torrent file streaming.
+// Package stream is the streaming engine for torrent files: a pooled reader
+// manager and a preloader sharing one readahead budget and one piece-priority
+// system.
 //
 // It multiplexes multiple concurrent readers per torrent file, keeps a released
-// reader reading ahead briefly for the player's next request, and coordinates
-// with the storage layer via the ActiveRangeRegistry interface to protect
-// actively-read pieces from eviction.
+// reader reading ahead briefly for the player's next request, caches the head
+// and tail of files before they are played, and coordinates with the storage
+// layer via the ActiveRangeRegistry interface to protect actively-read and
+// preloaded pieces from eviction.
 //
 // # Overview
 //
@@ -24,10 +27,10 @@
 // where the player stopped. A player that fetches a file in consecutive range
 // requests, or reconnects after a pause, then finds those pieces cached by the
 // time its next request's reader reaches them. A reader lingers only while no
-// other playback or preload reader is active; new work closes it after taking
-// over its own readahead window, so released requests never download outside
-// the shared budget. Readers still lingering after LingerTimeout are closed.
-// Preload readers and readers of a dropped torrent close on release.
+// other reader is active; a new reader closes it after taking over its own
+// readahead window, so released requests never download outside the shared
+// budget. Readers still lingering after LingerTimeout are closed. Readers of a
+// dropped torrent close on release.
 //
 // # Active Range Protection
 //
@@ -45,11 +48,11 @@
 // asynchronous piece-priority bump in the torrent client: the nearest
 // PriorityWindowFraction of the readahead pieces receive PiecePriorityNow, so
 // they download before the rest of the readahead window, which the torrent
-// client orders by rarity. Preload readers claim no priorities: their
-// readahead already spans their bounded range, and preloads do not run
-// alongside playback. Stale priority updates are discarded when a reader moves
-// or is released. Pool-level claim aggregation preserves the highest priority
-// requested by overlapping readers.
+// client orders by rarity. Preloads claim their pieces at PiecePriorityHigh,
+// below every playback reader's readahead, so they download with the bandwidth
+// playback leaves. Stale priority updates are discarded when a reader moves or
+// is released. Pool-level claim aggregation preserves the highest priority
+// requested by overlapping readers and preloads.
 //
 // # Readahead Rebalancing
 //
@@ -65,17 +68,29 @@
 // readers retain their configured FileReadaheadBytes while active. Lingering
 // readers hold no share of the budget.
 //
-// # Preload Reservations
+// # Preloads
 //
-// Preloads share the readahead budget with playback. ReservePreload admits a
-// preload of one file per torrent when the whole pieces of its head and tail
-// fit the preload share of the budget, and protects those pieces from eviction
-// until ReleasePreload. PreloadCapacity reports the preload share, and the rest
-// is always kept for playback readers so a new stream is never starved by held
-// preloads. ReleasePreload returns the reservation to active readers.
-// AcquirePreloadContext acquires a reader whose readahead is bounded to a byte
-// range. SetReadaheadBudget refuses a new budget whose preload share cannot
-// hold the existing reservations.
+// Preload caches the head and tail of a file, where containers keep their
+// metadata and seek indexes, so its playback starts without waiting for them.
+// A torrent has at most one preload, and a request for another of its files
+// replaces it. Preloads never pause for playback, because the engine is shared
+// by every viewer: they have no reader, claim their pieces at
+// PiecePriorityHigh, and a watcher marks them ready once every piece is
+// complete. At most two preloads download at a time, in request order.
+//
+// A memory-storage preload reserves its whole pieces in the preload share of
+// the readahead budget, reported by PreloadCapacity, and protects them from
+// eviction until it is removed. The rest of the budget is always kept for
+// playback readers, so a new stream is never starved by held preloads. When
+// the share is full, a queued preload evicts the ready preload that has gone
+// longest without a reader; ready preloads of files being read stay pinned. A
+// preload that cannot fit and has nothing to wait for fails. A smaller
+// SetReadaheadBudget evicts preloads until they fit, cheapest first. A ready
+// preload that loses a piece to eviction downloads it again.
+//
+// A ready preload expires PreloadReadyTTL after its file last had a reader,
+// and a failed or evicted preload reports its final state for as long.
+// File-storage preloads write to disk and reserve nothing.
 //
 // # Memory Pressure
 //
