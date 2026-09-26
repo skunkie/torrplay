@@ -39,10 +39,11 @@
 // asynchronous piece-priority bump in the torrent client: the nearest
 // PriorityWindowFraction of the readahead pieces receive PiecePriorityNow, so
 // they download before the rest of the readahead window, which the torrent
-// client orders by rarity. Preload readers instead claim every piece in their
-// bounded range at PiecePriorityNow until release. Stale priority updates are
-// discarded when a reader moves or is released. Pool-level claim aggregation
-// preserves the highest priority requested by overlapping readers.
+// client orders by rarity. Preload readers claim no priorities: their
+// readahead already spans their bounded range, and preloads do not run
+// alongside playback. Stale priority updates are discarded when a reader moves
+// or is released. Pool-level claim aggregation preserves the highest priority
+// requested by overlapping readers.
 //
 // # Reader Cap and Eviction
 //
@@ -77,8 +78,8 @@
 // PreloadCapacity reports the preload share of the budget, and the rest is
 // always kept for playback readers so a new stream is never starved by held
 // preloads. ReleasePreloadBudget returns the reservation to active readers.
-// AcquirePreloadContext acquires a reader bounded to a byte range whose pieces
-// are claimed at PiecePriorityNow until release. SetReadaheadBudget refuses a
+// AcquirePreloadContext acquires a reader whose readahead is bounded to a byte
+// range. SetReadaheadBudget refuses a
 // new budget whose preload share cannot hold the existing reservations.
 //
 // # Idle GC

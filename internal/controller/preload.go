@@ -33,11 +33,10 @@ const (
 	defaultPreloadReadyTTL     = 5 * time.Minute
 	preloadNoFileIndex         = -1
 	// maxConcurrentPreloads caps preloads that are actively fetching. The
-	// binding constraint is bandwidth and piece-priority contention rather than
-	// memory: a preload claims its whole range at PiecePriorityNow, the same
-	// priority a blocked playback reader uses, so every extra concurrent one
-	// competes with the stream the user is watching. Raising this does not
-	// shrink an individual preload on a machine with memory to spare.
+	// binding constraint is bandwidth rather than memory: each preload's
+	// readahead spans its whole range, so every extra concurrent one splits
+	// the download capacity the others need to become ready. Raising this does
+	// not shrink an individual preload on a machine with memory to spare.
 	maxConcurrentPreloads = 2
 
 	// maxPreloadBytes bounds a single preload. It is a startup-latency limit,
@@ -687,9 +686,9 @@ func (c *Controller) watchPreloadTorrent(preload *preloadTask) {
 // preloads still hold a reservation for the cache they pin, so admission may
 // have to evict one of them first.
 func (c *Controller) dispatchPreloadsLocked() {
-	// Preload range readers claim their complete range at PiecePriorityNow, so
-	// keep queued work registered but do not let it compete with live playback.
-	// The final playback release resumes this queue.
+	// Preload range readers read ahead across their complete range, so keep
+	// queued work registered but do not let it compete with live playback for
+	// bandwidth. The final playback release resumes this queue.
 	if c.preloadPlaybackCount > 0 {
 		return
 	}

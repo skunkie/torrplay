@@ -503,9 +503,8 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 }
 
 // AcquirePreloadContext acquires a reader with dynamic readahead bounded to
-// [start, end). The preload controller owns eviction protection for that range,
-// while every intersecting torrent piece is held at PiecePriorityNow until the
-// reader is released.
+// [start, end). The torrent client prioritizes that readahead window, and the
+// preload controller owns eviction protection for the range.
 func (p *Pool) AcquirePreloadContext(ctx context.Context, file *torrent.File, mode StorageMode, start, end int64) (io.ReadSeeker, ReleaseFunc, error) {
 	if file != nil {
 		start = min(max(start, 0), file.Length())
@@ -655,16 +654,6 @@ func (p *Pool) acquireContext(ctx context.Context, file *torrent.File, mode Stor
 		sr.readahead = preloadEnd - preloadStart
 		reader.SetReadaheadFunc(preloadReadaheadFunc(preloadEnd))
 		p.parkCompetingIdleReadersLocked()
-		// Claimed synchronously under p.mu, unlike playback's prioritizeAsync
-		// (see updateActiveRange). The claim has to be atomic with reader
-		// creation or a concurrent release could race it, and preload pays the
-		// cost once per reader rather than on every piece boundary, so keeping
-		// it off the lock is not worth restructuring acquireContext for.
-		// Lock order p.mu -> sr.priorityMu -> p.priorityMu matches
-		// prioritizeAsync's sr.priorityMu -> p.priorityMu.
-		sr.priorityMu.Lock()
-		p.replaceReaderPrioritiesLocked(sr, file, preloadPriorityPlan(file, preloadStart, preloadEnd))
-		sr.priorityMu.Unlock()
 	case isFileStorage:
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
@@ -715,51 +704,6 @@ func preloadReadaheadFunc(end int64) torrent.ReadaheadFunc {
 	return func(ctx torrent.ReadaheadContext) int64 {
 		return max(end-ctx.CurrentPos, 0)
 	}
-}
-
-// preloadPriorityPlan returns every torrent piece intersecting the file-relative
-// byte range [start, end). Unlike playback's moving priority window, preload
-// keeps the complete bounded range at Now priority until its reader is released.
-func preloadPriorityPlan(file *torrent.File, start, end int64) []prioritizedPiece {
-	if file == nil || end <= start {
-		return nil
-	}
-	tor := file.Torrent()
-	if tor == nil || tor.Info() == nil {
-		return nil
-	}
-	pieceLength := tor.Info().PieceLength
-	if pieceLength <= 0 {
-		return nil
-	}
-
-	start = min(max(start, 0), file.Length())
-	end = min(max(end, start), file.Length())
-	if end <= start {
-		return nil
-	}
-
-	// Clamping start and end to the file bounds above already keeps these
-	// within [file.BeginPieceIndex(), file.EndPieceIndex()]: both are derived
-	// from the same piece length, as floor(offset/pieceLength) and
-	// ceil((offset+length)/pieceLength) respectively.
-	first := (file.Offset() + start) / pieceLength
-	last := (file.Offset() + end) / pieceLength
-	if (file.Offset()+end)%pieceLength != 0 {
-		last++
-	}
-	if last <= first {
-		return nil
-	}
-
-	planned := make([]prioritizedPiece, 0, last-first)
-	for index := first; index < last; index++ {
-		planned = append(planned, prioritizedPiece{
-			index:    int(index),
-			priority: torrent.PiecePriorityNow,
-		})
-	}
-	return planned
 }
 
 // closeStreamReaderLocked cancels and closes a reader while serializing with

@@ -576,36 +576,27 @@ func TestPool_AcquirePreloadContext(t *testing.T) {
 		assert.Equal(t, preloadRange, preloadReader.readahead)
 		pool.mu.Unlock()
 
-		// Every piece in the preload range is claimed at Now immediately, independent
-		// of playback's moving priority-window fractions.
+		// Preload readers rely on their range-sized readahead instead of piece
+		// priority claims.
 		preloadReader.priorityMu.Lock()
-		assert.Equal(t, []int{0, 1, 2, 3}, preloadReader.prioritizedPieces)
-		pool.priorityMu.Lock()
-		for _, index := range preloadReader.prioritizedPieces {
-			claim := pool.priorityClaims[priorityPieceKey{torrent: f.Torrent(), index: index}]
-			require.NotNil(t, claim)
-			assert.Equal(t, torrent.PiecePriorityNow, claim.owners[preloadReader])
-		}
-		pool.priorityMu.Unlock()
+		assert.Empty(t, preloadReader.prioritizedPieces)
 		preloadReader.priorityMu.Unlock()
+		pool.priorityMu.Lock()
+		assert.Empty(t, pool.priorityClaims)
+		pool.priorityMu.Unlock()
 
-		// Reader movement shrinks readahead but keeps the complete static priority
-		// claim until release. Cache protection remains controller-owned.
+		// Reader movement shrinks readahead without claiming priorities. Cache
+		// protection remains controller-owned.
 		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, 64)
 		pool.mu.Lock()
 		assert.Equal(t, preloadRange-64, preloadReader.readahead)
 		pool.mu.Unlock()
 		pool.updateActiveRange(f.Torrent().InfoHash(), key, f, nil, preloadRange)
-		preloadReader.priorityMu.Lock()
-		assert.Equal(t, []int{0, 1, 2, 3}, preloadReader.prioritizedPieces)
-		preloadReader.priorityMu.Unlock()
-		assert.Zero(t, reg.setCalls.Load(), "controller owns preload range protection")
-		assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
-
-		release()
 		pool.priorityMu.Lock()
 		assert.Empty(t, pool.priorityClaims)
 		pool.priorityMu.Unlock()
+		assert.Zero(t, reg.setCalls.Load(), "controller owns preload range protection")
+		assert.Zero(t, reg.boundarySetCalls.Load(), "controller owns preload range protection")
 	})
 
 	t.Run("does not consume idle playback reader", func(t *testing.T) {
@@ -787,36 +778,6 @@ func TestPool_ReaderPositions(t *testing.T) {
 			t.Fatalf("expected 0 valid readers, got %d", len(result))
 		}
 	})
-}
-
-// TestPreloadPriorityPlan verifies that preloadPriorityPlan includes every intersecting piece.
-func TestPreloadPriorityPlan(t *testing.T) {
-	c := newTestTorrentClient(t)
-	_, f := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
-
-	tests := []struct {
-		name       string
-		start, end int64
-		want       []int
-	}{
-		{name: "empty", start: 64, end: 64, want: []int{}},
-		{name: "partial piece", start: 1, end: 64, want: []int{0}},
-		{name: "aligned piece", start: 64, end: 128, want: []int{1}},
-		{name: "crosses boundary", start: 63, end: 65, want: []int{0, 1}},
-		{name: "tail", start: 576, end: 640, want: []int{9}},
-		{name: "clamped to file", start: -1, end: 641, want: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			plan := preloadPriorityPlan(f, tt.start, tt.end)
-			indexes := make([]int, 0, len(plan))
-			for _, piece := range plan {
-				indexes = append(indexes, piece.index)
-				assert.Equal(t, torrent.PiecePriorityNow, piece.priority)
-			}
-			assert.Equal(t, tt.want, indexes)
-		})
-	}
 }
 
 type testRegistry struct {
