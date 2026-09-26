@@ -632,7 +632,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		_, err = pool.Preload(file, MemoryStorage)
 		require.NoError(t, err)
 		pool.mu.Lock()
-		read := pool.preloads[to.InfoHash()].read
+		read := pool.preloads[to.InfoHash()].fileRead
 		pool.mu.Unlock()
 		assert.True(t, read)
 	})

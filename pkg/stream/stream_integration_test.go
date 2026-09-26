@@ -943,9 +943,9 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	defer release()
 
 	key := uint64(1)
-	pool.updateActiveRange(key, 31)
+	pool.updateReaderPosition(key, 31)
 	setsBeforeBoundary := reg.sets
-	pool.updateActiveRange(key, 32)
+	pool.updateReaderPosition(key, 32)
 	assert.Equal(t, setsBeforeBoundary+1, reg.sets, "crossing a torrent piece must refresh the active range")
 	require.Len(t, reg.last.Active, 1)
 	assert.Equal(t, 2, reg.last.Active[0].End, "readahead must follow the actual torrent piece")
@@ -970,7 +970,7 @@ func TestPoolReaderMoveKeepsBoundaries(t *testing.T) {
 	boundaries := reg.last.Boundaries
 	require.NotEmpty(t, boundaries, "the reader must protect its file's boundaries")
 
-	pool.updateActiveRange(1, 64*30)
+	pool.updateReaderPosition(1, 64*30)
 	require.Len(t, reg.last.Active, 1)
 	window := reg.last.Active[0]
 	assert.True(t, window.Start <= 30 && 30 <= window.End, "the window must follow the reader, got %+v", window)
@@ -1066,7 +1066,7 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 
 	sr1 := &streamReader{file: file}
 	sr2 := &streamReader{file: file}
-	planned := prioritizeNextPieces(file, 0, 256, 1)
+	planned := planNextPieces(file, 0, 256, 1)
 	if len(planned) == 0 {
 		t.Fatal("expected a non-empty priority plan")
 	}
@@ -1075,14 +1075,14 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 			t.Fatalf("priority plan crossed exclusive file end: piece=%d end=%d", piece.index, file.EndPieceIndex())
 		}
 	}
-	boundedPlan := prioritizeNextPieces(file, 0, 1<<40, 1)
+	boundedPlan := planNextPieces(file, 0, 1<<40, 1)
 	if cap(boundedPlan) > file.EndPieceIndex()-file.BeginPieceIndex() {
 		t.Fatalf("priority plan capacity should be bounded by file pieces, got %d", cap(boundedPlan))
 	}
 
 	p.mu.Lock()
-	sr1.prioritizedPieces = p.claimLocked(sr1, to, sr1.prioritizedPieces, planned)
-	sr2.prioritizedPieces = p.claimLocked(sr2, to, sr2.prioritizedPieces, planned)
+	sr1.claimed = p.claimLocked(sr1, to, sr1.claimed, planned)
+	sr2.claimed = p.claimLocked(sr2, to, sr2.claimed, planned)
 	p.mu.Unlock()
 
 	key := priorityPieceKey{torrent: to, index: planned[0].index}
@@ -1098,7 +1098,7 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 	}
 
 	p.mu.Lock()
-	p.unclaimLocked(sr1, to, sr1.prioritizedPieces)
+	p.unclaimLocked(sr1, to, sr1.claimed)
 	p.mu.Unlock()
 
 	p.mu.Lock()
@@ -1115,7 +1115,7 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 	}
 
 	p.mu.Lock()
-	p.unclaimLocked(sr2, to, sr2.prioritizedPieces)
+	p.unclaimLocked(sr2, to, sr2.claimed)
 	p.mu.Unlock()
 	p.mu.Lock()
 	_, stillClaimed := p.priorityClaims[key]

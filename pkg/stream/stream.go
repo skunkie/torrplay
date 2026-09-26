@@ -288,8 +288,12 @@ type streamReader struct {
 	active bool
 	// boundaries holds the file head and tail ranges the reader protects
 	// alongside its window. Guarded by pool.mu.
-	boundaries    []storage.PieceRange
-	cancel        context.CancelFunc
+	boundaries []storage.PieceRange
+	cancel     context.CancelFunc
+	// claimed holds the pieces this reader claims. Pool-level ownership keeps
+	// overlapping readers from lowering each other's priorities when one moves
+	// or releases.
+	claimed       []int
 	file          *torrent.File
 	infoHash      metainfo.Hash
 	isFileStorage bool
@@ -298,15 +302,11 @@ type streamReader struct {
 	// lastOffset is the last byte offset the reader's stream reported.
 	// Updated under pool.mu only, so code holding pool.mu can read it without
 	// acquiring the stream's lock.
-	lastOffset   int64
-	lastPieceIdx int64
-	// prioritizedPieces tracks the piece claims currently owned by this reader.
-	// Pool-level ownership keeps overlapping readers from lowering each other's
-	// priorities when one moves or releases.
-	prioritizedPieces []int
-	readahead         int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
-	reader            torrent.Reader
-	readerID          uint64
+	lastOffset int64
+	lastPiece  int64
+	readahead  int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
+	reader     torrent.Reader
+	readerID   uint64
 	// stream is the caller's view of reader.
 	stream *streamReadSeeker
 }
@@ -368,7 +368,7 @@ func New(cfg Config) *Pool {
 		readers:        make(map[uint64]*streamReader),
 	}
 
-	go p.idleGC()
+	go p.expireLoop()
 
 	return p
 }
@@ -407,7 +407,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 	reader.SetContext(readerCtx)
 
 	stream := newStreamReadSeeker(reader, file.Length(), func(position int64) {
-		p.updateActiveRange(readerID, position)
+		p.updateReaderPosition(readerID, position)
 	})
 	if observe := p.cfg.ReadObserver; observe != nil {
 		stream.observeRead = func(d time.Duration) { observe(mode, d) }
@@ -419,14 +419,14 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		file:          file,
 		infoHash:      infoHash,
 		isFileStorage: isFileStorage,
-		lastPieceIdx:  -1,
+		lastPiece:     -1,
 		reader:        reader,
 		readerID:      readerID,
 		stream:        stream,
 	}
 	p.readers[readerID] = sr
 	if pl := p.preloads[infoHash]; pl != nil && pl.file == file {
-		pl.read = true
+		pl.fileRead = true
 	}
 
 	if isFileStorage {
@@ -556,8 +556,8 @@ func torrentClosed(file *torrent.File) bool {
 // protection a reader holds. A priority update still in flight for the reader
 // finds it inactive or removed and does nothing. Must be called with p.mu held.
 func (p *Pool) clearReaderClaimsLocked(sr *streamReader) {
-	p.unclaimLocked(sr, fileTorrent(sr.file), sr.prioritizedPieces)
-	sr.prioritizedPieces = nil
+	p.unclaimLocked(sr, fileTorrent(sr.file), sr.claimed)
+	sr.claimed = nil
 	sr.boundaries = nil
 	if p.cfg.Registry != nil {
 		p.cfg.Registry.ClearProtection(sr.infoHash, sr.readerID)
@@ -591,7 +591,7 @@ func (p *Pool) refreshReadaheadLocked() {
 		if sr.reader != nil {
 			sr.reader.SetReadahead(readahead)
 		}
-		p.registerActiveRangeLocked(sr, readahead, plan.boundaryBytes[sr.file])
+		p.refreshReaderProtectionLocked(sr, readahead, plan.boundaryBytes[sr.file])
 	}
 
 	p.logger.Debug("refreshed readahead",
@@ -706,7 +706,7 @@ func fitFileBoundaries(file *torrent.File, allowance int64) (boundaryBytes, cost
 	}
 	info := file.Torrent().Info()
 	for boundaryBytes = allowance / 2; ; boundaryBytes = max(boundaryBytes-pieceLength, pieceLength) {
-		headStart, headEnd, tailStart, tailEnd, ok := computeFileBoundaries(file, boundaryBytes)
+		headStart, headEnd, tailStart, tailEnd, ok := fileBoundaries(file, boundaryBytes)
 		if !ok {
 			return 0, 0, false
 		}
@@ -789,11 +789,11 @@ func filePiece(file *torrent.File, byteOffset int64) int64 {
 // protected from eviction to preserve container metadata and seek tables.
 const defaultFileBoundaryBytes = 8 << 20
 
-// computeFileBoundaries calculates the inclusive head and tail piece ranges of
+// fileBoundaries returns the inclusive head and tail piece ranges of
 // boundaryBytes each, at least one piece, that protect a file's container
 // metadata (e.g. EBML headers, SeekHead, Cues, moov atom) from eviction
 // throughout streaming.
-func computeFileBoundaries(file *torrent.File, boundaryBytes int64) (headStart, headEnd, tailStart, tailEnd int, ok bool) {
+func fileBoundaries(file *torrent.File, boundaryBytes int64) (headStart, headEnd, tailStart, tailEnd int, ok bool) {
 	if file == nil || file.Length() == 0 {
 		return 0, 0, 0, 0, false
 	}
@@ -851,11 +851,11 @@ func boundaryPieces(headStart, headEnd, tailStart, tailEnd int) iter.Seq[int] {
 	}
 }
 
-// registerActiveRangeLocked computes and registers the eviction-protection window
-// for a reader at its last reported position with the given readahead, and its
-// file boundaries of boundaryBytes each. A non-positive boundaryBytes drops any
-// boundaries the reader registered before. Must be called with p.mu held.
-func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBytes int64) {
+// refreshReaderProtectionLocked sizes a reader's eviction protection: the
+// window at its last reported position with the given readahead, and its file
+// boundaries of boundaryBytes each. A non-positive boundaryBytes drops any
+// boundaries the reader protected before. Must be called with p.mu held.
+func (p *Pool) refreshReaderProtectionLocked(sr *streamReader, readahead, boundaryBytes int64) {
 	if p.cfg.Registry == nil {
 		return
 	}
@@ -865,29 +865,29 @@ func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBy
 	}
 	sr.boundaries = nil
 	if boundaryBytes > 0 {
-		if hs, he, ts, te, ok := computeFileBoundaries(sr.file, boundaryBytes); ok {
+		if hs, he, ts, te, ok := fileBoundaries(sr.file, boundaryBytes); ok {
 			sr.boundaries = []storage.PieceRange{{Start: hs, End: he}, {Start: ts, End: te}}
 		}
 	}
-	p.protectReaderLocked(sr, start, end)
+	p.setReaderProtectionLocked(sr, start, end)
 }
 
-// protectReaderLocked protects a reader's window [start, end] together with
-// its file boundaries. Must be called with p.mu held.
-func (p *Pool) protectReaderLocked(sr *streamReader, start, end int) {
+// setReaderProtectionLocked protects a reader's window [start, end] together
+// with its file boundaries. Must be called with p.mu held.
+func (p *Pool) setReaderProtectionLocked(sr *streamReader, start, end int) {
 	p.cfg.Registry.SetProtection(sr.infoHash, sr.readerID, storage.Protection{
 		Active:     []storage.PieceRange{{Start: start, End: end}},
 		Boundaries: sr.boundaries,
 	})
 }
 
-// prioritizeNextPieces plans the PiecePriorityNow claims for the pieces just
-// past the one a reader of file at byteOffset reads: the fraction of its
+// planNextPieces plans the PiecePriorityNow claims for the pieces just past
+// the one a reader of file at byteOffset reads: the fraction of its
 // readahead pieces, at least one, clamped to the file's last piece. Applying
 // the plan is separate so priorities shared by overlapping readers are only
 // lowered after their final owner releases them. It returns nil without piece
 // metadata or with no readahead or fraction.
-func prioritizeNextPieces(file *torrent.File, byteOffset, readahead int64, fraction float64) []prioritizedPiece {
+func planNextPieces(file *torrent.File, byteOffset, readahead int64, fraction float64) []prioritizedPiece {
 	pieceLength := filePieceLength(file)
 	if fraction <= 0 || readahead <= 0 || pieceLength <= 0 {
 		return nil
@@ -911,23 +911,23 @@ func fileTorrent(file *torrent.File) *torrent.Torrent {
 }
 
 // claimLocked replaces the claims owner, a reader or a preload, holds on the
-// owned pieces of tor with the planned claims, applies the highest priority
+// owned pieces of to with the planned claims, applies the highest priority
 // still requested for every affected piece, and returns the owner's new
 // claimed pieces, reusing owned. Must be called with p.mu held.
-func (p *Pool) claimLocked(owner any, tor *torrent.Torrent, owned []int, planned []prioritizedPiece) []int {
-	if tor == nil {
+func (p *Pool) claimLocked(owner any, to *torrent.Torrent, owned []int, planned []prioritizedPiece) []int {
+	if to == nil {
 		return owned[:0]
 	}
 	touched := make(map[priorityPieceKey]struct{}, len(owned)+len(planned))
 	for _, index := range owned {
-		key := priorityPieceKey{torrent: tor, index: index}
+		key := priorityPieceKey{torrent: to, index: index}
 		delete(p.priorityClaims[key], owner)
 		touched[key] = struct{}{}
 	}
 
 	owned = owned[:0]
 	for _, piece := range planned {
-		key := priorityPieceKey{torrent: tor, index: piece.index}
+		key := priorityPieceKey{torrent: to, index: piece.index}
 		claim := p.priorityClaims[key]
 		if claim == nil {
 			claim = make(priorityClaim)
@@ -944,13 +944,13 @@ func (p *Pool) claimLocked(owner any, tor *torrent.Torrent, owned []int, planned
 	return owned
 }
 
-// unclaimLocked removes owner from every owned piece claim on tor and
+// unclaimLocked removes owner from every owned piece claim on to and
 // immediately reapplies the highest remaining owner priority. Keeping this
 // separate from claimLocked avoids allocating a temporary touched-piece map
 // on release and eviction paths. Must be called with p.mu held.
-func (p *Pool) unclaimLocked(owner any, tor *torrent.Torrent, owned []int) {
+func (p *Pool) unclaimLocked(owner any, to *torrent.Torrent, owned []int) {
 	for _, index := range owned {
-		key := priorityPieceKey{torrent: tor, index: index}
+		key := priorityPieceKey{torrent: to, index: index}
 		delete(p.priorityClaims[key], owner)
 		p.applyPriorityClaimLocked(key)
 	}
@@ -976,14 +976,15 @@ func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	}
 }
 
-// updateActiveRange recalculates and refreshes the eviction-protection
-// window for a reader based on its new read offset. Called by the reader's
-// stream when its position moves. Takes pool.mu to protect
-// against concurrent release, Close, and lingering-reader closure.
+// updateReaderPosition records a reader's new read offset and, when it
+// reaches another piece, moves the reader's eviction-protection window and
+// claims the pieces ahead of it. Called by the reader's stream when its
+// position moves. Takes pool.mu to protect against concurrent release, Close,
+// and lingering-reader closure.
 //
 // Piece-priority claims are applied by a goroutine, so the reading goroutine
 // never waits on the torrent client's lock for them.
-func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
+func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 	p.mu.Lock()
 
 	// Skip a reader that was already released or closed.
@@ -999,8 +1000,8 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 	// the stream's lock, preserving the lock order.
 	sr.lastOffset = newOffset
 	currentPiece := filePiece(file, newOffset)
-	pieceChanged := (currentPiece != sr.lastPieceIdx) || (sr.lastPieceIdx < 0)
-	sr.lastPieceIdx = currentPiece
+	pieceChanged := (currentPiece != sr.lastPiece) || (sr.lastPiece < 0)
+	sr.lastPiece = currentPiece
 
 	if !pieceChanged {
 		p.mu.Unlock()
@@ -1012,7 +1013,7 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 
 	if !sr.isFileStorage && p.cfg.Registry != nil {
 		if start, _, end, ok := readerWindow(file, readahead, newOffset); ok {
-			p.protectReaderLocked(sr, start, end)
+			p.setReaderProtectionLocked(sr, start, end)
 		}
 	}
 	p.mu.Unlock()
@@ -1027,15 +1028,15 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 // moved to another piece, whose own update then applies, so out-of-order
 // goroutines cannot leave stale claims.
 func (p *Pool) prioritizeAsync(readerID uint64, piece int64, file *torrent.File, newOffset, readahead int64) {
-	planned := prioritizeNextPieces(file, newOffset, readahead, p.cfg.PriorityWindowFraction)
+	planned := planNextPieces(file, newOffset, readahead, p.cfg.PriorityWindowFraction)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	sr := p.readers[readerID]
-	if sr == nil || !sr.active || sr.lastPieceIdx != piece {
+	if sr == nil || !sr.active || sr.lastPiece != piece {
 		return
 	}
-	sr.prioritizedPieces = p.claimLocked(sr, fileTorrent(file), sr.prioritizedPieces, planned)
+	sr.claimed = p.claimLocked(sr, fileTorrent(file), sr.claimed, planned)
 }
 
 // ReaderPositions returns positions for all active and lingering readers belonging
@@ -1131,9 +1132,9 @@ func (p *Pool) Close() {
 	p.logger.Debug("stream pool closed")
 }
 
-// idleGC periodically closes readers that have lingered past the effective
-// linger timeout and expires preloads.
-func (p *Pool) idleGC() {
+// expireLoop periodically closes readers that have lingered past the
+// effective linger timeout and expires preloads.
+func (p *Pool) expireLoop() {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 

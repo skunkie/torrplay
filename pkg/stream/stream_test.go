@@ -397,21 +397,21 @@ func TestPool_Close(t *testing.T) {
 		infoHash := metainfo.Hash{50}
 
 		sr := &streamReader{
-			active:            true,
-			infoHash:          infoHash,
-			file:              &torrent.File{},
-			readerID:          1,
-			readahead:         1024,
-			isFileStorage:     false,
-			prioritizedPieces: []int{5, 6, 7},
+			active:        true,
+			infoHash:      infoHash,
+			file:          &torrent.File{},
+			readerID:      1,
+			readahead:     1024,
+			isFileStorage: false,
+			claimed:       []int{5, 6, 7},
 		}
 		key := uint64(1)
 		p.readers[key] = sr
 
 		p.Close()
 
-		if sr.prioritizedPieces != nil {
-			t.Fatalf("expected prioritizedPieces to be nil after Close, got %v", sr.prioritizedPieces)
+		if sr.claimed != nil {
+			t.Fatalf("expected claimed to be nil after Close, got %v", sr.claimed)
 		}
 	})
 }
@@ -639,25 +639,25 @@ func TestPool_Release(t *testing.T) {
 		})
 		infoHash := metainfo.Hash{22}
 
-		// The release method iterates over prioritizedPieces and calls
+		// The release method iterates over claimed and calls
 		// file.Torrent().Piece() which panics on a bare &torrent.File{}.
 		// We use an empty slice to test the nil-clearing path without panic.
 		sr := &streamReader{
-			active:            true,
-			infoHash:          infoHash,
-			file:              &torrent.File{},
-			readerID:          1,
-			readahead:         1024,
-			isFileStorage:     false,
-			prioritizedPieces: []int{},
+			active:        true,
+			infoHash:      infoHash,
+			file:          &torrent.File{},
+			readerID:      1,
+			readahead:     1024,
+			isFileStorage: false,
+			claimed:       []int{},
 		}
 		key := uint64(1)
 		p.readers[key] = sr
 
 		p.release(1)
 
-		if len(sr.prioritizedPieces) != 0 {
-			t.Fatalf("expected prioritizedPieces to be empty after release, got %v", sr.prioritizedPieces)
+		if len(sr.claimed) != 0 {
+			t.Fatalf("expected claimed to be empty after release, got %v", sr.claimed)
 		}
 		if sr.active {
 			t.Fatal("expected reader to be inactive after release")
@@ -916,13 +916,13 @@ func TestBoundaryPieceBytes(t *testing.T) {
 	}
 }
 
-// TestComputeFileBoundaries verifies that computeFileBoundaries rejects a nil or empty file.
-func TestComputeFileBoundaries(t *testing.T) {
-	_, _, _, _, ok := computeFileBoundaries(nil, defaultFileBoundaryBytes)
+// TestFileBoundaries verifies that fileBoundaries rejects a nil or empty file.
+func TestFileBoundaries(t *testing.T) {
+	_, _, _, _, ok := fileBoundaries(nil, defaultFileBoundaryBytes)
 	if ok {
 		t.Fatal("expected ok=false for nil file")
 	}
-	_, _, _, _, ok = computeFileBoundaries(&torrent.File{}, defaultFileBoundaryBytes)
+	_, _, _, _, ok = fileBoundaries(&torrent.File{}, defaultFileBoundaryBytes)
 	if ok {
 		t.Fatal("expected ok=false for empty file")
 	}
@@ -941,7 +941,7 @@ func TestPoolConfigDefaults(t *testing.T) {
 
 func TestPoolReadaheadRebalance(t *testing.T) {
 	t.Run("rebalances active readers", func(t *testing.T) {
-		// Registry is nil so registerActiveRangeLocked returns early without
+		// Registry is nil so refreshReaderProtectionLocked returns early without
 		// needing a valid torrent.File (which has unexported fields).
 		p := newTestPool(t, Config{
 			Logger:        testLogger(),
@@ -1093,8 +1093,8 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 	t.Run("zero is a no-op", func(t *testing.T) {
 		// PriorityWindowFraction=0 means no prioritizeAsync goroutine is
 		// ever dispatched regardless of Registry.  When Registry is also nil,
-		// updateActiveRange returns early (no range tracking at all).  The key
-		// invariant is that sr.prioritizedPieces is never modified by
+		// updateReaderPosition returns early (no range tracking at all).  The key
+		// invariant is that sr.claimed is never modified by
 		// prioritization logic when fraction == 0.
 		p := newTestPool(t, Config{
 			Logger:                 testLogger(),
@@ -1103,23 +1103,23 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 		infoHash := metainfo.Hash{20}
 
 		sr := &streamReader{
-			active:            true,
-			infoHash:          infoHash,
-			readerID:          1,
-			readahead:         1024,
-			isFileStorage:     false,
-			prioritizedPieces: []int{1, 2, 3},
+			active:        true,
+			infoHash:      infoHash,
+			readerID:      1,
+			readahead:     1024,
+			isFileStorage: false,
+			claimed:       []int{1, 2, 3},
 		}
 		key := uint64(1)
 		p.readers[key] = sr
 
-		// Registry is nil so updateActiveRange returns early before reaching
+		// Registry is nil so updateReaderPosition returns early before reaching
 		// file.Torrent().Info() — this is the correct path for the "no
 		// prioritization" config.
-		p.updateActiveRange(key, 512)
+		p.updateReaderPosition(key, 512)
 
-		if len(sr.prioritizedPieces) != 3 {
-			t.Fatalf("expected prioritizedPieces unchanged (len=3), got %d", len(sr.prioritizedPieces))
+		if len(sr.claimed) != 3 {
+			t.Fatalf("expected claimed unchanged (len=3), got %d", len(sr.claimed))
 		}
 	})
 
@@ -1146,17 +1146,17 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 		}
 		p.mu.Unlock()
 
-		p.updateActiveRange(key, 2*64)
+		p.updateReaderPosition(key, 2*64)
 		require.Eventually(t, func() bool {
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			return len(p.readers[key].prioritizedPieces) == 4
+			return len(p.readers[key].claimed) == 4
 		}, 5*time.Second, time.Millisecond, "a file-storage reader must claim the pieces ahead")
 		assert.Empty(t, reg.protectedPieces(), "file-storage pieces need no eviction protection")
 	})
 }
 
-func TestPrioritizeNextPieces(t *testing.T) {
+func TestPlanNextPieces(t *testing.T) {
 	const pieceLength = 256 << 10
 	c := newTestTorrentClient(t)
 	_, file := addSizedTorrent(t, c, "priorities", pieceLength, 100*pieceLength)
@@ -1196,7 +1196,7 @@ func TestPrioritizeNextPieces(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			planned := prioritizeNextPieces(tt.file, tt.byteOffset, tt.readahead, tt.fraction)
+			planned := planNextPieces(tt.file, tt.byteOffset, tt.readahead, tt.fraction)
 			if tt.want == nil {
 				assert.Nil(t, planned)
 				return
@@ -1214,14 +1214,14 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 		to, file := addSizedTorrent(t, c, "movie", 64, 640)
 		p := newTestPool(t, Config{Logger: testLogger(), PriorityWindowFraction: 1})
 		key := uint64(1)
-		sr := &streamReader{active: true, file: file, infoHash: to.InfoHash(), lastPieceIdx: 2, readerID: 1}
+		sr := &streamReader{active: true, file: file, infoHash: to.InfoHash(), lastPiece: 2, readerID: 1}
 		p.readers[key] = sr
 		return p, to, key, sr
 	}
 	claimed := func(p *Pool, sr *streamReader) []int {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		return slices.Clone(sr.prioritizedPieces)
+		return slices.Clone(sr.claimed)
 	}
 
 	t.Run("claims the pieces ahead of the reader", func(t *testing.T) {
@@ -1229,7 +1229,7 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 		p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64)
 		assert.Equal(t, []int{3, 4, 5, 6}, claimed(p, sr))
 		p.mu.Lock()
-		for _, index := range sr.prioritizedPieces {
+		for _, index := range sr.claimed {
 			assert.Equal(t, torrent.PiecePriorityNow, p.priorityClaims[priorityPieceKey{index: index, torrent: to}][sr])
 		}
 		p.mu.Unlock()
@@ -1237,7 +1237,7 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 
 	t.Run("ignores an update for a piece the reader has left", func(t *testing.T) {
 		p, _, key, sr := newReader(t)
-		sr.lastPieceIdx = 5
+		sr.lastPiece = 5
 		p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64)
 		assert.Empty(t, claimed(p, sr), "a stale update must not replace newer claims")
 	})
@@ -1269,7 +1269,7 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 	})
 }
 
-func TestPool_UpdateActiveRange(t *testing.T) {
+func TestPool_UpdateReaderPosition(t *testing.T) {
 	t.Run("nil registry caches offset", func(t *testing.T) {
 		p := newTestPool(t, Config{
 			Logger:   testLogger(),
@@ -1286,7 +1286,7 @@ func TestPool_UpdateActiveRange(t *testing.T) {
 		}
 		p.readers[key] = sr
 
-		p.updateActiveRange(key, 1024)
+		p.updateReaderPosition(key, 1024)
 
 		p.mu.Lock()
 		cached := sr.lastOffset
@@ -1387,15 +1387,15 @@ func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 	for _, claimCount := range []int{32, 256, 2048} {
 		b.Run(fmt.Sprintf("Claims_%d", claimCount), func(b *testing.B) {
 			p := &Pool{priorityClaims: make(map[priorityPieceKey]priorityClaim, claimCount)}
-			sr := &streamReader{prioritizedPieces: make([]int, claimCount)}
+			sr := &streamReader{claimed: make([]int, claimCount)}
 			claims := make([]priorityClaim, claimCount)
-			for i := range sr.prioritizedPieces {
-				sr.prioritizedPieces[i] = i
+			for i := range sr.claimed {
+				sr.claimed[i] = i
 				claims[i] = make(priorityClaim, 1)
 			}
 			refill := func() {
-				sr.prioritizedPieces = sr.prioritizedPieces[:claimCount]
-				for _, index := range sr.prioritizedPieces {
+				sr.claimed = sr.claimed[:claimCount]
+				for _, index := range sr.claimed {
 					claim := claims[index]
 					claim[sr] = torrent.PiecePriorityHigh
 					p.priorityClaims[priorityPieceKey{index: index}] = claim
@@ -1409,7 +1409,7 @@ func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 				if i > 0 {
 					refill()
 				}
-				p.unclaimLocked(sr, nil, sr.prioritizedPieces)
+				p.unclaimLocked(sr, nil, sr.claimed)
 			}
 		})
 	}

@@ -110,6 +110,10 @@ type preload struct {
 	completedBytes int64
 	file           *torrent.File
 	fileIndex      int
+	// fileRead reports that a reader of the preload's file was acquired since
+	// the preload was requested. Once its file has no reader left, a read
+	// preload has served its purpose and is released.
+	fileRead bool
 	// finishedAt is when the preload failed or was evicted.
 	finishedAt time.Time
 	// headEnd, tailStart, and tailEnd are the file-relative byte ranges
@@ -122,10 +126,6 @@ type preload struct {
 	// progressAt is when a running preload started running or last completed
 	// a piece. The stall timeout runs from it.
 	progressAt time.Time
-	// read reports that a reader of the preload's file was acquired since the
-	// preload was requested. Once its file has no reader left, a read preload
-	// has served its purpose and is released.
-	read bool
 	// readyAt is when the preload became ready. The ready TTL of a preload
 	// whose file has not been read runs from it.
 	readyAt     time.Time
@@ -185,7 +185,7 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 		return PreloadStatus{}, ErrPreloadDoesNotFit
 	}
 	pl.completedBytes, _ = pl.progress()
-	pl.read = p.fileHasReadersLocked(file)
+	pl.fileRead = p.fileHasReadersLocked(file)
 	to.AllowDataDownload()
 	p.preloads[infoHash] = pl
 	p.preloadQueue = append(p.preloadQueue, pl)
@@ -524,12 +524,12 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 // waitForPieceChange blocks until the state of a watched piece changes, and
 // then drains changes already delivered so that a burst causes one check. It
 // returns false when ctx ends or the torrent closes.
-func waitForPieceChange(ctx context.Context, tor *torrent.Torrent, changes <-chan torrent.PieceStateChange, watched map[int]struct{}) bool {
+func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, watched map[int]struct{}) bool {
 	for {
 		select {
 		case <-ctx.Done():
 			return false
-		case <-tor.Closed():
+		case <-to.Closed():
 			return false
 		case change, ok := <-changes:
 			if !ok {
@@ -573,7 +573,7 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 			slog.String("file", pl.file.Path()))
 		// Playback that started and ended while the preload ran no longer
 		// needs its cache.
-		if pl.read && !p.fileHasReadersLocked(pl.file) {
+		if pl.fileRead && !p.fileHasReadersLocked(pl.file) {
 			p.removePreloadLocked(pl.infoHash)
 		}
 		p.dispatchPreloadsLocked()
@@ -707,7 +707,7 @@ func (p *Pool) shrinkPreloadsLocked() {
 func (p *Pool) releaseReadPreloadsLocked() {
 	released := false
 	for infoHash, pl := range p.preloads {
-		if pl.state == PreloadReady && pl.read && !p.fileHasReadersLocked(pl.file) {
+		if pl.state == PreloadReady && pl.fileRead && !p.fileHasReadersLocked(pl.file) {
 			p.removePreloadLocked(infoHash)
 			released = true
 		}
@@ -792,7 +792,7 @@ func (p *Pool) expirePreloads() {
 			if p.fileHasReadersLocked(pl.file) {
 				continue
 			}
-			if pl.read || (ttl > 0 && now.Sub(pl.readyAt) >= ttl) {
+			if pl.fileRead || (ttl > 0 && now.Sub(pl.readyAt) >= ttl) {
 				p.removePreloadLocked(infoHash)
 				removed = true
 			}
