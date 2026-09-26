@@ -1003,7 +1003,7 @@ func TestFilePieceRanges(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			headStart, headEnd, tailStart, tailEnd, ok := FilePieceRanges(video, tt.headEnd, tt.tailStart, tt.tailEnd)
+			headStart, headEnd, tailStart, tailEnd, ok := filePieceRanges(video, tt.headEnd, tt.tailStart, tt.tailEnd)
 			assert.Equal(t, tt.ok, ok)
 			if tt.ok {
 				assert.Equal(t, tt.want, [4]int{headStart, headEnd, tailStart, tailEnd})
@@ -1012,7 +1012,7 @@ func TestFilePieceRanges(t *testing.T) {
 	}
 
 	t.Run("nil file", func(t *testing.T) {
-		_, _, _, _, ok := FilePieceRanges(nil, 32, 0, 0)
+		_, _, _, _, ok := filePieceRanges(nil, 32, 0, 0)
 		assert.False(t, ok)
 	})
 }

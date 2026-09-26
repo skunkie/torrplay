@@ -90,7 +90,7 @@ const (
 	// minSharedPreloadBytes is the smallest per-preload share worth running
 	// preloads concurrently for: a default head and tail boundary. Below it, a
 	// single preload takes the whole capacity instead.
-	minSharedPreloadBytes = 2 * int64(DefaultFileBoundaryBytes)
+	minSharedPreloadBytes = 2 * int64(defaultFileBoundaryBytes)
 )
 
 // preload caches the head and tail of one file so that playback of the file
@@ -316,7 +316,7 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload
 		return nil, false
 	}
 
-	startend := max(int64(DefaultFileBoundaryBytes), info.PieceLength)
+	startend := max(int64(defaultFileBoundaryBytes), info.PieceLength)
 	var headEnd, tailStart, tailEnd int64
 	switch {
 	case file.Length() <= startend, budget <= startend:
@@ -332,7 +332,7 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload
 		// occupies the whole piece.
 		headEnd, tailStart, tailEnd = fitPreloadRanges(file, limit, headEnd, tailStart, tailEnd)
 	}
-	headStart, headEndPiece, tailStartPiece, tailEndPiece, ok := FilePieceRanges(file, headEnd, tailStart, tailEnd)
+	headStart, headEndPiece, tailStartPiece, tailEndPiece, ok := filePieceRanges(file, headEnd, tailStart, tailEnd)
 	if !ok {
 		return nil, false
 	}
@@ -342,13 +342,13 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload
 		headEnd:     headEnd,
 		infoHash:    file.Torrent().InfoHash(),
 		mode:        mode,
-		pieces:      BoundaryPieces(headStart, headEndPiece, tailStartPiece, tailEndPiece),
+		pieces:      slices.Collect(boundaryPieces(headStart, headEndPiece, tailStartPiece, tailEndPiece)),
 		state:       PreloadQueued,
 		tailEnd:     tailEnd,
 		tailStart:   tailStart,
 		targetBytes: headEnd + (tailEnd - tailStart),
 		reservation: preloadReservation{
-			bytes:            BoundaryPieceBytes(info, headStart, headEndPiece, tailStartPiece, tailEndPiece),
+			bytes:            boundaryPieceBytes(info, headStart, headEndPiece, tailStartPiece, tailEndPiece),
 			coversBoundaries: preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
 			filePath:         file.Path(),
 			headStart:        headStart,
@@ -386,8 +386,8 @@ func fitPreloadRanges(file *torrent.File, budget, headEnd, tailStart, tailEnd in
 	pieceLength := max(info.PieceLength, 1)
 	fileOffset := file.Offset()
 	for headEnd > 0 {
-		headStartPiece, headEndPiece, tailStartPiece, tailEndPiece, ok := FilePieceRanges(file, headEnd, tailStart, tailEnd)
-		if !ok || BoundaryPieceBytes(info, headStartPiece, headEndPiece, tailStartPiece, tailEndPiece) <= budget {
+		headStartPiece, headEndPiece, tailStartPiece, tailEndPiece, ok := filePieceRanges(file, headEnd, tailStart, tailEnd)
+		if !ok || boundaryPieceBytes(info, headStartPiece, headEndPiece, tailStartPiece, tailEndPiece) <= budget {
 			break
 		}
 		headPieces := headEndPiece - headStartPiece + 1
@@ -425,7 +425,7 @@ func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool
 // playback readers, so a newly acquired stream is never starved by held
 // preloads.
 func preloadProtectionCapacity(totalBudget int64) int64 {
-	playbackReserve := min(totalBudget/2, 2*int64(DefaultFileBoundaryBytes))
+	playbackReserve := min(totalBudget/2, 2*int64(defaultFileBoundaryBytes))
 	return max(totalBudget-playbackReserve, 0)
 }
 

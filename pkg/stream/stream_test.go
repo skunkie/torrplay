@@ -1207,7 +1207,7 @@ func TestBoundaryPieces(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, BoundaryPieces(tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd))
+			assert.Equal(t, tt.want, slices.Collect(boundaryPieces(tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd)))
 		})
 	}
 }
@@ -1227,18 +1227,18 @@ func TestBoundaryPieceBytes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, BoundaryPieceBytes(info, tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd))
+			assert.Equal(t, tt.want, boundaryPieceBytes(info, tt.headStart, tt.headEnd, tt.tailStart, tt.tailEnd))
 		})
 	}
 }
 
 // TestComputeFileBoundaries verifies that computeFileBoundaries rejects a nil or empty file.
 func TestComputeFileBoundaries(t *testing.T) {
-	_, _, _, _, ok := computeFileBoundaries(nil, DefaultFileBoundaryBytes)
+	_, _, _, _, ok := computeFileBoundaries(nil, defaultFileBoundaryBytes)
 	if ok {
 		t.Fatal("expected ok=false for nil file")
 	}
-	_, _, _, _, ok = computeFileBoundaries(&torrent.File{}, DefaultFileBoundaryBytes)
+	_, _, _, _, ok = computeFileBoundaries(&torrent.File{}, defaultFileBoundaryBytes)
 	if ok {
 		t.Fatal("expected ok=false for empty file")
 	}

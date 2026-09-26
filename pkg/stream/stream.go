@@ -11,7 +11,6 @@ import (
 	"io"
 	"iter"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
@@ -519,7 +518,7 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 	if isFileStorage {
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
-		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, DefaultFileBoundaryBytes)
+		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, defaultFileBoundaryBytes)
 	} else {
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	}
@@ -817,7 +816,7 @@ func fitFileBoundaries(file *torrent.File, allowance int64) (boundaryBytes, cost
 		if !ok {
 			return 0, 0, false
 		}
-		if cost = BoundaryPieceBytes(info, headStart, headEnd, tailStart, tailEnd); cost <= allowance {
+		if cost = boundaryPieceBytes(info, headStart, headEnd, tailStart, tailEnd); cost <= allowance {
 			return boundaryBytes, cost, true
 		}
 		if boundaryBytes <= pieceLength {
@@ -874,7 +873,7 @@ func (p *Pool) boundaryBytesPerFileLocked(totalBudget int64, activeFiles int) in
 	if activeFiles <= 0 || totalBudget <= 0 {
 		return 0
 	}
-	return min(int64(DefaultFileBoundaryBytes), totalBudget/(4*int64(activeFiles)))
+	return min(int64(defaultFileBoundaryBytes), totalBudget/(4*int64(activeFiles)))
 }
 
 const trailingReadaheadDivisor = 4 // trailing range is 1/4th of readahead pieces
@@ -905,9 +904,9 @@ func computeRange(file *torrent.File, pieceLength, readahead, byteOffset int64) 
 	return int(startPiece), int(endPiece)
 }
 
-// DefaultFileBoundaryBytes is the minimum amount of head and tail bytes (8 MiB)
+// defaultFileBoundaryBytes is the minimum amount of head and tail bytes (8 MiB)
 // protected from eviction to preserve container metadata and seek tables.
-const DefaultFileBoundaryBytes = 8 << 20
+const defaultFileBoundaryBytes = 8 << 20
 
 // computeFileBoundaries calculates the inclusive head and tail piece ranges of
 // boundaryBytes each, at least one piece, that protect a file's container
@@ -919,14 +918,14 @@ func computeFileBoundaries(file *torrent.File, boundaryBytes int64) (headStart, 
 	}
 	length := file.Length()
 	startend := max(boundaryBytes, filePieceLength(file))
-	return FilePieceRanges(file, min(length, startend), max(length-startend, 0), length)
+	return filePieceRanges(file, min(length, startend), max(length-startend, 0), length)
 }
 
-// FilePieceRanges returns the inclusive torrent piece ranges holding the
+// filePieceRanges returns the inclusive torrent piece ranges holding the
 // file-relative byte ranges [0, headEnd) and [tailStart, tailEnd). An empty
 // tail range repeats the head range. It returns false when the file has no
 // piece metadata or the head range is empty.
-func FilePieceRanges(file *torrent.File, headEnd, tailStart, tailEnd int64) (int, int, int, int, bool) {
+func filePieceRanges(file *torrent.File, headEnd, tailStart, tailEnd int64) (int, int, int, int, bool) {
 	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil || headEnd <= 0 {
 		return 0, 0, 0, 0, false
 	}
@@ -942,18 +941,10 @@ func FilePieceRanges(file *torrent.File, headEnd, tailStart, tailEnd int64) (int
 		int((fileOffset + tailEnd - 1) / pieceLength), true
 }
 
-// BoundaryPieces returns the pieces of the inclusive head and tail piece
-// ranges in ascending order. The tail may repeat or overlap the head; pieces
-// shared by both are listed once.
-func BoundaryPieces(headStart, headEnd, tailStart, tailEnd int) []int {
-	pieces := make([]int, 0, max(headEnd-headStart+1, 0)+max(tailEnd-tailStart+1, 0))
-	return slices.AppendSeq(pieces, boundaryPieces(headStart, headEnd, tailStart, tailEnd))
-}
-
-// BoundaryPieceBytes returns the storage size of the pieces BoundaryPieces
-// lists. Storage protects and evicts whole pieces, so this is the memory the
+// boundaryPieceBytes returns the storage size of the pieces boundaryPieces
+// yields. Storage protects and evicts whole pieces, so this is the memory the
 // head and tail ranges occupy, including a shorter final piece at its real size.
-func BoundaryPieceBytes(info *metainfo.Info, headStart, headEnd, tailStart, tailEnd int) int64 {
+func boundaryPieceBytes(info *metainfo.Info, headStart, headEnd, tailStart, tailEnd int) int64 {
 	var total int64
 	for index := range boundaryPieces(headStart, headEnd, tailStart, tailEnd) {
 		total += info.Piece(index).Length()
@@ -961,6 +952,9 @@ func BoundaryPieceBytes(info *metainfo.Info, headStart, headEnd, tailStart, tail
 	return total
 }
 
+// boundaryPieces yields the pieces of the inclusive head and tail piece ranges
+// in ascending order. The tail may repeat or overlap the head; pieces shared by
+// both are yielded once.
 func boundaryPieces(headStart, headEnd, tailStart, tailEnd int) iter.Seq[int] {
 	return func(yield func(int) bool) {
 		for index := headStart; index <= headEnd; index++ {
