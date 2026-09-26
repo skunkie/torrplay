@@ -115,17 +115,14 @@ type Config struct {
 	// IdleParkTimeout is the idle duration after which a reader's readahead is set
 	// to zero. Zero defaults to 30 seconds. Memory pressure may shorten it.
 	IdleParkTimeout time.Duration
-	// PriorityWindowFraction, when > 0, bumps the download priority of pieces
-	// ahead of the reader to PiecePriorityNow for the closest
-	// PriorityNowFraction of them and PiecePriorityHigh for the rest. The
-	// fraction applies to the readahead window size in pieces (end − position).
-	// Values above 1 are clamped to 1. A non-positive value disables prioritization.
+	// PriorityWindowFraction, when > 0, raises the pieces just ahead of a
+	// playback reader to PiecePriorityNow. The fraction applies to the
+	// readahead window size in pieces, and at least one piece is claimed. The
+	// torrent client already gives the whole readahead window
+	// PiecePriorityReadahead but orders those pieces by rarity, so the claim
+	// makes the nearest pieces download first. Values above 1 are clamped to 1.
+	// A non-positive value disables prioritization.
 	PriorityWindowFraction float64
-	// PriorityNowFraction, when > 0, defines the fraction of the
-	// prioritized pieces that receive PiecePriorityNow (closest to the reader);
-	// the remaining fraction receives PiecePriorityHigh. Values above 1 are clamped to 1.
-	// Defaults to 0.3 (30 % get Now, 70 % get High).
-	PriorityNowFraction float64
 	// ReadObserver, when set, is called after every Read of a playback reader
 	// with the reader's storage mode and how long the Read took, including
 	// any wait for torrent data. Preload reads are not reported. It runs on
@@ -1333,12 +1330,11 @@ func (p *Pool) registerActiveRangeLocked(infoHash metainfo.Hash, key readerKey, 
 	}
 }
 
-// prioritizeNextPieces plans the priorities ahead of a reader. The nearest
-// The nearFraction proportion of selected pieces gets PiecePriorityNow; the rest
-// get PiecePriorityHigh.
-// Applying the plan is separate so priorities shared by overlapping readers
-// are only lowered after their final owner releases them.
-func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead int64, fraction, nearFraction float64) []prioritizedPiece {
+// prioritizeNextPieces plans the PiecePriorityNow claims for the fraction of
+// the readahead pieces nearest to a reader. Applying the plan is separate so
+// priorities shared by overlapping readers are only lowered after their final
+// owner releases them.
+func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead int64, fraction float64) []prioritizedPiece {
 	if fraction <= 0 || readahead <= 0 || file == nil {
 		return nil
 	}
@@ -1367,27 +1363,17 @@ func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead in
 	// The read offset is file-relative, while priorityPlan works in torrent
 	// pieces. Include the file's offset within its first piece.
 	byteOffset += file.Offset() % pieceLength
-	return buildPriorityPlan(byteOffset, readahead, pieceLength, int64(file.BeginPieceIndex()), endPieceMax, fraction, nearFraction)
+	return buildPriorityPlan(byteOffset, readahead, pieceLength, int64(file.BeginPieceIndex()), endPieceMax, fraction)
 }
 
 // buildPriorityPlan constructs the bounded per-piece priority plan after the
 // caller has resolved and validated the file and torrent bounds.
-func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction, nearFraction float64) []prioritizedPiece {
-	n, nowCount, target, currentPiece := priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax, fraction, nearFraction)
+func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction float64) []prioritizedPiece {
+	_, target, currentPiece := priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax, fraction)
 
-	planCapacity := max(int(target-(currentPiece+1)), 0)
-	planned := make([]prioritizedPiece, 0, planCapacity)
-	count := 0
+	planned := make([]prioritizedPiece, 0, max(int(target-(currentPiece+1)), 0))
 	for idx := currentPiece + 1; idx < target; idx++ {
-		priority := torrent.PiecePriorityHigh
-		if count < nowCount {
-			priority = torrent.PiecePriorityNow
-		}
-		planned = append(planned, prioritizedPiece{index: int(idx), priority: priority})
-		count++
-		if count >= n {
-			break
-		}
+		planned = append(planned, prioritizedPiece{index: int(idx), priority: torrent.PiecePriorityNow})
 	}
 	return planned
 }
@@ -1495,11 +1481,12 @@ func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	}
 }
 
-// priorityPlan computes how many pieces to prioritize and how to split them
-// between Now and High. It is a pure function of the input parameters so it
-// can be unit-tested without a live torrent. It returns n, nowCount, target,
-// and currentPiece.
-func priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction, nearFraction float64) (n int, nowCount int, target int64, currentPiece int64) {
+// priorityPlan computes how many pieces ahead of the reader to prioritize. It
+// is a pure function of the input parameters so it can be unit-tested without
+// a live torrent. It returns the requested piece count n, the exclusive end
+// piece target after clamping to endPieceMax, and currentPiece. The planned
+// pieces are [currentPiece+1, target).
+func priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction float64) (n int, target int64, currentPiece int64) {
 	if fraction > 1 {
 		fraction = 1
 	}
@@ -1508,14 +1495,9 @@ func priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax in
 	}
 	readaheadPieces := max(readahead/pieceLength, 1)
 	n = max(int(float64(readaheadPieces)*fraction), 1)
-	if nearFraction <= 0 {
-		nearFraction = 0.3
-	}
-	nearFraction = min(nearFraction, 1)
-	nowCount = max(int(float64(n)*nearFraction), 1)
 	currentPiece = byteOffset/pieceLength + beginPiece
 	target = max(min(currentPiece+1+int64(n), endPieceMax), currentPiece+1)
-	return n, nowCount, target, currentPiece
+	return n, target, currentPiece
 }
 
 // findReaderLocked returns the streamReader for the given key, or nil.
@@ -1595,7 +1577,6 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 // SetPriority calls, and release/Close can invalidate them by bumping
 // prioritySeq.
 func (p *Pool) prioritizeAsync(sr *streamReader, seq uint64, file *torrent.File, newOffset, readahead int64) {
-	near := p.cfg.PriorityNowFraction
 	fraction := p.cfg.PriorityWindowFraction
 
 	sr.priorityMu.Lock()
@@ -1603,7 +1584,7 @@ func (p *Pool) prioritizeAsync(sr *streamReader, seq uint64, file *torrent.File,
 		sr.priorityMu.Unlock()
 		return
 	}
-	planned := p.prioritizeNextPieces(file, newOffset, readahead, fraction, near)
+	planned := p.prioritizeNextPieces(file, newOffset, readahead, fraction)
 	p.replaceReaderPrioritiesLocked(sr, file, planned)
 	sr.priorityMu.Unlock()
 }

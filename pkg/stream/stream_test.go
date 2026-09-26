@@ -2306,7 +2306,7 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 	t.Run("nil file returns nil", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 
-		result := p.prioritizeNextPieces(nil, 0, 1024, 0.5, 0.3)
+		result := p.prioritizeNextPieces(nil, 0, 1024, 0.5)
 		if result != nil {
 			t.Fatalf("expected nil for nil file, got %v", result)
 		}
@@ -2315,12 +2315,12 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 	t.Run("zero fraction returns nil", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0, 0.3)
+		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0)
 		if result != nil {
 			t.Fatalf("expected nil for fraction=0, got %v", result)
 		}
 
-		result = p.prioritizeNextPieces(&torrent.File{}, 0, 1024, -0.1, 0.3)
+		result = p.prioritizeNextPieces(&torrent.File{}, 0, 1024, -0.1)
 		if result != nil {
 			t.Fatalf("expected nil for fraction=-0.1, got %v", result)
 		}
@@ -2329,7 +2329,7 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 	t.Run("zero readahead returns nil", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 0, 1, 0.3)
+		result := p.prioritizeNextPieces(&torrent.File{}, 0, 0, 1)
 		if result != nil {
 			t.Fatalf("expected nil for zero readahead, got %v", result)
 		}
@@ -2338,56 +2338,32 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 	t.Run("empty file returns nil", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 1.1, 0.3)
+		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 1.1)
 		if result != nil {
 			t.Fatalf("expected nil for fraction=1.1, got %v", result)
 		}
 	})
 
-	t.Run("near fraction defaults to thirty percent", func(t *testing.T) {
-		// When PriorityNowFraction is 0 in config, updateActiveRange should
-		// default to 0.3 (30 % Now, 70 % High).
-		reg := &stubRegistry{}
-		p := newTestPool(t, Config{
-			Logger:                 testLogger(),
-			Registry:               reg,
-			PriorityWindowFraction: 0.5,
-			PriorityNowFraction:    0, // zero → defaults to 0.3
-		})
-		infoHash := metainfo.Hash{30}
-
-		sr := &streamReader{
-			active:        true,
-			infoHash:      infoHash,
-			readerID:      1,
-			readahead:     1024,
-			isFileStorage: false,
+	t.Run("claims every planned piece at now priority", func(t *testing.T) {
+		// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, n=int(16*0.25)=4.
+		plan := buildPriorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 0.25)
+		if len(plan) != 4 {
+			t.Fatalf("expected 4 planned pieces, got %d", len(plan))
 		}
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
-		p.readers[key] = sr
-
-		// Verify priorityPlan defaults nearFraction to 0.3 when zero.
-		// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, n=int(16*0.5)=8.
-		n, nowCount, _, _ := priorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 0.5, 0)
-		if n != 8 {
-			t.Fatalf("expected n=8 for fraction=0.5 and readaheadPieces=16, got %d", n)
-		}
-		// nearFraction defaults to 0.3: nowCount = int(8*0.3) = 2.
-		if nowCount != 2 {
-			t.Fatalf("expected nowCount=2 (30%% of 8), got %d", nowCount)
+		for i, piece := range plan {
+			if piece.index != i+1 {
+				t.Errorf("expected piece %d at position %d, got %d", i+1, i, piece.index)
+			}
+			if piece.priority != torrent.PiecePriorityNow {
+				t.Errorf("expected piece %d at PiecePriorityNow, got %v", piece.index, piece.priority)
+			}
 		}
 	})
 
-	t.Run("near fraction clamped to max", func(t *testing.T) {
-		// nearFraction > 1 should clamp to 1.0 in priorityPlan so all n pieces get Now.
-		// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, n=int(16*0.5)=8.
-		n, nowCount, _, _ := priorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 0.5, 1.5)
-		if n != 8 {
-			t.Fatalf("expected n=8, got %d", n)
-		}
-		// With nearFraction clamped to 1.0: nowCount = 1.0 * 8 = 8.
-		if nowCount != 8 {
-			t.Fatalf("expected nowCount=8 (all pieces get Now), got %d", nowCount)
+	t.Run("claims at least one piece", func(t *testing.T) {
+		plan := buildPriorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 0.01)
+		if len(plan) != 1 || plan[0].priority != torrent.PiecePriorityNow {
+			t.Fatalf("expected one piece at PiecePriorityNow, got %v", plan)
 		}
 	})
 
@@ -2408,7 +2384,7 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 		// endPieceMax = min(endPieceMax, tor.NumPieces()) guard — no loop
 		// or arithmetic — so the risk of regression is low and the test
 		// constraint is fundamental to the anacrolix/torrent package.
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0.3, 0.5)
+		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0.3)
 		if result != nil {
 			t.Fatalf("expected nil for nil torrent, got %v", result)
 		}
@@ -2649,28 +2625,22 @@ func TestPool_UpdateActiveRange(t *testing.T) {
 func TestPriorityPlan(t *testing.T) {
 	t.Run("edge cases", func(t *testing.T) {
 		// n clamps to minimum 1 when fraction * readaheadPieces < 1.
-		n, _, _, _ := priorityPlan(0, 100, 256*1024, 0, 100, 0.01, 0.5)
+		n, _, _ := priorityPlan(0, 100, 256*1024, 0, 100, 0.01)
 		if n < 1 {
 			t.Fatalf("expected n >= 1, got %d", n)
-		}
-
-		// nowCount clamps to minimum 1.
-		_, nowCount, _, _ := priorityPlan(0, 256*1024, 256*1024, 0, 100, 0.5, 0.001)
-		if nowCount < 1 {
-			t.Fatalf("expected nowCount >= 1, got %d", nowCount)
 		}
 
 		// target can't go below currentPiece+1 (even when n and endPieceMax
 		// would push it lower).  Use pieceLength=1 so byteOffset maps
 		// directly to piece index.
-		_, _, target, _ := priorityPlan(100, 100, 1, 0, 100, 0.01, 0.5)
+		_, target, _ := priorityPlan(100, 100, 1, 0, 100, 0.01)
 		if target < 101 {
 			t.Fatalf("expected target >= 101, got %d", target)
 		}
 
 		// fraction > 1 clamps to 1.
 		// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, fraction clamped to 1.0.
-		n, _, _, _ = priorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 2.0, 0.5)
+		n, _, _ = priorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 2.0)
 		if n != 16 {
 			t.Fatalf("expected n=16 (fraction clamped to 1.0), got %d", n)
 		}
@@ -2684,14 +2654,14 @@ func TestPriorityPlan(t *testing.T) {
 	t.Run("end of last piece", func(t *testing.T) {
 		// EndPieceIndex() == 10, so endPieceMax = 11 (exclusive).
 		// Large readahead + fraction=1.0 → target would far exceed the file.
-		_, _, target, _ := priorityPlan(0, 100*1024*1024, 256*1024, 0, 11, 1.0, 0.5)
+		_, target, _ := priorityPlan(0, 100*1024*1024, 256*1024, 0, 11, 1.0)
 		// idx < target must allow idx == 10 (the last valid piece).
 		if target <= 10 {
 			t.Fatalf("expected target > 10 to include piece 10, got %d", target)
 		}
 
 		// Verify unclamped path: small readahead, target does not exceed endPieceMax.
-		_, _, target, _ = priorityPlan(0, 512*1024, 256*1024, 0, 100, 1.0, 0.5)
+		_, target, _ = priorityPlan(0, 512*1024, 256*1024, 0, 100, 1.0)
 		// readaheadPieces = 2, n = int(2*1.0) = 2, target = 0+1+2 = 3.
 		if target != 3 {
 			t.Fatalf("expected target=3, got %d", target)
@@ -2706,7 +2676,7 @@ func TestPriorityPlan(t *testing.T) {
 		// Simulate a split-file scenario: file starts at piece 100, torrent
 		// has 200 total pieces (indices 0..199), so endPieceMax=200 (exclusive).
 		// readaheadPieces=40, n=40, target=100+1+40=141 (within bounds).
-		_, _, target, currentPiece := priorityPlan(0, 10*1024*1024, 256*1024, 100, 200, 1.0, 0.5)
+		_, target, currentPiece := priorityPlan(0, 10*1024*1024, 256*1024, 100, 200, 1.0)
 		if currentPiece != 100 {
 			t.Fatalf("expected currentPiece=100 (byteOffset=0 + beginPiece=100), got %d", currentPiece)
 		}
@@ -2718,7 +2688,7 @@ func TestPriorityPlan(t *testing.T) {
 		// beginPiece=195, endPieceMax=200 (only 5 pieces left), huge readahead.
 		// readaheadPieces=400, n=400, target=195+1+400=596 > 200 → clamped to 200.
 		// Loop covers 196..199 (the full remaining range).
-		_, _, target, _ = priorityPlan(0, 100*1024*1024, 256*1024, 195, 200, 1.0, 0.5)
+		_, target, _ = priorityPlan(0, 100*1024*1024, 256*1024, 195, 200, 1.0)
 		if target != 200 {
 			t.Fatalf("expected target=200 (saturated near end), got %d", target)
 		}
@@ -2873,8 +2843,7 @@ func BenchmarkPriorityPlanBuild(b *testing.B) {
 					pieceLength,
 					0,
 					endPiece,
-					0.5,
-					0.3,
+					0.15,
 				)
 			}
 		})

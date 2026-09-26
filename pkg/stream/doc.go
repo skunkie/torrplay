@@ -35,14 +35,14 @@
 //
 // # Piece-Priority Bumping
 //
-// When PriorityWindowFraction > 0, reading a new offset triggers an
-// asynchronous piece-priority bump in the torrent client. Of the selected
-// pieces, the nearest PriorityNowFraction (default 30%) receive
-// PiecePriorityNow and the remainder receive PiecePriorityHigh. Preload readers
-// instead claim every piece in their bounded range at PiecePriorityNow until
-// release. Stale priority updates are discarded when a reader moves or is
-// released. Pool-level claim aggregation preserves the highest priority
-// requested by overlapping readers.
+// When PriorityWindowFraction > 0, reading a new piece triggers an
+// asynchronous piece-priority bump in the torrent client: the nearest
+// PriorityWindowFraction of the readahead pieces receive PiecePriorityNow, so
+// they download before the rest of the readahead window, which the torrent
+// client orders by rarity. Preload readers instead claim every piece in their
+// bounded range at PiecePriorityNow until release. Stale priority updates are
+// discarded when a reader moves or is released. Pool-level claim aggregation
+// preserves the highest priority requested by overlapping readers.
 //
 // # Reader Cap and Eviction
 //

@@ -1181,7 +1181,7 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	assert.Equal(t, 1, positions[0].Position)
 	assert.Equal(t, 2, positions[0].End)
 
-	plan := pool.prioritizeNextPieces(file, 32, 128, 1, 0.5)
+	plan := pool.prioritizeNextPieces(file, 32, 128, 1)
 	require.Len(t, plan, 2)
 	assert.Equal(t, 2, plan[0].index, "the first priority should be beyond the current torrent piece")
 	assert.Equal(t, 3, plan[1].index)
@@ -1195,7 +1195,7 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 
 	sr1 := &streamReader{file: file}
 	sr2 := &streamReader{file: file}
-	planned := p.prioritizeNextPieces(file, 0, 256, 1, 0.5)
+	planned := p.prioritizeNextPieces(file, 0, 256, 1)
 	if len(planned) == 0 {
 		t.Fatal("expected a non-empty priority plan")
 	}
@@ -1204,7 +1204,7 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 			t.Fatalf("priority plan crossed exclusive file end: piece=%d end=%d", piece.index, file.EndPieceIndex())
 		}
 	}
-	boundedPlan := p.prioritizeNextPieces(file, 0, 1<<40, 1, 0.5)
+	boundedPlan := p.prioritizeNextPieces(file, 0, 1<<40, 1)
 	if cap(boundedPlan) > file.EndPieceIndex()-file.BeginPieceIndex() {
 		t.Fatalf("priority plan capacity should be bounded by file pieces, got %d", cap(boundedPlan))
 	}

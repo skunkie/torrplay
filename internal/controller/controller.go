@@ -1027,7 +1027,7 @@ func (c *Controller) configureTorrentClient() error {
 		IdleParkTimeout:        30 * time.Second,
 		Logger:                 logger,
 		MaxReadersPerFile:      10,
-		PriorityWindowFraction: 0.5,
+		PriorityWindowFraction: 0.15,
 		MemoryUsage: func() float64 {
 			stats := storageClient.MemoryStats()
 			if stats.LimitBytes <= 0 {
