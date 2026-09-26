@@ -99,7 +99,7 @@ func preloadClaims(p *Pool, to *torrent.Torrent) map[int]torrent.PiecePriority {
 	pl := p.preloads[to.InfoHash()]
 	claims := make(map[int]torrent.PiecePriority)
 	for key, claim := range p.priorityClaims {
-		if priority, ok := claim.owners[pl]; ok && key.torrent == to {
+		if priority, ok := claim[pl]; ok && key.torrent == to {
 			claims[key.index] = priority
 		}
 	}

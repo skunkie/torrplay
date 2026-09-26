@@ -1093,7 +1093,7 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 	claim := p.priorityClaims[key]
 	ownerCount := 0
 	if claim != nil {
-		ownerCount = len(claim.owners)
+		ownerCount = len(claim)
 	}
 	p.mu.Unlock()
 	if ownerCount != 2 {
@@ -1109,8 +1109,8 @@ func TestPoolPriorityClaimsForOverlappingReaders(t *testing.T) {
 	ownerCount = 0
 	secondReaderStillOwns := false
 	if claim != nil {
-		ownerCount = len(claim.owners)
-		_, secondReaderStillOwns = claim.owners[sr2]
+		ownerCount = len(claim)
+		_, secondReaderStillOwns = claim[sr2]
 	}
 	p.mu.Unlock()
 	if ownerCount != 1 || !secondReaderStillOwns {

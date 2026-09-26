@@ -1263,7 +1263,7 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 		assert.Equal(t, []int{3, 4, 5, 6}, claimed(p, sr))
 		p.mu.Lock()
 		for _, index := range sr.prioritizedPieces {
-			assert.Equal(t, torrent.PiecePriorityNow, p.priorityClaims[priorityPieceKey{index: index, torrent: to}].owners[sr])
+			assert.Equal(t, torrent.PiecePriorityNow, p.priorityClaims[priorityPieceKey{index: index, torrent: to}][sr])
 		}
 		p.mu.Unlock()
 	})
@@ -1419,18 +1419,18 @@ func BenchmarkStreamReadSeeker_SeekRead(b *testing.B) {
 func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 	for _, claimCount := range []int{32, 256, 2048} {
 		b.Run(fmt.Sprintf("Claims_%d", claimCount), func(b *testing.B) {
-			p := &Pool{priorityClaims: make(map[priorityPieceKey]*priorityClaim, claimCount)}
+			p := &Pool{priorityClaims: make(map[priorityPieceKey]priorityClaim, claimCount)}
 			sr := &streamReader{prioritizedPieces: make([]int, claimCount)}
-			claims := make([]*priorityClaim, claimCount)
+			claims := make([]priorityClaim, claimCount)
 			for i := range sr.prioritizedPieces {
 				sr.prioritizedPieces[i] = i
-				claims[i] = &priorityClaim{owners: make(map[any]torrent.PiecePriority, 1)}
+				claims[i] = make(priorityClaim, 1)
 			}
 			refill := func() {
 				sr.prioritizedPieces = sr.prioritizedPieces[:claimCount]
 				for _, index := range sr.prioritizedPieces {
 					claim := claims[index]
-					claim.owners[sr] = torrent.PiecePriorityHigh
+					claim[sr] = torrent.PiecePriorityHigh
 					p.priorityClaims[priorityPieceKey{index: index}] = claim
 				}
 			}

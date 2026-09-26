@@ -144,11 +144,9 @@ type priorityPieceKey struct {
 	torrent *torrent.Torrent
 }
 
-type priorityClaim struct {
-	// owners maps each claim owner, a *streamReader or a *preload, to the
-	// priority it requests.
-	owners map[any]torrent.PiecePriority
-}
+// priorityClaim maps each owner claiming a piece, a *streamReader or a
+// *preload, to the priority it requests.
+type priorityClaim map[any]torrent.PiecePriority
 
 // readBufferSize is the size of a stream's read buffer. It lets the small
 // reads of an HTTP response copy take fewer turns through the torrent reader.
@@ -329,7 +327,7 @@ type Pool struct {
 	nextID  uint64
 	// priorityClaims holds every piece priority claimed by readers and
 	// preloads, keyed by piece.
-	priorityClaims map[priorityPieceKey]*priorityClaim
+	priorityClaims map[priorityPieceKey]priorityClaim
 	// preloadQueue holds queued preloads in request order. Entries that are
 	// no longer queued are skipped on dispatch.
 	preloadQueue []*preload
@@ -369,7 +367,7 @@ func New(cfg Config) *Pool {
 		closeCh:        make(chan struct{}),
 		cfg:            cfg,
 		logger:         logger,
-		priorityClaims: make(map[priorityPieceKey]*priorityClaim),
+		priorityClaims: make(map[priorityPieceKey]priorityClaim),
 		preloads:       make(map[metainfo.Hash]*preload),
 		readers:        make(map[uint64]*streamReader),
 	}
@@ -920,9 +918,7 @@ func (p *Pool) claimLocked(owner any, tor *torrent.Torrent, owned []int, planned
 	touched := make(map[priorityPieceKey]struct{}, len(owned)+len(planned))
 	for _, index := range owned {
 		key := priorityPieceKey{torrent: tor, index: index}
-		if claim := p.priorityClaims[key]; claim != nil {
-			delete(claim.owners, owner)
-		}
+		delete(p.priorityClaims[key], owner)
 		touched[key] = struct{}{}
 	}
 
@@ -931,10 +927,10 @@ func (p *Pool) claimLocked(owner any, tor *torrent.Torrent, owned []int, planned
 		key := priorityPieceKey{torrent: tor, index: piece.index}
 		claim := p.priorityClaims[key]
 		if claim == nil {
-			claim = &priorityClaim{owners: make(map[any]torrent.PiecePriority)}
+			claim = make(priorityClaim)
 			p.priorityClaims[key] = claim
 		}
-		claim.owners[owner] = piece.priority
+		claim[owner] = piece.priority
 		owned = append(owned, piece.index)
 		touched[key] = struct{}{}
 	}
@@ -952,9 +948,7 @@ func (p *Pool) claimLocked(owner any, tor *torrent.Torrent, owned []int, planned
 func (p *Pool) unclaimLocked(owner any, tor *torrent.Torrent, owned []int) {
 	for _, index := range owned {
 		key := priorityPieceKey{torrent: tor, index: index}
-		if claim := p.priorityClaims[key]; claim != nil {
-			delete(claim.owners, owner)
-		}
+		delete(p.priorityClaims[key], owner)
 		p.applyPriorityClaimLocked(key)
 	}
 }
@@ -964,15 +958,11 @@ func (p *Pool) unclaimLocked(owner any, tor *torrent.Torrent, owned []int) {
 func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	claim := p.priorityClaims[key]
 	priority := torrent.PiecePriorityNone
-	if claim != nil {
-		for _, ownerPriority := range claim.owners {
-			if ownerPriority > priority {
-				priority = ownerPriority
-			}
-		}
-		if len(claim.owners) == 0 {
-			delete(p.priorityClaims, key)
-		}
+	for _, ownerPriority := range claim {
+		priority = max(priority, ownerPriority)
+	}
+	if len(claim) == 0 {
+		delete(p.priorityClaims, key)
 	}
 	if key.torrent == nil {
 		return
