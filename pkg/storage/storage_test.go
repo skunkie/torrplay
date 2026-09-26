@@ -1116,7 +1116,61 @@ func TestClient_SetMaxMemory(t *testing.T) {
 	})
 }
 
-func TestClient_EvictDownToLocked(t *testing.T) {
+func TestClient_EvictLocked(t *testing.T) {
+	// Pieces 0 and 1 are unprotected, 2 is a file boundary, and 3 is in an
+	// active range; each level gives up its pieces only after the one before.
+	t.Run("gives up protection levels in order", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			upTo         evictionProtection
+			wantResident []int
+		}{
+			{name: "unprotected only", upTo: protectActiveAndBoundaries, wantResident: []int{2, 3}},
+			{name: "boundaries before active ranges", upTo: protectActiveOnly, wantResident: []int{3}},
+			{name: "active ranges last", upTo: protectNone},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				client := newTestClient(1024)
+				info, infoHash := newTestInfo(256, 4)
+				torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+				require.NoError(t, err)
+				for i := range 4 {
+					_, err := torrentImpl.Piece(info.Piece(i)).WriteAt(make([]byte, 256), 0)
+					require.NoError(t, err)
+				}
+				client.SetProtection(infoHash, 1, Protection{
+					Active:     []PieceRange{{Start: 3, End: 3}},
+					Boundaries: []PieceRange{{Start: 2, End: 2}},
+				})
+
+				client.mu.Lock()
+				client.evictLocked(0, tt.upTo, 0)
+				client.mu.Unlock()
+
+				assert.ElementsMatch(t, tt.wantResident, residentPieceIndexes(t, client, infoHash))
+			})
+		}
+	})
+
+	t.Run("returns one buffer of the reuse size", func(t *testing.T) {
+		client := newTestClient(1024)
+		info, infoHash := newTestInfo(256, 4)
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+		for i := range 3 {
+			_, err := torrentImpl.Piece(info.Piece(i)).WriteAt(make([]byte, 256), 0)
+			require.NoError(t, err)
+		}
+
+		client.mu.Lock()
+		reusable := client.evictLocked(0, protectNone, 256)
+		missed := client.evictLocked(0, protectNone, 128)
+		client.mu.Unlock()
+		assert.Len(t, reusable, 256)
+		assert.Nil(t, missed, "nothing is left to reuse")
+	})
+
 	// Checks manual eviction down to a specific target.
 	t.Run("evicts down to target", func(t *testing.T) {
 		client := newTestClient(1024)
@@ -2558,6 +2612,6 @@ func evictUnprotected(client *Client, target int64) int64 {
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	before := client.used
-	client.evictDownToLocked(target)
+	client.evictLocked(target, protectActiveAndBoundaries, 0)
 	return before - client.used
 }

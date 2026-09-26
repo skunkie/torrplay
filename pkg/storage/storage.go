@@ -638,12 +638,7 @@ func (c *Client) SetMaxMemory(limitBytes int64) error {
 		c.maxMemory = limitBytes
 
 		// Trigger eviction if current usage exceeds the new limit.
-		if c.used > limitBytes {
-			c.evictDownToLocked(limitBytes)
-			if c.used > limitBytes {
-				c.emergencyEvictDownToLocked(limitBytes)
-			}
-		}
+		c.evictLocked(limitBytes, protectNone, 0)
 
 		used := c.used
 		if used <= limitBytes {
@@ -712,47 +707,16 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 		}
 
 		var reusable []byte
-
-		// Check if we need to evict.
 		if c.used+size > c.maxMemory {
-			target := max(c.maxMemory-size, 0)
-
-			beforeEvict := c.used
-
-			// Standard eviction preserves active playback ranges and file boundaries.
-			reusable = c.evictDownToInternalLocked(target, protectActiveAndBoundaries, size)
-
-			// Boundary metadata yields before active playback ranges. This keeps current
-			// playback data protected when the combined leases exceed the cache budget.
-			if c.used+size > c.maxMemory {
-				reuseSize := size
-				if reusable != nil {
-					reuseSize = 0
-				}
-				if boundaryReusable := c.evictDownToInternalLocked(target, protectActiveOnly, reuseSize); reusable == nil {
-					reusable = boundaryReusable
-				}
+			// Only an absolute lack of other capacity may evict an active
+			// range. An unpublished reservation will soon publish or refund
+			// its space, so wait for it below rather than discard pieces a
+			// reader is consuming.
+			evictUpTo := protectActiveOnly
+			if c.pendingAllocations == 0 {
+				evictUpTo = protectNone
 			}
-
-			// Only an absolute lack of non-active capacity may evict an active range.
-			// An unpublished reservation will soon publish or refund its space, so
-			// wait for it below rather than discard pieces a reader is consuming.
-			if c.used+size > c.maxMemory && c.pendingAllocations == 0 {
-				reuseSize := size
-				if reusable != nil {
-					reuseSize = 0
-				}
-				if emergencyReusable := c.evictDownToInternalLocked(target, protectNone, reuseSize); reusable == nil {
-					reusable = emergencyReusable
-				}
-			}
-
-			if c.logger.Enabled(context.Background(), slog.LevelDebug) {
-				c.logger.Debug("memory allocation eviction",
-					slog.Int64("needed", size),
-					slog.Int64("before", beforeEvict),
-					slog.Int64("after", c.used))
-			}
+			reusable = c.evictLocked(max(c.maxMemory-size, 0), evictUpTo, size)
 
 			if c.used+size > c.maxMemory {
 				// Unprotected pieces have already been exhausted, so an unpublished
@@ -839,59 +803,38 @@ func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error
 	return nil
 }
 
-// evictDownToLocked evicts pieces from the LRU list until the total memory usage
-// is at or below the target. It must be called with the client's mutex held.
-// Pieces inside registered active ranges or file boundaries are skipped.
-func (c *Client) evictDownToLocked(target int64) {
-	c.evictDownToInternalLocked(target, protectActiveAndBoundaries, 0)
-}
-
-// emergencyEvictDownToLocked is called during allocateMemory when standard eviction
-// could not free enough space because too many pieces are protected. It first
-// evicts file boundary pieces, then the oldest LRU pieces regardless of active
-// range, to prevent ErrInsufficientMemory
-// from causing anacrolix/torrent to permanently disable downloading.
-func (c *Client) emergencyEvictDownToLocked(target int64) {
-	c.evictDownToInternalLocked(target, protectActiveOnly, 0)
-	if c.used > target {
-		c.evictDownToInternalLocked(target, protectNone, 0)
-	}
-}
-
-// evictDownToInternalLocked evicts pieces until target is reached. If reuseSize
-// is positive, at most one detached buffer of exactly that length is returned
-// for immediate handoff to an incoming allocation. Pieces still downloading are
-// spared on a first pass and evicted only if the target is otherwise out of
-// reach, because an evicted partial piece must be downloaded again in full.
-// c.mu must be held.
-func (c *Client) evictDownToInternalLocked(target int64, protection evictionProtection, reuseSize int64) []byte {
+// evictLocked evicts pieces, least recently used first, until memory usage
+// is at most target. It gives up unprotected pieces first, then file boundary
+// pieces, and last active range pieces, stopping after the upTo level. Within
+// each level, pieces still downloading are spared until nothing else is left,
+// because an evicted partial piece must be downloaded again in full. When
+// reuseSize is positive, the first detached buffer of exactly that length is
+// returned for immediate handoff to an incoming allocation. c.mu must be held.
+func (c *Client) evictLocked(target int64, upTo evictionProtection, reuseSize int64) []byte {
 	if c.used <= target {
 		return nil
 	}
 
 	before := c.used
 	downloadingSince := time.Now().Add(-downloadingPieceGrace).UnixNano()
-	reusable := c.evictPassLocked(target, protection, reuseSize, downloadingSince)
-	if c.used > target {
-		if reusable != nil {
-			reuseSize = 0
-		}
-		if downloadingReusable := c.evictPassLocked(target, protection, reuseSize, 0); reusable == nil {
-			reusable = downloadingReusable
+	var reusable []byte
+	for protection := protectActiveAndBoundaries; protection <= upTo && c.used > target; protection++ {
+		for _, since := range []int64{downloadingSince, 0} {
+			if c.used <= target {
+				break
+			}
+			if detached := c.evictPassLocked(target, protection, reuseSize, since); reusable == nil && detached != nil {
+				reusable, reuseSize = detached, 0
+			}
 		}
 	}
 
 	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
-		msg := "eviction completed"
-		if protection != protectActiveAndBoundaries {
-			msg = "emergency eviction completed"
-		}
-		c.logger.Debug(msg,
+		c.logger.Debug("eviction completed",
 			slog.Int64("target", target),
 			slog.Int64("evicted", before-c.used),
 			slog.Int64("newUsed", c.used))
 	}
-
 	return reusable
 }
 
@@ -1417,12 +1360,7 @@ func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
 		return ErrTorrentClosed
 	}
 
-	if c.used > c.maxMemory {
-		c.evictDownToLocked(c.maxMemory)
-		if c.used > c.maxMemory {
-			c.emergencyEvictDownToLocked(c.maxMemory)
-		}
-	}
+	c.evictLocked(c.maxMemory, protectNone, 0)
 	if c.used > c.maxMemory {
 		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
 		p.finishFailedAllocationLocked(pd)
