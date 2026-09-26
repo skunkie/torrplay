@@ -627,7 +627,7 @@ func TestPool_Close(t *testing.T) {
 		readerCtx, cancel := context.WithCancel(context.Background())
 		reader.SetContext(readerCtx)
 		wrapper := &readAtWrapper{reader: reader}
-		key := readerKey{filePath: "active", readerID: 1}
+		key := uint64(1)
 
 		pool.mu.Lock()
 		pool.readers[key] = &streamReader{
@@ -715,7 +715,7 @@ func TestPool_Close(t *testing.T) {
 			isFileStorage:     false,
 			prioritizedPieces: []int{5, 6, 7},
 		}
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
+		key := uint64(1)
 		p.readers[key] = sr
 
 		p.Close()
@@ -782,15 +782,14 @@ func byteReadahead(p *Pool, totalBudget int64) int64 {
 func TestPool_PlanReadaheadLocked(t *testing.T) {
 	t.Run("splits budget across active readers", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
-		infoHash := metainfo.Hash{}
 
 		// With no active readers the whole budget remains unallocated.
 		if share := p.planReadaheadLocked(1000).share; share != 1000 {
 			t.Fatalf("expected share 1000, got %d", share)
 		}
 
-		p.readers[readerKey{infoHash: infoHash, filePath: "a", readerID: 1}] = &streamReader{active: true}
-		p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}] = &streamReader{active: true}
+		p.readers[uint64(1)] = &streamReader{active: true}
+		p.readers[uint64(2)] = &streamReader{active: true}
 
 		// Active ranges include a 1/4 trailing window, so 1000 / 2 / 1.25 = 400.
 		readahead := byteReadahead(p, 1000)
@@ -799,7 +798,7 @@ func TestPool_PlanReadaheadLocked(t *testing.T) {
 		}
 
 		// Idle reader is excluded.
-		p.readers[readerKey{infoHash: infoHash, filePath: "c", readerID: 3}] = &streamReader{active: false}
+		p.readers[uint64(3)] = &streamReader{active: false}
 		readahead = byteReadahead(p, 1000)
 		if readahead != 400 {
 			t.Fatalf("expected 400 (idle ignored), got %d", readahead)
@@ -808,10 +807,9 @@ func TestPool_PlanReadaheadLocked(t *testing.T) {
 
 	t.Run("file storage excluded", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
-		infoHash := metainfo.Hash{}
 
-		p.readers[readerKey{infoHash: infoHash, filePath: "a", readerID: 1}] = &streamReader{active: true, isFileStorage: true}
-		p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}] = &streamReader{active: true, isFileStorage: false}
+		p.readers[uint64(1)] = &streamReader{active: true, isFileStorage: true}
+		p.readers[uint64(2)] = &streamReader{active: true, isFileStorage: false}
 
 		// 1 active memory reader (file storage reader excluded): 1000 / 1.25 = 800.
 		readahead := byteReadahead(p, 1000)
@@ -822,10 +820,9 @@ func TestPool_PlanReadaheadLocked(t *testing.T) {
 
 	t.Run("minimum one", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
-		infoHash := metainfo.Hash{}
 
 		for i := uint64(1); i <= 10; i++ {
-			p.readers[readerKey{infoHash: infoHash, filePath: "x", readerID: i}] = &streamReader{active: true}
+			p.readers[i] = &streamReader{active: true}
 		}
 
 		// 10 active readers: 5 / 10 = 0 → clamped to 1.
@@ -874,9 +871,9 @@ func TestPool_Release(t *testing.T) {
 			readerID:  1,
 			readahead: 1024,
 		}
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+		p.readers[uint64(1)] = sr
 
-		p.release(infoHash, "f", 1)
+		p.release(1)
 
 		if sr.active {
 			t.Fatal("expected reader to be inactive after release")
@@ -891,9 +888,9 @@ func TestPool_Release(t *testing.T) {
 		infoHash := metainfo.Hash{}
 
 		sr := &streamReader{active: false, infoHash: infoHash, readerID: 1}
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+		p.readers[uint64(1)] = sr
 
-		p.release(infoHash, "f", 1)
+		p.release(1)
 
 		if !sr.lingerSince.IsZero() {
 			t.Fatal("lingerSince should remain zero for already-idle reader")
@@ -911,10 +908,10 @@ func TestPool_Release(t *testing.T) {
 			readerID:  1,
 			readahead: 1024,
 		}
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+		p.readers[uint64(1)] = sr
 
-		p.release(infoHash, "f", 1)
-		p.release(infoHash, "f", 1)
+		p.release(1)
+		p.release(1)
 
 		if sr.active {
 			t.Fatal("expected reader to remain idle after double release")
@@ -926,7 +923,7 @@ func TestPool_Release(t *testing.T) {
 		infoHash := metainfo.Hash{}
 		var cancelled atomic.Bool
 
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 42}
+		key := uint64(42)
 		p.readers[key] = &streamReader{
 			active:   true,
 			cancel:   func() { cancelled.Store(true) },
@@ -934,7 +931,7 @@ func TestPool_Release(t *testing.T) {
 			readerID: 42,
 		}
 
-		p.release(infoHash, "f", 42)
+		p.release(42)
 
 		if cancelled.Load() {
 			t.Fatal("release cancelled the lingering reader context")
@@ -962,10 +959,10 @@ func TestPool_Release(t *testing.T) {
 			isFileStorage:     false,
 			prioritizedPieces: []int{},
 		}
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
+		key := uint64(1)
 		p.readers[key] = sr
 
-		p.release(infoHash, "f", 1)
+		p.release(1)
 
 		if len(sr.prioritizedPieces) != 0 {
 			t.Fatalf("expected prioritizedPieces to be empty after release, got %v", sr.prioritizedPieces)
@@ -983,7 +980,7 @@ func TestPool_Release(t *testing.T) {
 		})
 		infoHash := metainfo.Hash{}
 
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 42}
+		key := uint64(42)
 		p.readers[key] = &streamReader{
 			active:    true,
 			infoHash:  infoHash,
@@ -991,7 +988,7 @@ func TestPool_Release(t *testing.T) {
 			readahead: 2048,
 		}
 
-		p.release(infoHash, "f", 42)
+		p.release(42)
 
 		if reg.clears != 1 {
 			t.Fatalf("expected 1 ClearActiveRange call on release, got %d", reg.clears)
@@ -1023,14 +1020,14 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 		assert.False(t, pool.HasReaders(to.InfoHash()), "an expired lingering reader must be closed")
 	})
 
-	lingering := func(p *Pool, lingered time.Duration) readerKey {
-		key := readerKey{infoHash: metainfo.Hash{1}, filePath: "f", readerID: 1}
+	lingering := func(p *Pool, lingered time.Duration) uint64 {
+		key := uint64(1)
 		p.readers[key] = &streamReader{
-			infoHash:    key.infoHash,
+			infoHash:    metainfo.Hash{1},
 			lingerSince: time.Now().Add(-lingered),
 			readahead:   1024,
 			reader:      &mockReader{},
-			readerID:    key.readerID,
+			readerID:    key,
 		}
 		return key
 	}
@@ -1062,8 +1059,8 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 
 	t.Run("ignores active readers", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger(), LingerTimeout: time.Millisecond})
-		key := readerKey{infoHash: metainfo.Hash{1}, filePath: "f", readerID: 1}
-		p.readers[key] = &streamReader{active: true, infoHash: key.infoHash, readerID: key.readerID}
+		key := uint64(1)
+		p.readers[key] = &streamReader{active: true, infoHash: metainfo.Hash{1}, readerID: key}
 
 		p.closeExpiredLingeringReaders()
 
@@ -1081,7 +1078,7 @@ func TestPool_HasReaders(t *testing.T) {
 		t.Fatal("expected no readers in empty pool")
 	}
 
-	p.readers[readerKey{infoHash: infoHash, filePath: "a", readerID: 1}] = &streamReader{active: false, infoHash: infoHash}
+	p.readers[uint64(1)] = &streamReader{active: false, infoHash: infoHash}
 	if !p.HasReaders(infoHash) {
 		t.Fatal("expected HasReaders to return true when reader is idle")
 	}
@@ -1089,7 +1086,7 @@ func TestPool_HasReaders(t *testing.T) {
 		t.Fatal("expected no active readers when reader is idle")
 	}
 
-	p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}] = &streamReader{active: true, infoHash: infoHash}
+	p.readers[uint64(2)] = &streamReader{active: true, infoHash: infoHash}
 	if !p.HasReaders(infoHash) {
 		t.Fatal("expected HasReaders to return true when reader is active")
 	}
@@ -1108,8 +1105,8 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 
 		sr1 := &streamReader{active: true, infoHash: infoHash, readahead: 100}
 		sr2 := &streamReader{active: false, infoHash: infoHash, readahead: 100}
-		p.readers[readerKey{infoHash: infoHash, filePath: "a", readerID: 1}] = sr1
-		p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}] = sr2
+		p.readers[uint64(1)] = sr1
+		p.readers[uint64(2)] = sr2
 
 		// One active range reserves 1/4 of its ahead window for trailing protection.
 		p.refreshReadaheadLocked(1000)
@@ -1117,7 +1114,7 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 		if sr1.readahead != 800 {
 			t.Fatalf("expected active reader readahead=800, got %d", sr1.readahead)
 		}
-		if _, lingering := p.readers[readerKey{infoHash: infoHash, filePath: "b", readerID: 2}]; !lingering {
+		if _, lingering := p.readers[uint64(2)]; !lingering {
 			t.Fatal("a budget change must not close a lingering reader")
 		}
 	})
@@ -1132,7 +1129,7 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 		})
 		infoHash := metainfo.Hash{}
 
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 42}
+		key := uint64(42)
 		p.readers[key] = &streamReader{
 			active:    true,
 			infoHash:  infoHash,
@@ -1140,7 +1137,7 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 			readahead: 2048,
 		}
 
-		p.release(infoHash, "f", 42)
+		p.release(42)
 
 		if reg.clears != 1 {
 			t.Fatalf("expected 1 ClearActiveRange call, got %d", reg.clears)
@@ -1156,7 +1153,7 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 		infoHash := metainfo.Hash{}
 
 		for i := uint64(1); i <= 2; i++ {
-			key := readerKey{infoHash: infoHash, filePath: "f", readerID: i}
+			key := i
 			p.readers[key] = &streamReader{
 				active:   true,
 				infoHash: infoHash,
@@ -1181,14 +1178,14 @@ func TestPoolActiveRangeRegistry(t *testing.T) {
 		})
 		infoHash := metainfo.Hash{}
 
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
+		key := uint64(1)
 		p.readers[key] = &streamReader{
 			active:   true,
 			infoHash: infoHash,
 			readerID: 1,
 		}
 
-		p.release(infoHash, "f", 1)
+		p.release(1)
 		p.Close()
 	})
 }
@@ -1279,7 +1276,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 				isFileStorage: false,
 				reader:        mr,
 			}
-			p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: i}] = srs[i-1]
+			p.readers[i] = srs[i-1]
 		}
 		p.readaheadBudget = pool
 
@@ -1297,7 +1294,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 
 		// Release reader 2: it closes while the remaining active readers split
 		// the protected budget.
-		p.release(infoHash, "f", 2)
+		p.release(2)
 		if srs[1].reader != nil {
 			t.Fatal("released reader 2 should close while other readers are active")
 		}
@@ -1311,7 +1308,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 		}
 
 		// Release reader 0: the remaining reader gets 8000 ahead + 2000 trailing.
-		p.release(infoHash, "f", 1)
+		p.release(1)
 		if srs[0].reader != nil {
 			t.Fatal("released reader 0 should close while another reader is active")
 		}
@@ -1323,7 +1320,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 		}
 
 		// Reader 1 was never active in this scenario — releasing it is a no-op.
-		p.release(infoHash, "f", 2)
+		p.release(2)
 
 		// File-storage reader is excluded from rebalancing.
 		fsMr := &mockReader{readahead: 50000000}
@@ -1335,7 +1332,7 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 			isFileStorage: true,
 			reader:        fsMr,
 		}
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 99}] = fsSr
+		p.readers[uint64(99)] = fsSr
 		p.refreshReadaheadLocked(pool)
 		if srs[2].readahead != 8000 {
 			t.Fatalf("memory reader should keep readahead=8000, got %d", srs[2].readahead)
@@ -1359,10 +1356,10 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 			readahead: 8000,
 			reader:    mr,
 		}
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = sr
+		p.readers[uint64(1)] = sr
 		p.readaheadBudget = 10000
 
-		p.release(infoHash, "f", 1)
+		p.release(1)
 
 		if sr.readahead != 8000 || mr.getReadahead() != 8000 {
 			t.Fatalf("last released reader should keep reading ahead, got reader=%d underlying=%d", sr.readahead, mr.getReadahead())
@@ -1391,10 +1388,10 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 			isFileStorage: false,
 			reader:        &mockReader{readahead: 500},
 		}
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 1}] = released
-		p.readers[readerKey{infoHash: infoHash, filePath: "f", readerID: 2}] = remaining
+		p.readers[uint64(1)] = released
+		p.readers[uint64(2)] = remaining
 
-		p.release(infoHash, "f", 1)
+		p.release(1)
 
 		if released.reader != nil {
 			t.Fatal("released reader should close while another reader is active")
@@ -1426,13 +1423,13 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 			isFileStorage:     false,
 			prioritizedPieces: []int{1, 2, 3},
 		}
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
+		key := uint64(1)
 		p.readers[key] = sr
 
 		// Registry is nil so updateActiveRange returns early before reaching
 		// file.Torrent().Info() — this is the correct path for the "no
 		// prioritization" config.
-		p.updateActiveRange(infoHash, key, &torrent.File{}, 512)
+		p.updateActiveRange(key, 512)
 
 		if len(sr.prioritizedPieces) != 3 {
 			t.Fatalf("expected prioritizedPieces unchanged (len=3), got %d", len(sr.prioritizedPieces))
@@ -1444,7 +1441,7 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 		// so they claim the pieces just ahead too; their pieces live on disk,
 		// so they register no eviction protection.
 		c := newTestTorrentClient(t)
-		to, file := addSizedTorrent(t, c, "movie", 64, 640)
+		_, file := addSizedTorrent(t, c, "movie", 64, 640)
 		reg := newProtectionRegistry()
 		p := newTestPool(t, Config{
 			FileReadaheadBytes:     4 * 64,
@@ -1455,14 +1452,14 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 		_, release, err := p.Acquire(file, FileStorage)
 		require.NoError(t, err)
 		defer release()
-		var key readerKey
+		var key uint64
 		p.mu.Lock()
 		for k := range p.readers {
 			key = k
 		}
 		p.mu.Unlock()
 
-		p.updateActiveRange(to.InfoHash(), key, file, 2*64)
+		p.updateActiveRange(key, 2*64)
 		require.Eventually(t, func() bool {
 			p.mu.Lock()
 			defer p.mu.Unlock()
@@ -1562,13 +1559,13 @@ func TestPool_PrioritizeNextPieces(t *testing.T) {
 }
 
 func TestPool_PrioritizeAsync(t *testing.T) {
-	newReader := func(t *testing.T) (*Pool, *torrent.Torrent, readerKey, *streamReader) {
+	newReader := func(t *testing.T) (*Pool, *torrent.Torrent, uint64, *streamReader) {
 		t.Helper()
 		c := newTestTorrentClient(t)
 		// Ten 64-byte pieces.
 		to, file := addSizedTorrent(t, c, "movie", 64, 640)
 		p := newTestPool(t, Config{Logger: testLogger(), PriorityWindowFraction: 1})
-		key := readerKey{infoHash: to.InfoHash(), filePath: file.Path(), readerID: 1}
+		key := uint64(1)
 		sr := &streamReader{active: true, file: file, infoHash: to.InfoHash(), lastPieceIdx: 2, readerID: 1}
 		p.readers[key] = sr
 		return p, to, key, sr
@@ -1599,7 +1596,7 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 
 	t.Run("ignores a released reader", func(t *testing.T) {
 		p, _, key, sr := newReader(t)
-		p.release(key.infoHash, key.filePath, key.readerID)
+		p.release(key)
 		p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64)
 		assert.Empty(t, claimed(p, sr))
 		p.mu.Lock()
@@ -1613,7 +1610,7 @@ func TestPool_PrioritizeAsync(t *testing.T) {
 		for range 50 {
 			wg.Go(func() { p.prioritizeAsync(key, 2, sr.file, 2*64, 4*64) })
 		}
-		wg.Go(func() { p.release(key.infoHash, key.filePath, key.readerID) })
+		wg.Go(func() { p.release(key) })
 		wg.Wait()
 		// Updates that ran before the release claimed pieces, which the
 		// release then cleared; later ones did nothing.
@@ -1633,7 +1630,7 @@ func TestPool_UpdateActiveRange(t *testing.T) {
 		defer p.Close()
 
 		infoHash := metainfo.Hash{}
-		key := readerKey{infoHash: infoHash, filePath: "test", readerID: 1}
+		key := uint64(1)
 		sr := &streamReader{
 			active:   true,
 			infoHash: infoHash,
@@ -1641,7 +1638,7 @@ func TestPool_UpdateActiveRange(t *testing.T) {
 		}
 		p.readers[key] = sr
 
-		p.updateActiveRange(infoHash, key, nil, 1024)
+		p.updateActiveRange(key, 1024)
 
 		p.mu.Lock()
 		cached := sr.lastOffset
@@ -1733,7 +1730,7 @@ func TestPoolReaderContextLifecycle(t *testing.T) {
 	defer p.Close()
 
 	infoHash := metainfo.Hash{}
-	key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
+	key := uint64(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	sr := &streamReader{
 		active:      false,

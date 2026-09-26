@@ -184,7 +184,7 @@ func TestPool_Acquire(t *testing.T) {
 
 		pool.mu.Lock()
 		require.Len(t, pool.readers, 1)
-		var lingeringKey readerKey
+		var lingeringKey uint64
 		var lingering *streamReader
 		for key, sr := range pool.readers {
 			lingeringKey, lingering = key, sr
@@ -600,11 +600,11 @@ func TestPool_ReaderPositions(t *testing.T) {
 		infoHash := metainfo.Hash{1}
 
 		// Add reader with nil file.
-		p.readers[readerKey{infoHash: infoHash, filePath: "f1", readerID: 1}] = &streamReader{
+		p.readers[uint64(1)] = &streamReader{
 			file: nil,
 		}
 		// Add reader with file that has nil torrent.
-		p.readers[readerKey{infoHash: infoHash, filePath: "f2", readerID: 2}] = &streamReader{
+		p.readers[uint64(2)] = &streamReader{
 			file: &torrent.File{},
 		}
 
@@ -966,10 +966,10 @@ func TestPoolMisalignedFileOffsets(t *testing.T) {
 	require.NoError(t, err)
 	defer release()
 
-	key := readerKey{infoHash: to.InfoHash(), filePath: file.Path(), readerID: 1}
-	pool.updateActiveRange(to.InfoHash(), key, file, 31)
+	key := uint64(1)
+	pool.updateActiveRange(key, 31)
 	setsBeforeBoundary := reg.sets
-	pool.updateActiveRange(to.InfoHash(), key, file, 32)
+	pool.updateActiveRange(key, 32)
 	assert.Equal(t, setsBeforeBoundary+1, reg.sets, "crossing a torrent piece must refresh the active range")
 	assert.Equal(t, 2, reg.last.endPiece, "readahead must follow the actual torrent piece")
 

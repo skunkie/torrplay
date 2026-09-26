@@ -133,14 +133,6 @@ type Config struct {
 	Registry ActiveRangeRegistry
 }
 
-// readerKey uniquely identifies a stream reader within the pool.
-// readerID makes it unique even when multiple readers exist for the same torrent/file.
-type readerKey struct {
-	infoHash metainfo.Hash
-	filePath string
-	readerID uint64
-}
-
 type prioritizedPiece struct {
 	index    int
 	priority torrent.PiecePriority
@@ -418,7 +410,7 @@ type Pool struct {
 	// one that still reports its final state.
 	preloads        map[metainfo.Hash]*preload
 	readaheadBudget int64 // current total readahead budget, updated by SetReadaheadBudget
-	readers         map[readerKey]*streamReader
+	readers         map[uint64]*streamReader
 }
 
 // New creates a new stream pool and starts a background goroutine that closes
@@ -449,7 +441,7 @@ func New(cfg Config) *Pool {
 		logger:         logger,
 		priorityClaims: make(map[priorityPieceKey]*priorityClaim),
 		preloads:       make(map[metainfo.Hash]*preload),
-		readers:        make(map[readerKey]*streamReader),
+		readers:        make(map[uint64]*streamReader),
 	}
 
 	go p.idleGC()
@@ -491,13 +483,12 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 
 	p.nextID++
 	readerID := p.nextID
-	key := readerKey{infoHash: infoHash, filePath: file.Path(), readerID: readerID}
 
 	readerCtx, cancel := context.WithCancel(ctx)
 	reader := file.NewReader()
 	reader.SetContext(readerCtx)
 
-	wrapper := p.newReaderWrapper(reader, key, file)
+	wrapper := p.newReaderWrapper(reader, readerID)
 
 	sr := &streamReader{
 		active:        true,
@@ -510,7 +501,7 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 		readerID:      readerID,
 		wrapper:       wrapper,
 	}
-	p.readers[key] = sr
+	p.readers[readerID] = sr
 	if pl := p.preloads[infoHash]; pl != nil && pl.file == file {
 		pl.read = true
 	}
@@ -534,24 +525,25 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 		slog.Uint64("readerID", readerID),
 		slog.Int64("readahead", sr.readahead))
 
-	return p.newReadSeeker(wrapper, file.Length(), mode), p.releaseFunc(key), nil
+	return p.newReadSeeker(wrapper, file.Length(), mode), p.releaseFunc(readerID), nil
 }
 
 // newReaderWrapper returns a wrapper for reader whose position changes update
-// the eviction-protection range and piece priorities of the reader at key.
-func (p *Pool) newReaderWrapper(reader io.ReadSeekCloser, key readerKey, file *torrent.File) *readAtWrapper {
+// the eviction-protection range and piece priorities of the reader with
+// readerID.
+func (p *Pool) newReaderWrapper(reader io.ReadSeekCloser, readerID uint64) *readAtWrapper {
 	wrapper := &readAtWrapper{reader: reader}
 	wrapper.onOffsetChange = func(newOffset int64) {
-		p.updateActiveRange(key.infoHash, key, file, newOffset)
+		p.updateActiveRange(readerID, newOffset)
 	}
 	return wrapper
 }
 
-// releaseFunc returns an idempotent ReleaseFunc for the reader at key.
-func (p *Pool) releaseFunc(key readerKey) ReleaseFunc {
+// releaseFunc returns an idempotent ReleaseFunc for the reader with readerID.
+func (p *Pool) releaseFunc(readerID uint64) ReleaseFunc {
 	var once sync.Once
 	return func() {
-		once.Do(func() { p.release(key.infoHash, key.filePath, key.readerID) })
+		once.Do(func() { p.release(readerID) })
 	}
 }
 
@@ -596,19 +588,18 @@ func closeStreamReaderLocked(sr *streamReader) {
 //
 // A lingering reader holds no eviction protection or priority claims, so its
 // prefetched pieces compete with other cached pieces under memory pressure.
-func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64) {
+func (p *Pool) release(readerID uint64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	key := readerKey{infoHash: infoHash, filePath: filePath, readerID: readerID}
-	sr, ok := p.readers[key]
+	sr, ok := p.readers[readerID]
 	if !ok || !sr.active {
 		return
 	}
 
 	sr.active = false
 	if torrentClosed(sr.file) || p.fileHasActiveReaderLocked(sr.file) {
-		p.removeReaderLocked(key, sr)
+		p.removeReaderLocked(sr)
 		p.rebalanceLocked()
 		return
 	}
@@ -621,10 +612,18 @@ func (p *Pool) release(infoHash metainfo.Hash, filePath string, readerID uint64)
 	}
 	sr.lingerSince = time.Now()
 	p.logger.Debug("reader lingering",
-		slog.String("hash", infoHash.HexString()),
-		slog.String("file", filePath),
+		slog.String("hash", sr.infoHash.HexString()),
 		slog.Uint64("readerID", readerID))
 	p.rebalanceLocked()
+}
+
+// rebalanceLocked redistributes the readahead budget after a reader stops
+// being active. Without a budget there is nothing to redistribute, so active
+// readers keep their readahead. Must be called with p.mu held.
+func (p *Pool) rebalanceLocked() {
+	if p.readaheadBudget > 0 {
+		p.refreshReadaheadLocked(p.readaheadBudget)
+	}
 }
 
 // fileHasActiveReaderLocked reports whether file has an active reader. Must
@@ -651,15 +650,6 @@ func torrentClosed(file *torrent.File) bool {
 	}
 }
 
-// rebalanceLocked redistributes the readahead budget after a reader stops
-// being active. Without a budget there is nothing to redistribute. Must be
-// called with p.mu held.
-func (p *Pool) rebalanceLocked() {
-	if p.readaheadBudget > 0 {
-		p.refreshReadaheadLocked(p.readaheadBudget)
-	}
-}
-
 // clearReaderClaimsLocked releases every piece priority and eviction
 // protection a reader holds. A priority update still in flight for the reader
 // finds it inactive or removed and does nothing. Must be called with p.mu held.
@@ -674,10 +664,10 @@ func (p *Pool) clearReaderClaimsLocked(sr *streamReader) {
 
 // removeReaderLocked releases a reader's claims, closes it, and removes it
 // from the pool. Must be called with p.mu held.
-func (p *Pool) removeReaderLocked(key readerKey, sr *streamReader) {
+func (p *Pool) removeReaderLocked(sr *streamReader) {
 	p.clearReaderClaimsLocked(sr)
 	closeStreamReaderLocked(sr)
-	delete(p.readers, key)
+	delete(p.readers, sr.readerID)
 }
 
 // refreshReadaheadLocked recalculates and applies readahead for all active readers.
@@ -686,7 +676,7 @@ func (p *Pool) removeReaderLocked(key readerKey, sr *streamReader) {
 func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 	plan := p.planReadaheadLocked(totalReadaheadBudget)
 
-	for key, sr := range p.readers {
+	for _, sr := range p.readers {
 		if !sr.active {
 			continue
 		}
@@ -703,7 +693,7 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 		if sr.file != nil {
 			boundaryBytes = plan.boundaryBytes[readerFileKey{infoHash: sr.infoHash, filePath: sr.file.Path()}]
 		}
-		p.registerActiveRangeLocked(sr.infoHash, key, sr.file, readahead, sr.lastOffset, boundaryBytes)
+		p.registerActiveRangeLocked(sr, readahead, boundaryBytes)
 	}
 
 	p.logger.Debug("refreshed readahead",
@@ -716,11 +706,11 @@ func (p *Pool) refreshReadaheadLocked(totalReadaheadBudget int64) {
 // p.mu held.
 func (p *Pool) closeLingeringReadersLocked(file *torrent.File) {
 	closed := false
-	for key, sr := range p.readers {
+	for _, sr := range p.readers {
 		if sr.active || sr.file != file {
 			continue
 		}
-		p.removeReaderLocked(key, sr)
+		p.removeReaderLocked(sr)
 		closed = true
 		p.logger.Debug("closed lingering reader for a newer reader of its file",
 			slog.String("hash", sr.infoHash.HexString()),
@@ -972,13 +962,11 @@ func boundaryPieces(headStart, headEnd, tailStart, tailEnd int) iter.Seq[int] {
 }
 
 // registerActiveRangeLocked computes and registers the eviction-protection window
-// for a reader at its current position with the given readahead, and its file
-// boundaries of boundaryBytes each. A non-positive boundaryBytes clears any
-// boundaries the reader registered before.
-// byteOffset is passed explicitly to avoid acquiring wrapper.mu under pool.mu,
-// consistent with the lock-ordering invariant documented on readAtWrapper.
-// Must be called with p.mu held.
-func (p *Pool) registerActiveRangeLocked(infoHash metainfo.Hash, key readerKey, file *torrent.File, readahead, byteOffset, boundaryBytes int64) {
+// for a reader at its last reported position with the given readahead, and its
+// file boundaries of boundaryBytes each. A non-positive boundaryBytes clears any
+// boundaries the reader registered before. Must be called with p.mu held.
+func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBytes int64) {
+	file, infoHash, readerID := sr.file, sr.infoHash, sr.readerID
 	if p.cfg.Registry == nil || file == nil || file.Torrent() == nil || file.Torrent().Info() == nil {
 		return
 	}
@@ -986,14 +974,14 @@ func (p *Pool) registerActiveRangeLocked(infoHash metainfo.Hash, key readerKey, 
 		return
 	}
 	pieceLength := file.Torrent().Info().PieceLength
-	start, end := computeRange(file, pieceLength, readahead, byteOffset)
-	p.cfg.Registry.SetActiveRange(infoHash, key.readerID, start, end)
+	start, end := computeRange(file, pieceLength, readahead, sr.lastOffset)
+	p.cfg.Registry.SetActiveRange(infoHash, readerID, start, end)
 	if boundaryBytes <= 0 {
-		p.cfg.Registry.ClearFileBoundaries(infoHash, key.readerID)
+		p.cfg.Registry.ClearFileBoundaries(infoHash, readerID)
 		return
 	}
 	if hs, he, ts, te, ok := computeFileBoundaries(file, boundaryBytes); ok {
-		p.cfg.Registry.SetFileBoundaries(infoHash, key.readerID, hs, he, ts, te)
+		p.cfg.Registry.SetFileBoundaries(infoHash, readerID, hs, he, ts, te)
 	}
 }
 
@@ -1146,12 +1134,6 @@ func priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax in
 	return n, target, currentPiece
 }
 
-// findReaderLocked returns the streamReader for the given key, or nil.
-// Must be called with p.mu held.
-func (p *Pool) findReaderLocked(key readerKey) *streamReader {
-	return p.readers[key]
-}
-
 // updateActiveRange recalculates and refreshes the eviction-protection
 // window for a reader based on its new read offset. Called asynchronously
 // from readAtWrapper when the position moves. Takes pool.mu to protect
@@ -1159,15 +1141,16 @@ func (p *Pool) findReaderLocked(key readerKey) *streamReader {
 //
 // Piece-priority claims are applied by a goroutine, so the reading goroutine
 // never waits on the torrent client's lock for them.
-func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *torrent.File, newOffset int64) {
+func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 	p.mu.Lock()
 
 	// Skip a reader that was already released or closed.
-	sr := p.findReaderLocked(key)
+	sr := p.readers[readerID]
 	if sr == nil || !sr.active {
 		p.mu.Unlock()
 		return
 	}
+	file := sr.file
 
 	// Cache the offset on the streamReader so other pool.mu holders
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
@@ -1195,25 +1178,25 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 
 	if !sr.isFileStorage && p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
 		start, end := computeRange(file, pieceLength, readahead, newOffset)
-		p.cfg.Registry.SetActiveRange(infoHash, key.readerID, start, end)
+		p.cfg.Registry.SetActiveRange(sr.infoHash, readerID, start, end)
 	}
 	p.mu.Unlock()
 
 	if prioEnabled {
-		go p.prioritizeAsync(key, currentPiece, file, newOffset, readahead)
+		go p.prioritizeAsync(readerID, currentPiece, file, newOffset, readahead)
 	}
 }
 
-// prioritizeAsync claims the pieces just ahead of the reader at key after it
-// reached piece. It does nothing when the reader was released or has since
+// prioritizeAsync claims the pieces just ahead of the reader with readerID after
+// it reached piece. It does nothing when the reader was released or has since
 // moved to another piece, whose own update then applies, so out-of-order
 // goroutines cannot leave stale claims.
-func (p *Pool) prioritizeAsync(key readerKey, piece int64, file *torrent.File, newOffset, readahead int64) {
+func (p *Pool) prioritizeAsync(readerID uint64, piece int64, file *torrent.File, newOffset, readahead int64) {
 	planned := p.prioritizeNextPieces(file, newOffset, readahead, p.cfg.PriorityWindowFraction)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	sr := p.readers[key]
+	sr := p.readers[readerID]
 	if sr == nil || !sr.active || sr.lastPieceIdx != piece {
 		return
 	}
@@ -1227,8 +1210,8 @@ func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 	defer p.mu.Unlock()
 
 	var result []ReaderPosition
-	for key, sr := range p.readers {
-		if key.infoHash != infoHash {
+	for _, sr := range p.readers {
+		if sr.infoHash != infoHash {
 			continue
 		}
 		if sr.file == nil || sr.file.Torrent() == nil {
@@ -1315,8 +1298,8 @@ func (p *Pool) Close() {
 	p.closed = true
 	close(p.closeCh)
 
-	for key, sr := range p.readers {
-		p.removeReaderLocked(key, sr)
+	for _, sr := range p.readers {
+		p.removeReaderLocked(sr)
 	}
 	for infoHash := range p.preloads {
 		p.removePreloadLocked(infoHash)
@@ -1382,7 +1365,7 @@ func (p *Pool) closeExpiredLingeringReaders() {
 	timeout := p.effectiveLingerTimeout(p.sampleMemoryPressure())
 	now := time.Now()
 	closed := false
-	for key, sr := range p.readers {
+	for _, sr := range p.readers {
 		if sr.active {
 			continue
 		}
@@ -1390,7 +1373,7 @@ func (p *Pool) closeExpiredLingeringReaders() {
 		if lingered < timeout {
 			continue
 		}
-		p.removeReaderLocked(key, sr)
+		p.removeReaderLocked(sr)
 		closed = true
 		p.logger.Debug("closed lingering reader",
 			slog.String("hash", sr.infoHash.HexString()),

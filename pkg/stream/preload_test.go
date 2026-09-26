@@ -603,8 +603,8 @@ func TestPool_ExpirePreloads(t *testing.T) {
 		require.NoError(t, err)
 		release()
 		pool.mu.Lock()
-		for key, sr := range pool.readers {
-			pool.removeReaderLocked(key, sr)
+		for _, sr := range pool.readers {
+			pool.removeReaderLocked(sr)
 		}
 		pool.mu.Unlock()
 		require.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "a running preload is not released")
@@ -828,7 +828,7 @@ func TestPool_ReservePreloadLocked(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 		p.SetReadaheadBudget(1200)
 		for i := uint64(1); i <= 3; i++ {
-			p.readers[readerKey{infoHash: metainfo.Hash{byte(i)}, filePath: "f", readerID: i}] = &streamReader{
+			p.readers[i] = &streamReader{
 				active:   true,
 				infoHash: metainfo.Hash{byte(i)},
 				readerID: i,
