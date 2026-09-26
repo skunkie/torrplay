@@ -1469,93 +1469,54 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 	})
 }
 
-func TestPool_PrioritizeNextPieces(t *testing.T) {
-	t.Run("nil file returns nil", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
+func TestPrioritizeNextPieces(t *testing.T) {
+	const pieceLength = 256 << 10
+	c := newTestTorrentClient(t)
+	_, file := addSizedTorrent(t, c, "priorities", pieceLength, 100*pieceLength)
+	_, misaligned := addTestTorrentFromMetaInfo(t, c, createMisalignedFileTestMetaInfo(t))
+	misaligned = misaligned.Torrent().Files()[1]
 
-		result := p.prioritizeNextPieces(nil, 0, 1024, 0.5)
-		if result != nil {
-			t.Fatalf("expected nil for nil file, got %v", result)
+	pieces := func(planned []prioritizedPiece) []int {
+		indexes := make([]int, 0, len(planned))
+		for _, piece := range planned {
+			assert.Equal(t, torrent.PiecePriorityNow, piece.priority)
+			indexes = append(indexes, piece.index)
 		}
-	})
+		return indexes
+	}
 
-	t.Run("zero fraction returns nil", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0)
-		if result != nil {
-			t.Fatalf("expected nil for fraction=0, got %v", result)
-		}
-
-		result = p.prioritizeNextPieces(&torrent.File{}, 0, 1024, -0.1)
-		if result != nil {
-			t.Fatalf("expected nil for fraction=-0.1, got %v", result)
-		}
-	})
-
-	t.Run("zero readahead returns nil", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 0, 1)
-		if result != nil {
-			t.Fatalf("expected nil for zero readahead, got %v", result)
-		}
-	})
-
-	t.Run("empty file returns nil", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 1.1)
-		if result != nil {
-			t.Fatalf("expected nil for fraction=1.1, got %v", result)
-		}
-	})
-
-	t.Run("claims every planned piece at now priority", func(t *testing.T) {
-		// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, n=int(16*0.25)=4.
-		plan := buildPriorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 0.25)
-		if len(plan) != 4 {
-			t.Fatalf("expected 4 planned pieces, got %d", len(plan))
-		}
-		for i, piece := range plan {
-			if piece.index != i+1 {
-				t.Errorf("expected piece %d at position %d, got %d", i+1, i, piece.index)
+	tests := []struct {
+		name       string
+		file       *torrent.File
+		byteOffset int64
+		readahead  int64
+		fraction   float64
+		want       []int
+	}{
+		{name: "fraction of the readahead pieces", file: file, readahead: 16 * pieceLength, fraction: 0.25, want: []int{1, 2, 3, 4}},
+		{name: "at least one piece", file: file, readahead: 16 * pieceLength, fraction: 0.01, want: []int{1}},
+		{name: "readahead below one piece", file: file, readahead: 100, fraction: 1, want: []int{1}},
+		{name: "fraction above one clamps", file: file, readahead: 2 * pieceLength, fraction: 2, want: []int{1, 2}},
+		{name: "starts past the current piece", file: file, byteOffset: 10*pieceLength + 1, readahead: 2 * pieceLength, fraction: 1, want: []int{11, 12}},
+		{name: "clamps to the last piece", file: file, byteOffset: 97 * pieceLength, readahead: 100 * pieceLength, fraction: 1, want: []int{98, 99}},
+		{name: "none past the last piece", file: file, byteOffset: 99 * pieceLength, readahead: 100 * pieceLength, fraction: 1, want: []int{}},
+		{name: "counts the file offset", file: misaligned, byteOffset: 32, readahead: 128, fraction: 1, want: []int{2, 3}},
+		{name: "no fraction", file: file, readahead: 16 * pieceLength},
+		{name: "negative fraction", file: file, readahead: 16 * pieceLength, fraction: -0.1},
+		{name: "no readahead", file: file, fraction: 1},
+		{name: "nil file", readahead: 16 * pieceLength, fraction: 1},
+		{name: "file without torrent", file: &torrent.File{}, readahead: 16 * pieceLength, fraction: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			planned := prioritizeNextPieces(tt.file, tt.byteOffset, tt.readahead, tt.fraction)
+			if tt.want == nil {
+				assert.Nil(t, planned)
+				return
 			}
-			if piece.priority != torrent.PiecePriorityNow {
-				t.Errorf("expected piece %d at PiecePriorityNow, got %v", piece.index, piece.priority)
-			}
-		}
-	})
-
-	t.Run("claims at least one piece", func(t *testing.T) {
-		plan := buildPriorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 0.01)
-		if len(plan) != 1 || plan[0].priority != torrent.PiecePriorityNow {
-			t.Fatalf("expected one piece at PiecePriorityNow, got %v", plan)
-		}
-	})
-
-	// Documents the coverage gap:
-	// the EndPieceIndex > NumPieces clamping in prioritizeNextPieces cannot be
-	// reached with &torrent.File{} because Torrent() returns nil and the function
-	// returns early.  When a real torrent is available, prioritizeNextPieces
-	// clamps endPieceMax to torrent.NumPieces() before calling priorityPlan, preventing
-	// index-out-of-range panics when file.EndPieceIndex() exceeds the torrent's
-	// actual piece count (split-file or partially-seeded torrents).
-	t.Run("split file end clamped", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger()})
-		// &torrent.File{}.Torrent() == nil → early returns, no panic.
-		// This test verifies the early-return path doesn't regress; the
-		// actual clamping logic is exercised in the "drives priority update"
-		// subtest of TestPool_PrioritizeAsync, which dispatches through updateActiveRange (which itself panics on
-		// &torrent.File{}.Torrent().Info()).  The clamping is a simple
-		// endPieceMax = min(endPieceMax, to.NumPieces()) guard — no loop
-		// or arithmetic — so the risk of regression is low and the test
-		// constraint is fundamental to the anacrolix/torrent package.
-		result := p.prioritizeNextPieces(&torrent.File{}, 0, 1024, 0.3)
-		if result != nil {
-			t.Fatalf("expected nil for nil torrent, got %v", result)
-		}
-	})
+			assert.Equal(t, tt.want, pieces(planned))
+		})
+	}
 }
 
 func TestPool_PrioritizeAsync(t *testing.T) {
@@ -1646,79 +1607,6 @@ func TestPool_UpdateActiveRange(t *testing.T) {
 
 		if cached != 1024 {
 			t.Fatalf("expected lastOffset=1024, got %d", cached)
-		}
-	})
-}
-
-func TestPriorityPlan(t *testing.T) {
-	t.Run("edge cases", func(t *testing.T) {
-		// n clamps to minimum 1 when fraction * readaheadPieces < 1.
-		n, _, _ := priorityPlan(0, 100, 256*1024, 0, 100, 0.01)
-		if n < 1 {
-			t.Fatalf("expected n >= 1, got %d", n)
-		}
-
-		// target can't go below currentPiece+1 (even when n and endPieceMax
-		// would push it lower).  Use pieceLength=1 so byteOffset maps
-		// directly to piece index.
-		_, target, _ := priorityPlan(100, 100, 1, 0, 100, 0.01)
-		if target < 101 {
-			t.Fatalf("expected target >= 101, got %d", target)
-		}
-
-		// fraction > 1 clamps to 1.
-		// readahead=4 MiB, pieceLength=256 KiB → readaheadPieces=16, fraction clamped to 1.0.
-		n, _, _ = priorityPlan(0, 4*1024*1024, 256*1024, 0, 100, 2.0)
-		if n != 16 {
-			t.Fatalf("expected n=16 (fraction clamped to 1.0), got %d", n)
-		}
-	})
-
-	// Tests that when the window is clamped to
-	// file end (endPieceMax is exclusive), the returned target still allows
-	// the last valid piece (endPieceMax-1) to be included by a loop using
-	// idx < target.  This catches the off-by-one where the old code did
-	// endPieceMax-1 inside priorityPlan while endPieceMax was already exclusive.
-	t.Run("end of last piece", func(t *testing.T) {
-		// EndPieceIndex() == 10, so endPieceMax = 11 (exclusive).
-		// Large readahead + fraction=1.0 → target would far exceed the file.
-		_, target, _ := priorityPlan(0, 100*1024*1024, 256*1024, 0, 11, 1.0)
-		// idx < target must allow idx == 10 (the last valid piece).
-		if target <= 10 {
-			t.Fatalf("expected target > 10 to include piece 10, got %d", target)
-		}
-
-		// Verify unclamped path: small readahead, target does not exceed endPieceMax.
-		_, target, _ = priorityPlan(0, 512*1024, 256*1024, 0, 100, 1.0)
-		// readaheadPieces = 2, n = int(2*1.0) = 2, target = 0+1+2 = 3.
-		if target != 3 {
-			t.Fatalf("expected target=3, got %d", target)
-		}
-	})
-
-	// Ensures that when beginPiece is non-zero
-	// (as in split-file torrents) and endPieceMax is clamped by the torrent's
-	// actual piece count, the returned target does not exceed it and the
-	// resulting loop still covers the full range from beginPiece+1 to end.
-	t.Run("overlapping file end", func(t *testing.T) {
-		// Simulate a split-file scenario: file starts at piece 100, torrent
-		// has 200 total pieces (indices 0..199), so endPieceMax=200 (exclusive).
-		// readaheadPieces=40, n=40, target=100+1+40=141 (within bounds).
-		_, target, currentPiece := priorityPlan(0, 10*1024*1024, 256*1024, 100, 200, 1.0)
-		if currentPiece != 100 {
-			t.Fatalf("expected currentPiece=100 (byteOffset=0 + beginPiece=100), got %d", currentPiece)
-		}
-		if target != 141 {
-			t.Fatalf("expected target=141, got %d", target)
-		}
-
-		// Now the clamping case with a split-file that nearly reaches the end:
-		// beginPiece=195, endPieceMax=200 (only 5 pieces left), huge readahead.
-		// readaheadPieces=400, n=400, target=195+1+400=596 > 200 → clamped to 200.
-		// Loop covers 196..199 (the full remaining range).
-		_, target, _ = priorityPlan(0, 100*1024*1024, 256*1024, 195, 200, 1.0)
-		if target != 200 {
-			t.Fatalf("expected target=200 (saturated near end), got %d", target)
 		}
 	})
 }
@@ -1852,28 +1740,6 @@ func BenchmarkReadAtWrapper_ReadAt_Parallel(b *testing.B) {
 			}
 		}
 	})
-}
-
-var benchmarkPriorityPlan []prioritizedPiece
-
-func BenchmarkPriorityPlanBuild(b *testing.B) {
-	const readahead = 32 * 1024 * 1024
-	for _, pieceLength := range []int64{16 * 1024, 256 * 1024, 1024 * 1024} {
-		b.Run(fmt.Sprintf("PieceSize_%dKB", pieceLength/1024), func(b *testing.B) {
-			endPiece := 4 * 1024 * 1024 * 1024 / pieceLength
-			b.ReportAllocs()
-			for i := range b.N {
-				benchmarkPriorityPlan = buildPriorityPlan(
-					int64(i%1024)*pieceLength,
-					readahead,
-					pieceLength,
-					0,
-					endPiece,
-					0.15,
-				)
-			}
-		})
-	}
 }
 
 func BenchmarkPriorityClaimResetAndClear(b *testing.B) {

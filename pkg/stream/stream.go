@@ -991,40 +991,23 @@ func (p *Pool) registerActiveRangeLocked(sr *streamReader, readahead, boundaryBy
 	}
 }
 
-// prioritizeNextPieces plans the PiecePriorityNow claims for the fraction of
-// the readahead pieces nearest to a reader. Applying the plan is separate so
-// priorities shared by overlapping readers are only lowered after their final
-// owner releases them.
-func (p *Pool) prioritizeNextPieces(file *torrent.File, byteOffset, readahead int64, fraction float64) []prioritizedPiece {
+// prioritizeNextPieces plans the PiecePriorityNow claims for the pieces just
+// past the one a reader of file at byteOffset reads: the fraction of its
+// readahead pieces, at least one, clamped to the file's last piece. Applying
+// the plan is separate so priorities shared by overlapping readers are only
+// lowered after their final owner releases them. It returns nil without piece
+// metadata or with no readahead or fraction.
+func prioritizeNextPieces(file *torrent.File, byteOffset, readahead int64, fraction float64) []prioritizedPiece {
 	pieceLength := filePieceLength(file)
 	if fraction <= 0 || readahead <= 0 || pieceLength <= 0 {
 		return nil
 	}
-	tor := file.Torrent()
-
-	// EndPieceIndex already is the exclusive loop boundary.
-	endPieceMax := int64(file.EndPieceIndex())
-
-	// Clamp target to the torrent's actual piece count — EndPieceIndex()
-	// may exceed it for partially-seeded or split files.
-	torrentPieceCount := int64(tor.NumPieces())
-	if torrentPieceCount > 0 && endPieceMax > torrentPieceCount {
-		endPieceMax = torrentPieceCount
-	}
-	// The read offset is file-relative, while priorityPlan works in torrent
-	// pieces. Include the file's offset within its first piece.
-	byteOffset += file.Offset() % pieceLength
-	return buildPriorityPlan(byteOffset, readahead, pieceLength, int64(file.BeginPieceIndex()), endPieceMax, fraction)
-}
-
-// buildPriorityPlan constructs the bounded per-piece priority plan after the
-// caller has resolved and validated the file and torrent bounds.
-func buildPriorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction float64) []prioritizedPiece {
-	_, target, currentPiece := priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax, fraction)
-
-	planned := make([]prioritizedPiece, 0, max(int(target-(currentPiece+1)), 0))
-	for idx := currentPiece + 1; idx < target; idx++ {
-		planned = append(planned, prioritizedPiece{index: int(idx), priority: torrent.PiecePriorityNow})
+	count := max(int64(float64(max(readahead/pieceLength, 1))*min(fraction, 1)), 1)
+	current := filePiece(file, byteOffset)
+	end := min(current+1+count, int64(file.EndPieceIndex()))
+	planned := make([]prioritizedPiece, 0, max(end-current-1, 0))
+	for index := current + 1; index < end; index++ {
+		planned = append(planned, prioritizedPiece{index: int(index), priority: torrent.PiecePriorityNow})
 	}
 	return planned
 }
@@ -1111,25 +1094,6 @@ func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	}
 }
 
-// priorityPlan computes how many pieces ahead of the reader to prioritize. It
-// is a pure function of the input parameters so it can be unit-tested without
-// a live torrent. It returns the requested piece count n, the exclusive end
-// piece target after clamping to endPieceMax, and currentPiece. The planned
-// pieces are [currentPiece+1, target).
-func priorityPlan(byteOffset, readahead, pieceLength, beginPiece, endPieceMax int64, fraction float64) (n int, target int64, currentPiece int64) {
-	if fraction > 1 {
-		fraction = 1
-	}
-	if pieceLength <= 0 {
-		pieceLength = 1
-	}
-	readaheadPieces := max(readahead/pieceLength, 1)
-	n = max(int(float64(readaheadPieces)*fraction), 1)
-	currentPiece = byteOffset/pieceLength + beginPiece
-	target = max(min(currentPiece+1+int64(n), endPieceMax), currentPiece+1)
-	return n, target, currentPiece
-}
-
 // updateActiveRange recalculates and refreshes the eviction-protection
 // window for a reader based on its new read offset. Called asynchronously
 // from readAtWrapper when the position moves. Takes pool.mu to protect
@@ -1181,7 +1145,7 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 // moved to another piece, whose own update then applies, so out-of-order
 // goroutines cannot leave stale claims.
 func (p *Pool) prioritizeAsync(readerID uint64, piece int64, file *torrent.File, newOffset, readahead int64) {
-	planned := p.prioritizeNextPieces(file, newOffset, readahead, p.cfg.PriorityWindowFraction)
+	planned := prioritizeNextPieces(file, newOffset, readahead, p.cfg.PriorityWindowFraction)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
