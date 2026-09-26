@@ -94,9 +94,12 @@ func TestUpdateSettingsRollsBackFailedMemoryResize(t *testing.T) {
 	oldCapacity := pool.PreloadCapacity()
 	// A reservation the controller does not track cannot be cancelled, so the
 	// smaller budget cannot be applied.
-	infoHash := metainfo.Hash{7}
-	require.Equal(t, oldCapacity, pool.ReservePreloadBudget(infoHash, "", false, oldCapacity))
-	defer pool.ReleasePreloadBudget(infoHash)
+	const pieceLength = 1 << 20
+	to := addSyntheticTorrent(t, ctrl, 1<<30, pieceLength)
+	headEnd := oldCapacity - oldCapacity%pieceLength
+	require.Greater(t, headEnd, preloadCapacityFor(t, 32<<20), "the reservation must not fit the smaller budget")
+	require.True(t, pool.ReservePreload(to.Files()[0], headEnd, 0, 0))
+	defer pool.ReleasePreload(to.InfoHash())
 
 	rr := patchMaxMemory(t, ctrl, 32<<20).Recorder
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
@@ -118,7 +121,6 @@ func TestReleaseOnePreloadReservationLockedReleasesCheapestFirst(t *testing.T) {
 			cancel:        func() {},
 			done:          make(chan struct{}),
 			infoHash:      hash,
-			protected:     true,
 			releaseBudget: func() { released = append(released, name) },
 		}
 		task.doneOnce.Do(func() { close(task.done) })

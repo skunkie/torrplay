@@ -623,17 +623,12 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 
 	unrelatedHash := metainfo.Hash{0xff}
 	unrelatedBudgetReleases := 0
-	unrelatedProtectionClears := 0
 	unrelatedPreload := &preloadTask{
-		infoHash:  unrelatedHash,
-		cancel:    func() {},
-		done:      make(chan struct{}),
-		protected: true,
+		infoHash: unrelatedHash,
+		cancel:   func() {},
+		done:     make(chan struct{}),
 		releaseBudget: func() {
 			unrelatedBudgetReleases++
-		},
-		clearProtection: func() {
-			unrelatedProtectionClears++
 		},
 	}
 	unrelatedPreload.ready.Store(true)
@@ -667,7 +662,6 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	_, unrelatedStillPreloading := ctrl.preloads.Load(unrelatedHash)
 	assert.False(t, unrelatedStillPreloading, "playback should release unrelated ready memory preloads")
 	assert.Equal(t, 1, unrelatedBudgetReleases)
-	assert.Equal(t, 1, unrelatedProtectionClears)
 }
 
 func TestIntegrationControllerLifecycle(t *testing.T) {

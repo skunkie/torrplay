@@ -51,12 +51,6 @@ const (
 	// single preload takes the whole capacity instead.
 	minSharedPreloadBytes = 2 * int64(stream.DefaultFileBoundaryBytes)
 
-	// Preload protection is registered directly with storage rather than by a
-	// Pool reader. Keep these sentinels far from Pool.nextID's zero-based reader
-	// IDs; changes to either allocation scheme must preserve that separation.
-	preloadHeadReaderID uint64 = 1<<63 - 1
-	preloadTailReaderID uint64 = preloadHeadReaderID - 1
-
 	// preloadWorkerExitTimeout bounds how long playback waits for the preload
 	// workers it cancelled to exit before its reader starts competing with
 	// them for pieces. Cancelled workers normally exit within milliseconds.
@@ -64,11 +58,10 @@ const (
 )
 
 type preloadTask struct {
-	active          bool
-	bytesRead       atomic.Int64
-	cacheResident   func() bool
-	cancel          context.CancelFunc
-	clearProtection func()
+	active        bool
+	bytesRead     atomic.Int64
+	cacheResident func() bool
+	cancel        context.CancelFunc
 	// completedBytes reports the bytes of the preload range held in verified
 	// pieces. Pieces of the range share one priority and download in rarity
 	// order, so a sequential reader can sit at zero while most of the range
@@ -90,26 +83,30 @@ type preloadTask struct {
 	// of a queued memory preload are not yet protected and can be evicted,
 	// so reported progress holds this high-water mark instead of falling.
 	progressHigh atomic.Int64
-	protected    bool
 	queued       bool
 	ready        atomic.Bool
 	// readyAt orders completed memory preloads for eviction. It is written and
 	// read while preloadsMu is held.
-	readyAt       time.Time
+	readyAt time.Time
+	// releaseBudget returns a memory preload's stream pool reservation, which
+	// also ends the eviction protection of its cached pieces. It is nil when
+	// no reservation is held.
 	releaseBudget func()
 	// requeue builds a fresh queued task for the same request. Playback uses
 	// it to stop a running worker without abandoning the preload.
-	requeue       func() *preloadTask
+	requeue func() *preloadTask
+	// reserveBudget reserves the preload's memory in the stream pool and
+	// protects its pieces from eviction. It reports whether the reservation
+	// fits.
 	reserveBudget func() bool
 	// reserveBytes is the memory reserved for the preload. It covers the whole
 	// pieces that storage protects, which may exceed targetBytes when a range
 	// boundary falls inside a piece.
-	reserveBytes  int64
-	retired       chan struct{}
-	retireOnce    sync.Once
-	setProtection func()
-	start         func()
-	targetBytes   int64
+	reserveBytes int64
+	retired      chan struct{}
+	retireOnce   sync.Once
+	start        func()
+	targetBytes  int64
 	// torrent is the torrent instance the preload caches. A dropped or
 	// re-added torrent with the same info hash is a different instance.
 	torrent *torrent.Torrent
@@ -569,7 +566,6 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		c.preloadsMu.Unlock()
 		return nil
 	}
-	coversBoundaries := preloadCoversBoundaries(file.Length(), readerStartEnd, readerEndStart, readerEndEnd)
 	reserveBytes := stream.BoundaryPieceBytes(to.Info(), headStart, headEnd, tailStart, tailEnd)
 	protectedPieces := stream.BoundaryPieces(headStart, headEnd, tailStart, tailEnd)
 
@@ -579,12 +575,6 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 		}
 	}
 
-	clearProtection := func() {
-		if storageClient != nil {
-			storageClient.ClearActiveRange(ih, preloadHeadReaderID)
-			storageClient.ClearActiveRange(ih, preloadTailReaderID)
-		}
-	}
 	var newTask func() *preloadTask
 	newTask = func() *preloadTask {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -596,8 +586,7 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 				cached, err := storageClient.PiecesCached(ih, protectedPieces)
 				return err == nil && cached
 			},
-			cancel:          cancel,
-			clearProtection: clearProtection,
+			cancel: cancel,
 			completedBytes: func() int64 {
 				return preloadCompletedBytes(file, readerStartEnd, readerEndStart, readerEndEnd)
 			},
@@ -617,23 +606,10 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, fileI
 			if mode != stream.MemoryStorage {
 				return true
 			}
-			granted := pool.ReservePreloadBudget(ih, preload.filePath, coversBoundaries, preload.reserveBytes)
-			if granted == preload.reserveBytes {
-				return true
-			}
-			if granted > 0 {
-				pool.ReleasePreloadBudget(ih)
-			}
-			return false
+			return pool.ReservePreload(file, readerStartEnd, readerEndStart, readerEndEnd)
 		}
 		if mode == stream.MemoryStorage {
-			preload.releaseBudget = func() { pool.ReleasePreloadBudget(ih) }
-		}
-		preload.setProtection = func() {
-			if storageClient != nil && hasProtection {
-				storageClient.SetActiveRange(ih, preloadHeadReaderID, headStart, headEnd)
-				storageClient.SetActiveRange(ih, preloadTailReaderID, tailStart, tailEnd)
-			}
+			preload.releaseBudget = func() { pool.ReleasePreload(ih) }
 		}
 		preload.start = func() {
 			c.runPreload(preload, file, pool, mode, readerStartEnd, readerEndStart, readerEndEnd)
@@ -680,7 +656,7 @@ func (c *Controller) watchPreloadTorrent(preload *preloadTask) {
 
 // dispatchPreloadsLocked starts queued preloads in FIFO order. Concurrency is
 // capped by maxConcurrentPreloads; memory is accounted solely by the stream
-// pool, whose ReservePreloadBudget caps aggregate preload reservations against
+// pool, whose ReservePreload caps aggregate preload reservations against
 // the same budget streaming readahead draws from. Keeping a second byte
 // accounting here would let a task pass one gate and fail the other. Completed
 // preloads still hold a reservation for the cache they pin, so admission may
@@ -723,10 +699,6 @@ func (c *Controller) dispatchPreloadsLocked() {
 		preload.queued = false
 		preload.active = true
 		c.preloadWorkers = append(c.preloadWorkers, preload)
-		if preload.setProtection != nil {
-			preload.setProtection()
-			preload.protected = true
-		}
 		go preload.start()
 	}
 }
@@ -820,7 +792,7 @@ func (c *Controller) finishPreload(preload *preloadTask, completed, failed bool)
 	c.releasePreloadCapacityLocked(preload)
 	current, ok := c.preloads.Load(preload.infoHash)
 	if !ok || current != preload {
-		c.clearPreloadProtectionLocked(preload)
+		c.releasePreloadBudgetLocked(preload)
 		c.dispatchPreloadsLocked()
 		preload.cancel()
 		return
@@ -831,7 +803,7 @@ func (c *Controller) finishPreload(preload *preloadTask, completed, failed bool)
 	} else {
 		c.preloads.Delete(preload.infoHash)
 		preload.retire()
-		c.clearPreloadProtectionLocked(preload)
+		c.releasePreloadBudgetLocked(preload)
 		if failed {
 			c.snapshotPreloadLocked(preload, api.Failed)
 		}
@@ -910,15 +882,6 @@ func completedRangeBytes(pieceComplete func(int) bool, pieceLength, fileOffset, 
 		}
 	}
 	return total
-}
-
-// preloadCoversBoundaries reports whether the head range [0, headEnd) and
-// the tail range [tailStart, tailEnd) reach both ends of a file of
-// fileLength bytes. A preload trimmed to part of its head leaves the tail to
-// playback boundary protection; one whose head spans the whole file covers
-// the tail as well.
-func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool {
-	return headEnd > 0 && (headEnd >= fileLength || (tailEnd > tailStart && tailEnd >= fileLength))
 }
 
 // fitPreloadRanges trims the head range [0, headEnd) and the tail range
@@ -1086,7 +1049,7 @@ func (c *Controller) releasePreloadLocked(preload *preloadTask, dispatch bool) {
 		})
 	}
 	preload.queued = false
-	c.clearPreloadProtectionLocked(preload)
+	c.releasePreloadBudgetLocked(preload)
 	if dispatch {
 		c.dispatchPreloadsLocked()
 	}
@@ -1116,27 +1079,14 @@ func (c *Controller) releasePreloadCapacityLocked(preload *preloadTask) {
 	c.preloadWorkers = slices.DeleteFunc(c.preloadWorkers, func(worker *preloadTask) bool { return worker == preload })
 }
 
-// releasePreloadBudgetLocked returns the task's reservation to the stream pool.
-// Idempotent: the first call clears the hook.
+// releasePreloadBudgetLocked returns the task's reservation to the stream pool,
+// which unpins its cached pieces. Idempotent: the first call clears the hook.
 func (c *Controller) releasePreloadBudgetLocked(preload *preloadTask) {
 	if preload.releaseBudget == nil {
 		return
 	}
 	preload.releaseBudget()
 	preload.releaseBudget = nil
-}
-
-// clearPreloadProtectionLocked unpins the preloaded cache and, with it, the
-// memory reservation covering that cache.
-func (c *Controller) clearPreloadProtectionLocked(preload *preloadTask) {
-	c.releasePreloadBudgetLocked(preload)
-	if !preload.protected {
-		return
-	}
-	preload.protected = false
-	if preload.clearProtection != nil {
-		preload.clearProtection()
-	}
 }
 
 // evictReadyPreloadLocked unpins one completed preload so a pending one can
@@ -1148,7 +1098,7 @@ func (c *Controller) evictReadyPreloadLocked(except *preloadTask) bool {
 	var victim *preloadTask
 	c.preloads.Range(func(_, val any) bool {
 		p, ok := val.(*preloadTask)
-		if !ok || p == nil || p == except || p.active || p.queued || !p.ready.Load() || !p.protected || p.releaseBudget == nil {
+		if !ok || p == nil || p == except || p.active || p.queued || !p.ready.Load() || p.releaseBudget == nil {
 			return true
 		}
 		if victim == nil || p.readyAt.Before(victim.readyAt) {
@@ -1218,7 +1168,7 @@ func (c *Controller) preparePreloadsForPlaybackLocked(infoHash metainfo.Hash, fi
 			matchedPreload = preload
 			ready := preload.ready.Load()
 			cacheResident := !ready || preload.isCacheResident()
-			if ready && preload.protected && preload.releaseBudget != nil && cacheResident {
+			if ready && preload.releaseBudget != nil && cacheResident {
 				if preload.expiryTimer != nil {
 					preload.expiryTimer.Stop()
 					preload.expiryTimer = nil

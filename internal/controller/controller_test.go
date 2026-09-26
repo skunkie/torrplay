@@ -1720,7 +1720,6 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 		defer cleanup()
 
 		ih := metainfo.Hash{1}
-		otherHash := metainfo.Hash{2}
 		ctrl.torrentTracker.mu.Lock()
 		ctrl.torrentTracker.torrents[ih] = torrentInfo{
 			lastUsedAt:  time.Now().Add(-4 * time.Hour),
@@ -1728,15 +1727,11 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 		}
 		ctrl.torrentTracker.mu.Unlock()
 
-		ctrl.streamPool.Load().SetReadaheadBudget(1000)
-		require.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(ih, "", false, 1000))
+		released := false
 		task := &preloadTask{
-			infoHash: ih,
-			cancel:   func() {},
-			clearProtection: func() {
-				ctrl.streamPool.Load().ReleasePreloadBudget(ih)
-			},
-			protected: true,
+			infoHash:      ih,
+			cancel:        func() {},
+			releaseBudget: func() { released = true },
 		}
 		task.ready.Store(true)
 		ctrl.preloads.Store(ih, task)
@@ -1749,8 +1744,7 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 		_, tracked := ctrl.torrentTracker.torrents[ih]
 		ctrl.torrentTracker.mu.RUnlock()
 		assert.False(t, tracked)
-		assert.Equal(t, int64(500), ctrl.streamPool.Load().ReservePreloadBudget(otherHash, "", false, 1000))
-		ctrl.streamPool.Load().ReleasePreloadBudget(otherHash)
+		assert.True(t, released, "the preload's reservation must be returned to the pool")
 	})
 }
 

@@ -656,25 +656,6 @@ func TestPreloadTaskProgressFloor(t *testing.T) {
 	assert.Equal(t, int64(1000), task.progressBytes())
 }
 
-func TestPreloadCoversBoundaries(t *testing.T) {
-	tests := []struct {
-		name                        string
-		headEnd, tailStart, tailEnd int64
-		want                        bool
-	}{
-		{name: "head and tail", headEnd: 10, tailStart: 90, tailEnd: 100, want: true},
-		{name: "head only", headEnd: 10, want: false},
-		{name: "head spans whole file", headEnd: 100, want: true},
-		{name: "tail short of file end", headEnd: 10, tailStart: 80, tailEnd: 90, want: false},
-		{name: "nothing protected", want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, preloadCoversBoundaries(100, tt.headEnd, tt.tailStart, tt.tailEnd))
-		})
-	}
-}
-
 func TestStartPreloadReservesWholeProtectedPieces(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
@@ -745,11 +726,10 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 func TestPreloadSchedulerLimitsConcurrencyAndReleasesCapacity(t *testing.T) {
 	ctrl := &Controller{preloadReadyTTL: time.Hour}
 	type scheduledTask struct {
-		preload          *preloadTask
-		started          chan struct{}
-		complete         chan struct{}
-		budgetReleases   atomic.Int32
-		protectionClears atomic.Int32
+		preload        *preloadTask
+		started        chan struct{}
+		complete       chan struct{}
+		budgetReleases atomic.Int32
 	}
 	newTask := func(id byte) *scheduledTask {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -769,8 +749,6 @@ func TestPreloadSchedulerLimitsConcurrencyAndReleasesCapacity(t *testing.T) {
 			},
 		}
 		preload.releaseBudget = func() { task.budgetReleases.Add(1) }
-		preload.setProtection = func() {}
-		preload.clearProtection = func() { task.protectionClears.Add(1) }
 		preload.start = func() {
 			close(task.started)
 			completed := false
@@ -829,15 +807,13 @@ func TestPreloadSchedulerLimitsConcurrencyAndReleasesCapacity(t *testing.T) {
 			return false
 		}
 	}, time.Second, time.Millisecond)
-	assert.Zero(t, first.budgetReleases.Load(), "ready preload must keep the reservation covering its pinned cache")
-	assert.Zero(t, first.protectionClears.Load(), "ready preload must retain cache protection")
+	assert.Zero(t, first.budgetReleases.Load(), "ready preload must keep the reservation and protection covering its pinned cache")
 	current, ok := ctrl.preloads.Load(first.preload.infoHash)
 	require.True(t, ok)
 	assert.Same(t, first.preload, current)
 
 	ctrl.cancelPreload(first.preload.infoHash)
-	assert.Equal(t, int32(1), first.protectionClears.Load())
-	assert.Equal(t, int32(1), first.budgetReleases.Load(), "clearing protection must return the reservation")
+	assert.Equal(t, int32(1), first.budgetReleases.Load(), "cancelling must return the reservation and its protection")
 	ctrl.cancelAllPreloads()
 	ctrl.preloadsMu.Lock()
 	assert.Empty(t, ctrl.preloadWorkers)
@@ -888,7 +864,7 @@ func TestPreparePreloadsForPlaybackCancelsWorkersAndReleasesReadyMemory(t *testi
 
 	readyCtx, readyCancel := context.WithCancel(context.Background())
 	defer readyCancel()
-	var readyBudgetReleases, readyProtectionClears atomic.Int32
+	var readyBudgetReleases atomic.Int32
 	ready := &preloadTask{
 		ctx:         readyCtx,
 		infoHash:    metainfo.Hash{1},
@@ -897,12 +873,8 @@ func TestPreparePreloadsForPlaybackCancelsWorkersAndReleasesReadyMemory(t *testi
 		fileIndex:   1,
 		filePath:    "ready.mkv",
 		targetBytes: 2048,
-		protected:   true,
 		releaseBudget: func() {
 			readyBudgetReleases.Add(1)
-		},
-		clearProtection: func() {
-			readyProtectionClears.Add(1)
 		},
 	}
 	ready.bytesRead.Store(ready.targetBytes)
@@ -920,7 +892,6 @@ func TestPreparePreloadsForPlaybackCancelsWorkersAndReleasesReadyMemory(t *testi
 		filePath:    "active.mkv",
 		targetBytes: 4096,
 		active:      true,
-		protected:   true,
 	}
 	active.bytesRead.Store(1024)
 	ctrl.preloadWorkers = []*preloadTask{active}
@@ -941,7 +912,6 @@ func TestPreparePreloadsForPlaybackCancelsWorkersAndReleasesReadyMemory(t *testi
 	assert.Len(t, ctrl.preloadWorkers, 1, "the cancelled worker keeps its slot until it exits")
 	assert.Error(t, activeCtx.Err())
 	assert.Equal(t, int32(1), readyBudgetReleases.Load())
-	assert.Equal(t, int32(1), readyProtectionClears.Load())
 	readyValue, ok := ctrl.preloadSnapshots.Load(ready.infoHash)
 	require.True(t, ok)
 	readySnapshot := readyValue.(*preloadStatusSnapshot)
@@ -1049,19 +1019,15 @@ func TestPreparePreloadsForPlaybackReleasesReadyMemoryWithinTorrent(t *testing.T
 	ctrl := &Controller{preloadPlaybackCount: 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var budgetReleases, protectionClears atomic.Int32
+	var budgetReleases atomic.Int32
 	preload := &preloadTask{
-		ctx:       ctx,
-		infoHash:  metainfo.Hash{1},
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		filePath:  "next-episode.mkv",
-		protected: true,
+		ctx:      ctx,
+		infoHash: metainfo.Hash{1},
+		cancel:   cancel,
+		done:     make(chan struct{}),
+		filePath: "next-episode.mkv",
 		releaseBudget: func() {
 			budgetReleases.Add(1)
-		},
-		clearProtection: func() {
-			protectionClears.Add(1)
 		},
 	}
 	preload.ready.Store(true)
@@ -1075,12 +1041,11 @@ func TestPreparePreloadsForPlaybackReleasesReadyMemoryWithinTorrent(t *testing.T
 	_, ok := ctrl.preloads.Load(preload.infoHash)
 	assert.False(t, ok, "playback of another file must release the memory preload lease")
 	assert.Equal(t, int32(1), budgetReleases.Load())
-	assert.Equal(t, int32(1), protectionClears.Load())
 }
 
-// newLeasablePreload returns a ready memory preload whose budget releases and
-// protection clears are counted.
-func newLeasablePreload(ih metainfo.Hash, filePath string, budgetReleases, protectionClears *atomic.Int32) *preloadTask {
+// newLeasablePreload returns a ready memory preload whose reservation releases
+// are counted.
+func newLeasablePreload(ih metainfo.Hash, filePath string, budgetReleases *atomic.Int32) *preloadTask {
 	ctx, cancel := context.WithCancel(context.Background())
 	preload := &preloadTask{
 		ctx:         ctx,
@@ -1090,12 +1055,8 @@ func newLeasablePreload(ih metainfo.Hash, filePath string, budgetReleases, prote
 		fileIndex:   2,
 		filePath:    filePath,
 		targetBytes: 1024,
-		protected:   true,
 		releaseBudget: func() {
 			budgetReleases.Add(1)
-		},
-		clearProtection: func() {
-			protectionClears.Add(1)
 		},
 	}
 	preload.bytesRead.Store(preload.targetBytes)
@@ -1107,8 +1068,8 @@ func newLeasablePreload(ih metainfo.Hash, filePath string, budgetReleases, prote
 func TestCancelPreloadReleasesPlaybackLease(t *testing.T) {
 	ctrl := &Controller{}
 	ctrl.runtimeConfig.playbackGracePeriod = time.Hour
-	var budgetReleases, protectionClears atomic.Int32
-	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases, &protectionClears)
+	var budgetReleases atomic.Int32
+	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases)
 	ctrl.preloads.Store(preload.infoHash, preload)
 
 	ctrl.preloadsMu.Lock()
@@ -1118,7 +1079,6 @@ func TestCancelPreloadReleasesPlaybackLease(t *testing.T) {
 	ctrl.cancelPreload(preload.infoHash)
 	assert.Nil(t, session.lease)
 	assert.Equal(t, int32(1), budgetReleases.Load())
-	assert.Equal(t, int32(1), protectionClears.Load())
 	assert.Equal(t, 1, ctrl.preloadPlaybackCount, "cancelling the preload must not end the playback session")
 
 	ctrl.preloadsMu.Lock()
@@ -1351,8 +1311,8 @@ func TestDroppedTorrentDoesNotReportFailedPreload(t *testing.T) {
 
 func TestPlaybackSessionClosesImmediatelyWithoutGracePeriod(t *testing.T) {
 	ctrl := &Controller{}
-	var budgetReleases, protectionClears atomic.Int32
-	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases, &protectionClears)
+	var budgetReleases atomic.Int32
+	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases)
 	ctrl.preloads.Store(preload.infoHash, preload)
 
 	ctrl.preloadsMu.Lock()
@@ -1363,14 +1323,13 @@ func TestPlaybackSessionClosesImmediatelyWithoutGracePeriod(t *testing.T) {
 	assert.Zero(t, ctrl.preloadPlaybackCount)
 	assert.Empty(t, ctrl.playbackSessions)
 	assert.Equal(t, int32(1), budgetReleases.Load())
-	assert.Equal(t, int32(1), protectionClears.Load())
 }
 
 func TestPlaybackSessionForAnotherFileClosesIdleSession(t *testing.T) {
 	ctrl := &Controller{}
 	ctrl.runtimeConfig.playbackGracePeriod = time.Hour
-	var budgetReleases, protectionClears atomic.Int32
-	preload := newLeasablePreload(metainfo.Hash{1}, "episode-1.mkv", &budgetReleases, &protectionClears)
+	var budgetReleases atomic.Int32
+	preload := newLeasablePreload(metainfo.Hash{1}, "episode-1.mkv", &budgetReleases)
 	ctrl.preloads.Store(preload.infoHash, preload)
 
 	ctrl.preloadsMu.Lock()
@@ -1383,7 +1342,6 @@ func TestPlaybackSessionForAnotherFileClosesIdleSession(t *testing.T) {
 	assert.Nil(t, idle.closeTimer, "closing the idle session must stop its timer")
 	assert.Equal(t, 1, ctrl.preloadPlaybackCount, "only the new session remains open")
 	assert.Equal(t, int32(1), budgetReleases.Load(), "the idle session's lease must return its reservation")
-	assert.Equal(t, int32(1), protectionClears.Load())
 
 	ctrl.preloadsMu.Lock()
 	ctrl.endPlaybackRequestLocked(next)
@@ -1395,8 +1353,8 @@ func TestPlaybackSessionForAnotherFileClosesIdleSession(t *testing.T) {
 func TestPlaybackSessionHoldsReadyPreloadAcrossRequests(t *testing.T) {
 	ctrl := &Controller{preloadReadyTTL: time.Hour}
 	ctrl.runtimeConfig.playbackGracePeriod = 50 * time.Millisecond
-	var budgetReleases, protectionClears atomic.Int32
-	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases, &protectionClears)
+	var budgetReleases atomic.Int32
+	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases)
 	ctrl.preloads.Store(preload.infoHash, preload)
 
 	ctrl.preloadsMu.Lock()
@@ -1420,7 +1378,7 @@ func TestPlaybackSessionHoldsReadyPreloadAcrossRequests(t *testing.T) {
 	assert.Same(t, preload, second.lease)
 	assert.Equal(t, 1, ctrl.preloadPlaybackCount)
 	assert.Zero(t, budgetReleases.Load(), "the gap between range requests must keep the reservation")
-	assert.Zero(t, protectionClears.Load(), "the gap between range requests must keep the protection")
+	assert.Zero(t, budgetReleases.Load(), "the gap between range requests must keep the protection")
 
 	ctrl.preloadsMu.Lock()
 	ctrl.endPlaybackRequestLocked(second)
@@ -1431,15 +1389,15 @@ func TestPlaybackSessionHoldsReadyPreloadAcrossRequests(t *testing.T) {
 		return ctrl.preloadPlaybackCount == 0
 	}, time.Second, 5*time.Millisecond, "the session must close after the grace period")
 	assert.Equal(t, int32(1), budgetReleases.Load(), "closing the session must return the reservation")
-	assert.Equal(t, int32(1), protectionClears.Load(), "closing the session must clear the protection")
+	assert.Equal(t, int32(1), budgetReleases.Load(), "closing the session must clear the protection")
 	assert.Equal(t, api.Idle, ctrl.getPreloadStatus(preload.infoHash).Status)
 }
 
 func TestPlaybackSessionJoinReleasesStaleLease(t *testing.T) {
 	ctrl := &Controller{}
 	ctrl.runtimeConfig.playbackGracePeriod = time.Hour
-	var budgetReleases, protectionClears atomic.Int32
-	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases, &protectionClears)
+	var budgetReleases atomic.Int32
+	preload := newLeasablePreload(metainfo.Hash{1}, "playing.mkv", &budgetReleases)
 	ctrl.preloads.Store(preload.infoHash, preload)
 
 	ctrl.preloadsMu.Lock()
@@ -1454,7 +1412,6 @@ func TestPlaybackSessionJoinReleasesStaleLease(t *testing.T) {
 	assert.Same(t, session, joined)
 	assert.Nil(t, joined.lease, "joining must drop a lease whose cache is gone")
 	assert.Equal(t, int32(1), budgetReleases.Load(), "the stale reservation must stop suppressing reader boundaries")
-	assert.Equal(t, int32(1), protectionClears.Load())
 
 	ctrl.endPlaybackRequestLocked(joined)
 	ctrl.closePlaybackSessionLocked(joined)
@@ -1517,8 +1474,8 @@ func TestStartPreloadReturnsPlaybackLeaseForSameFile(t *testing.T) {
 	ctrl.runtimeConfig.playbackGracePeriod = time.Hour
 	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
 	file := to.Files()[0]
-	var budgetReleases, protectionClears atomic.Int32
-	lease := newLeasablePreload(to.InfoHash(), file.Path(), &budgetReleases, &protectionClears)
+	var budgetReleases atomic.Int32
+	lease := newLeasablePreload(to.InfoHash(), file.Path(), &budgetReleases)
 	lease.torrent = to
 	ctrl.preloads.Store(lease.infoHash, lease)
 
@@ -1574,11 +1531,10 @@ func TestStartPreloadSkipsFileBeingPlayed(t *testing.T) {
 func TestPreparePreloadsForPlaybackPreservesReadyFileStorage(t *testing.T) {
 	ctrl := &Controller{preloadPlaybackCount: 1}
 	preload := &preloadTask{
-		infoHash:  metainfo.Hash{1},
-		cancel:    func() {},
-		done:      make(chan struct{}),
-		filePath:  "cached.mkv",
-		protected: true,
+		infoHash: metainfo.Hash{1},
+		cancel:   func() {},
+		done:     make(chan struct{}),
+		filePath: "cached.mkv",
 	}
 	preload.ready.Store(true)
 	preload.doneOnce.Do(func() { close(preload.done) })
@@ -1620,16 +1576,14 @@ func TestPreloadSchedulerEvictsReadyPreloadToReserveBudget(t *testing.T) {
 	ctrl := &Controller{preloadReadyTTL: time.Hour}
 	readyCtx, readyCancel := context.WithCancel(context.Background())
 	defer readyCancel()
-	var protectionClears, budgetReleases atomic.Int32
+	var budgetReleases atomic.Int32
 	ready := &preloadTask{
-		ctx:             readyCtx,
-		infoHash:        metainfo.Hash{1},
-		cancel:          readyCancel,
-		done:            make(chan struct{}),
-		targetBytes:     32 << 20,
-		protected:       true,
-		releaseBudget:   func() { budgetReleases.Add(1) },
-		clearProtection: func() { protectionClears.Add(1) },
+		ctx:           readyCtx,
+		infoHash:      metainfo.Hash{1},
+		cancel:        readyCancel,
+		done:          make(chan struct{}),
+		targetBytes:   32 << 20,
+		releaseBudget: func() { budgetReleases.Add(1) },
 	}
 	ready.ready.Store(true)
 	ready.readyAt = time.Now().Add(-time.Minute)
@@ -1640,20 +1594,16 @@ func TestPreloadSchedulerEvictsReadyPreloadToReserveBudget(t *testing.T) {
 		infoHash:      metainfo.Hash{4},
 		cancel:        func() {},
 		done:          make(chan struct{}),
-		protected:     true,
 		releaseBudget: func() { newerBudgetReleases.Add(1) },
 		readyAt:       time.Now(),
 	}
 	newerReady.ready.Store(true)
 	newerReady.doneOnce.Do(func() { close(newerReady.done) })
 	ctrl.preloads.Store(newerReady.infoHash, newerReady)
-	var fileProtectionClears atomic.Int32
 	fileReady := &preloadTask{
-		infoHash:        metainfo.Hash{3},
-		cancel:          func() {},
-		done:            make(chan struct{}),
-		protected:       true,
-		clearProtection: func() { fileProtectionClears.Add(1) },
+		infoHash: metainfo.Hash{3},
+		cancel:   func() {},
+		done:     make(chan struct{}),
 	}
 	fileReady.ready.Store(true)
 	fileReady.doneOnce.Do(func() { close(fileReady.done) })
@@ -1693,7 +1643,6 @@ func TestPreloadSchedulerEvictsReadyPreloadToReserveBudget(t *testing.T) {
 		}
 	}, time.Second, time.Millisecond, "pending preload must run once a ready one is evicted")
 	assert.Equal(t, int32(1), budgetReleases.Load())
-	assert.Equal(t, int32(1), protectionClears.Load())
 	_, ok := ctrl.preloads.Load(ready.infoHash)
 	assert.False(t, ok, "evicted preload must leave the registry")
 	currentNewerReady, ok := ctrl.preloads.Load(newerReady.infoHash)
@@ -1703,7 +1652,6 @@ func TestPreloadSchedulerEvictsReadyPreloadToReserveBudget(t *testing.T) {
 	currentFileReady, ok := ctrl.preloads.Load(fileReady.infoHash)
 	require.True(t, ok, "file-storage preload must not be evicted for a memory reservation")
 	assert.Same(t, fileReady, currentFileReady)
-	assert.Zero(t, fileProtectionClears.Load())
 	snapshotValue, ok := ctrl.preloadSnapshots.Load(ready.infoHash)
 	require.True(t, ok, "evicted preload must leave a status snapshot")
 	snapshot := snapshotValue.(*preloadStatusSnapshot)
@@ -1715,18 +1663,14 @@ func TestPreloadSchedulerEvictsReadyPreloadToReserveBudget(t *testing.T) {
 
 func TestCurrentPreloadLockedDiscardsReadyTaskAfterCacheEviction(t *testing.T) {
 	ctrl := &Controller{}
-	var budgetReleases, protectionClears atomic.Int32
+	var budgetReleases atomic.Int32
 	preload := &preloadTask{
 		cacheResident: func() bool { return false },
 		infoHash:      metainfo.Hash{1},
 		cancel:        func() {},
 		done:          make(chan struct{}),
-		protected:     true,
 		releaseBudget: func() {
 			budgetReleases.Add(1)
-		},
-		clearProtection: func() {
-			protectionClears.Add(1)
 		},
 	}
 	preload.ready.Store(true)
@@ -1741,7 +1685,6 @@ func TestCurrentPreloadLockedDiscardsReadyTaskAfterCacheEviction(t *testing.T) {
 	_, ok := ctrl.preloads.Load(preload.infoHash)
 	assert.False(t, ok, "evicted ready cache must leave the preload registry")
 	assert.Equal(t, int32(1), budgetReleases.Load())
-	assert.Equal(t, int32(1), protectionClears.Load())
 }
 
 func TestPreloadSchedulerDropsUnreservableTask(t *testing.T) {
@@ -1813,12 +1756,11 @@ func TestFinishPreload(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cleared := make(chan struct{})
 		task := &preloadTask{
-			ctx:             ctx,
-			infoHash:        ih,
-			cancel:          cancel,
-			clearProtection: func() { close(cleared) },
-			done:            make(chan struct{}),
-			protected:       true,
+			ctx:           ctx,
+			infoHash:      ih,
+			cancel:        cancel,
+			releaseBudget: func() { close(cleared) },
+			done:          make(chan struct{}),
 		}
 		ctrl.preloads.Store(ih, task)
 
@@ -1967,12 +1909,11 @@ func TestDeleteTorrentClearsCompletedPreload(t *testing.T) {
 
 	cleared := false
 	task := &preloadTask{
-		infoHash:        ih,
-		cancel:          func() {},
-		clearProtection: func() { cleared = true },
-		fileIndex:       0,
-		filePath:        to.Files()[0].Path(),
-		protected:       true,
+		infoHash:      ih,
+		cancel:        func() {},
+		releaseBudget: func() { cleared = true },
+		fileIndex:     0,
+		filePath:      to.Files()[0].Path(),
 	}
 	task.ready.Store(true)
 	ctrl.preloads.Store(ih, task)
@@ -2059,10 +2000,9 @@ func TestReadyPreloadExpires(t *testing.T) {
 	ih := metainfo.Hash{1}
 	cleared := make(chan struct{})
 	task := &preloadTask{
-		infoHash:        ih,
-		cancel:          func() {},
-		clearProtection: func() { close(cleared) },
-		protected:       true,
+		infoHash:      ih,
+		cancel:        func() {},
+		releaseBudget: func() { close(cleared) },
 	}
 	task.ready.Store(true)
 	ctrl.preloads.Store(ih, task)
@@ -2110,10 +2050,9 @@ func TestPreloadExpiryDoesNotRemoveReplacement(t *testing.T) {
 	ih := metainfo.Hash{1}
 	var oldCleared atomic.Bool
 	oldTask := &preloadTask{
-		infoHash:        ih,
-		cancel:          func() {},
-		clearProtection: func() { oldCleared.Store(true) },
-		protected:       true,
+		infoHash:      ih,
+		cancel:        func() {},
+		releaseBudget: func() { oldCleared.Store(true) },
 	}
 	newTask := &preloadTask{}
 	ctrl.preloads.Store(ih, newTask)

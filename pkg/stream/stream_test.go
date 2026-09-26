@@ -925,7 +925,15 @@ func TestReadaheadForShare(t *testing.T) {
 	}
 }
 
-func TestPool_ReservePreloadBudget(t *testing.T) {
+// reservePreloadBytes reserves a byte-sized preload budget that protects no
+// file, for tests of the pool's budget accounting.
+func reservePreloadBytes(p *Pool, infoHash metainfo.Hash, size int64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.reservePreloadLocked(infoHash, preloadReservation{bytes: size})
+}
+
+func TestPool_ReservePreload(t *testing.T) {
 	t.Run("caps aggregate reservations", func(t *testing.T) {
 		p := newTestPool(t, Config{Logger: testLogger()})
 		if !p.SetReadaheadBudget(1000) {
@@ -934,19 +942,19 @@ func TestPool_ReservePreloadBudget(t *testing.T) {
 		firstHash := metainfo.Hash{1}
 		secondHash := metainfo.Hash{2}
 
-		if got := p.ReservePreloadBudget(firstHash, "", false, 300); got != 300 {
-			t.Fatalf("expected first preload to reserve 300, got %d", got)
+		if !reservePreloadBytes(p, firstHash, 300) {
+			t.Fatal("expected first preload to reserve 300 bytes")
 		}
-		if got := p.ReservePreloadBudget(secondHash, "", false, 300); got != 200 {
-			t.Fatalf("expected second preload to receive the remaining 200-byte preload share, got %d", got)
+		if reservePreloadBytes(p, secondHash, 300) {
+			t.Fatal("expected a second 300-byte preload to exceed the 200-byte remaining preload share")
 		}
-		if got := p.ReservePreloadBudget(firstHash, "", false, 400); got != 300 {
-			t.Fatalf("expected replacement reservation to remain capped at 300, got %d", got)
+		if !reservePreloadBytes(p, secondHash, 200) {
+			t.Fatal("expected a second preload to reserve the remaining 200 bytes")
 		}
 
-		p.ReleasePreloadBudget(secondHash)
-		if got := p.ReservePreloadBudget(firstHash, "", false, 400); got != 400 {
-			t.Fatalf("expected released preload capacity to become available, got %d", got)
+		p.ReleasePreload(secondHash)
+		if !reservePreloadBytes(p, firstHash, 400) {
+			t.Fatal("expected released preload capacity to become available to a replacement")
 		}
 		p.mu.Lock()
 		available := p.availableProtectionBudgetLocked(p.readaheadBudget)
@@ -955,6 +963,63 @@ func TestPool_ReservePreloadBudget(t *testing.T) {
 		if available != 600 || boundaryBytes != 150 {
 			t.Fatalf("expected playback to retain 600 bytes with 150-byte boundaries, got available=%d boundary=%d", available, boundaryBytes)
 		}
+	})
+
+	t.Run("failed replacement releases the reservation", func(t *testing.T) {
+		p := newTestPool(t, Config{Logger: testLogger()})
+		require.True(t, p.SetReadaheadBudget(1000))
+		infoHash := metainfo.Hash{1}
+		require.True(t, reservePreloadBytes(p, infoHash, 300))
+
+		require.False(t, reservePreloadBytes(p, infoHash, 600))
+		p.mu.Lock()
+		_, held := p.preloadBudgets[infoHash]
+		p.mu.Unlock()
+		assert.False(t, held, "a reservation that no longer fits must not keep the old one")
+	})
+
+	t.Run("protects reserved pieces until release", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		// Ten 64-byte pieces.
+		to, file := addTestTorrentFromMetaInfo(t, c, createMultiPieceTestMetaInfo(t))
+		reg := newProtectionRegistry()
+		pool := New(Config{Registry: reg, Logger: testLogger()})
+		defer pool.Close()
+		require.True(t, pool.SetReadaheadBudget(1<<20))
+		protected := func() []activeRange {
+			reg.mu.Lock()
+			defer reg.mu.Unlock()
+			ranges := make([]activeRange, 0, len(reg.ranges))
+			for _, r := range reg.ranges {
+				ranges = append(ranges, r)
+			}
+			slices.SortFunc(ranges, func(a, b activeRange) int { return a.startPiece - b.startPiece })
+			return ranges
+		}
+
+		require.True(t, pool.ReservePreload(file, 100, 600, 640))
+		assert.Equal(t, []activeRange{{startPiece: 0, endPiece: 1}, {startPiece: 9, endPiece: 9}}, protected())
+		pool.mu.Lock()
+		assert.Equal(t, int64(3*64), pool.preloadBudgets[to.InfoHash()].bytes)
+		pool.mu.Unlock()
+
+		// A replacement reuses the reservation's ranges, and an empty tail
+		// repeats the head.
+		require.True(t, pool.ReservePreload(file, 64, 0, 0))
+		assert.Equal(t, []activeRange{{startPiece: 0, endPiece: 0}, {startPiece: 0, endPiece: 0}}, protected())
+
+		pool.ReleasePreload(to.InfoHash())
+		assert.Empty(t, protected())
+
+		require.True(t, pool.ReservePreload(file, 64, 0, 0))
+		pool.Close()
+		assert.Empty(t, protected(), "closing the pool must end preload protection")
+	})
+
+	t.Run("rejects a file without piece metadata", func(t *testing.T) {
+		p := newTestPool(t, Config{Logger: testLogger()})
+		require.True(t, p.SetReadaheadBudget(1<<20))
+		assert.False(t, p.ReservePreload(&torrent.File{}, 64, 0, 0))
 	})
 
 	t.Run("replaces file boundaries", func(t *testing.T) {
@@ -1000,23 +1065,45 @@ func TestPool_ReservePreloadBudget(t *testing.T) {
 
 		// A preload for another file of the torrent protects nothing this reader
 		// needs, so the reader keeps its boundaries and pays for the reservation.
-		require.Equal(t, preload, pool.ReservePreloadBudget(to.InfoHash(), "other.mkv", true, preload))
+		pool.mu.Lock()
+		require.True(t, pool.reservePreloadLocked(to.InfoHash(), preloadReservation{bytes: preload, coversBoundaries: true, filePath: "other.mkv"}))
+		pool.mu.Unlock()
 		assert.Equal(t, 1, boundaries())
 		withOtherPreload := readahead()
 
 		// A head-only preload of the playing file leaves its tail unprotected, so
 		// the reader keeps its boundaries.
-		require.Equal(t, preload, pool.ReservePreloadBudget(to.InfoHash(), file.Path(), false, preload))
+		require.True(t, pool.ReservePreload(file, preload, 0, 0))
 		assert.Equal(t, 1, boundaries(), "a head-only preload must not suppress the tail boundary")
 
 		// A preload for the playing file already protects its head and tail.
-		require.Equal(t, preload, pool.ReservePreloadBudget(to.InfoHash(), file.Path(), true, preload))
+		const boundary = preload / 2
+		require.True(t, pool.ReservePreload(file, boundary, length-boundary, length))
 		assert.Zero(t, boundaries(), "the reservation replaces the reader's boundaries")
 		assert.Greater(t, readahead(), withOtherPreload, "boundaries must not be charged twice")
 
-		pool.ReleasePreloadBudget(to.InfoHash())
+		pool.ReleasePreload(to.InfoHash())
 		assert.Equal(t, 1, boundaries(), "releasing the reservation restores the reader's boundaries")
 	})
+}
+
+func TestPreloadCoversBoundaries(t *testing.T) {
+	tests := []struct {
+		name                        string
+		headEnd, tailStart, tailEnd int64
+		want                        bool
+	}{
+		{name: "head and tail", headEnd: 10, tailStart: 90, tailEnd: 100, want: true},
+		{name: "head only", headEnd: 10, want: false},
+		{name: "head spans whole file", headEnd: 100, want: true},
+		{name: "tail short of file end", headEnd: 10, tailStart: 80, tailEnd: 90, want: false},
+		{name: "nothing protected", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, preloadCoversBoundaries(100, tt.headEnd, tt.tailStart, tt.tailEnd))
+		})
+	}
 }
 
 // TestPool_PreloadCapacity verifies that PreloadCapacity keeps a playback reserve.
@@ -1038,14 +1125,14 @@ func TestPool_PreloadCapacity(t *testing.T) {
 			t.Errorf("PreloadCapacity() with budget %d = %d, want %d", tt.budget, got, tt.want)
 		}
 		// The whole capacity must be reservable by a single preload.
-		if got := p.ReservePreloadBudget(metainfo.Hash{1}, "", false, tt.want); got != tt.want {
-			t.Errorf("ReservePreloadBudget(%d) granted %d", tt.want, got)
+		if !reservePreloadBytes(p, metainfo.Hash{1}, tt.want) {
+			t.Errorf("reserving %d bytes failed", tt.want)
 		}
 	}
 }
 
-// TestPool_ReleasePreloadBudget verifies that ReleasePreloadBudget restores readahead for concurrent readers.
-func TestPool_ReleasePreloadBudget(t *testing.T) {
+// TestPool_ReleasePreload verifies that ReleasePreload restores readahead for concurrent readers.
+func TestPool_ReleasePreload(t *testing.T) {
 	p := newTestPool(t, Config{Logger: testLogger()})
 	const totalBudget = int64(1200)
 	if !p.SetReadaheadBudget(totalBudget) {
@@ -1062,8 +1149,8 @@ func TestPool_ReleasePreloadBudget(t *testing.T) {
 	}
 
 	preloadHash := metainfo.Hash{9}
-	if got := p.ReservePreloadBudget(preloadHash, "", false, 600); got != 600 {
-		t.Fatalf("expected 600-byte preload reservation, got %d", got)
+	if !reservePreloadBytes(p, preloadHash, 600) {
+		t.Fatal("expected 600-byte preload reservation")
 	}
 	for _, sr := range p.readers {
 		if sr.readahead != 160 {
@@ -1071,7 +1158,7 @@ func TestPool_ReleasePreloadBudget(t *testing.T) {
 		}
 	}
 
-	p.ReleasePreloadBudget(preloadHash)
+	p.ReleasePreload(preloadHash)
 	for _, sr := range p.readers {
 		if sr.readahead != 320 {
 			t.Fatalf("expected restored readahead 320, got %d", sr.readahead)
@@ -1533,8 +1620,8 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 			t.Fatal("expected initial readahead budget to be accepted")
 		}
 		infoHash := metainfo.Hash{1}
-		if got := p.ReservePreloadBudget(infoHash, "", false, 400); got != 400 {
-			t.Fatalf("expected 400-byte preload reservation, got %d", got)
+		if !reservePreloadBytes(p, infoHash, 400) {
+			t.Fatal("expected 400-byte preload reservation")
 		}
 
 		if p.SetReadaheadBudget(600) {
@@ -1547,7 +1634,7 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 		if budgetAfterRejection != 1000 || availableAfterRejection != 600 {
 			t.Fatalf("rejected update changed the pool: budget=%d available=%d", budgetAfterRejection, availableAfterRejection)
 		}
-		p.ReleasePreloadBudget(infoHash)
+		p.ReleasePreload(infoHash)
 		if !p.SetReadaheadBudget(600) {
 			t.Fatal("expected budget reduction after releasing preload reservation")
 		}
@@ -2254,8 +2341,8 @@ func TestPoolPreloadParksIdleReaderOnlyWhileReading(t *testing.T) {
 	// A reservation alone, such as one a completed preload keeps for its
 	// cache, downloads nothing, so the idle reader may stay warm.
 	preloadHash := metainfo.Hash{8}
-	if got := p.ReservePreloadBudget(preloadHash, "", false, 5000); got != 5000 {
-		t.Fatalf("expected 5000-byte preload reservation, got %d", got)
+	if !reservePreloadBytes(p, preloadHash, 5000) {
+		t.Fatal("expected 5000-byte preload reservation")
 	}
 	if sr.readahead != 8000 || mr.getReadahead() != 8000 {
 		t.Fatalf("a held reservation must not park the idle reader, got reader=%d underlying=%d", sr.readahead, mr.getReadahead())

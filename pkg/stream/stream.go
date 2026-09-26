@@ -969,39 +969,78 @@ func (p *Pool) SetReadaheadBudget(budgetBytes int64) bool {
 	return true
 }
 
-// ReservePreloadBudget admits a preload of filePath into the same global
-// protection budget used by streaming readahead. Replacing a reservation for
-// the same torrent is atomic. When coversBoundaries reports that the preload
-// protects both the file's head and tail itself, playback readers of that file
-// skip their own boundary protection while the reservation is held instead of
-// paying for those pieces twice. A preload that protects only the head, such
-// as one trimmed to a small budget, leaves reader boundaries in place so the
-// tail stays protected. Preloads may use otherwise-idle capacity but always leave a bounded
-// playback reserve, so a newly acquired stream cannot be reduced to the
-// one-byte minimum by completed preload leases. The returned byte count may be
-// smaller than requested when other preloads already consume the preload share.
-func (p *Pool) ReservePreloadBudget(infoHash metainfo.Hash, filePath string, coversBoundaries bool, requested int64) int64 {
-	if requested < 0 {
-		requested = 0
+// ReservePreload admits a preload of file into the same global protection
+// budget used by streaming readahead, and protects the whole pieces holding the
+// file-relative byte ranges [0, headEnd) and [tailStart, tailEnd) from eviction
+// until ReleasePreload. An empty tail range protects only the head. Replacing a
+// reservation for the same torrent is atomic. When the ranges reach both ends
+// of the file, playback readers of that file skip their own boundary
+// protection while the reservation is held instead of paying for those pieces
+// twice. A preload that protects only the head, such as one trimmed to a small
+// budget, leaves reader boundaries in place so the tail stays protected.
+// Preloads may use otherwise-idle capacity but always leave a bounded playback
+// reserve, so a newly acquired stream cannot be reduced to the one-byte
+// minimum by completed preload leases. It returns false, and holds no
+// reservation for the torrent, when the pieces do not fit the preload capacity
+// left by other reservations or the file has no piece metadata.
+func (p *Pool) ReservePreload(file *torrent.File, headEnd, tailStart, tailEnd int64) bool {
+	headStart, headEndPiece, tailStartPiece, tailEndPiece, ok := FilePieceRanges(file, headEnd, tailStart, tailEnd)
+	if !ok {
+		return false
+	}
+	reservation := preloadReservation{
+		bytes:            BoundaryPieceBytes(file.Torrent().Info(), headStart, headEndPiece, tailStartPiece, tailEndPiece),
+		coversBoundaries: preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
+		filePath:         file.Path(),
+		headStart:        headStart,
+		headEnd:          headEndPiece,
+		tailStart:        tailStartPiece,
+		tailEnd:          tailEndPiece,
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.reservePreloadLocked(file.Torrent().InfoHash(), reservation)
+}
 
+// preloadCoversBoundaries reports whether the head range [0, headEnd) and the
+// tail range [tailStart, tailEnd) reach both ends of a file of fileLength
+// bytes. A preload trimmed to part of its head leaves the tail to playback
+// boundary protection; one whose head spans the whole file covers the tail as
+// well.
+func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool {
+	return headEnd > 0 && (headEnd >= fileLength || (tailEnd > tailStart && tailEnd >= fileLength))
+}
+
+// reservePreloadLocked admits reservation for infoHash when it fits the
+// preload capacity left by other torrents' reservations, and protects its
+// pieces. A replaced reservation keeps its protection IDs, so its pieces stay
+// protected throughout. Must be called with p.mu held.
+func (p *Pool) reservePreloadLocked(infoHash metainfo.Hash, reservation preloadReservation) bool {
 	reserved := int64(0)
-	for hash, reservation := range p.preloadBudgets {
+	for hash, other := range p.preloadBudgets {
 		if hash != infoHash {
-			reserved += reservation.bytes
+			reserved += other.bytes
 		}
 	}
-	preloadCapacity := preloadProtectionCapacity(p.readaheadBudget)
-	granted := min(requested, max(preloadCapacity-reserved, 0))
-	if granted > 0 {
-		p.preloadBudgets[infoHash] = preloadReservation{bytes: granted, coversBoundaries: coversBoundaries, filePath: filePath}
+	if reservation.bytes > preloadProtectionCapacity(p.readaheadBudget)-reserved {
+		p.releasePreloadLocked(infoHash)
+		return false
+	}
+	if previous, ok := p.preloadBudgets[infoHash]; ok {
+		reservation.headID, reservation.tailID = previous.headID, previous.tailID
 	} else {
-		delete(p.preloadBudgets, infoHash)
+		p.nextID++
+		reservation.headID = p.nextID
+		p.nextID++
+		reservation.tailID = p.nextID
+	}
+	p.preloadBudgets[infoHash] = reservation
+	if p.cfg.Registry != nil {
+		p.cfg.Registry.SetActiveRange(infoHash, reservation.headID, reservation.headStart, reservation.headEnd)
+		p.cfg.Registry.SetActiveRange(infoHash, reservation.tailID, reservation.tailStart, reservation.tailEnd)
 	}
 	p.refreshReadaheadLocked(p.readaheadBudget)
-	return granted
+	return true
 }
 
 // PreloadCapacity returns the total bytes that preload reservations may hold
@@ -1013,16 +1052,34 @@ func (p *Pool) PreloadCapacity() int64 {
 	return preloadProtectionCapacity(p.readaheadBudget)
 }
 
-// ReleasePreloadBudget removes a torrent's preload reservation and restores
-// the freed capacity to active stream readers.
-func (p *Pool) ReleasePreloadBudget(infoHash metainfo.Hash) {
+// ReleasePreload removes a torrent's preload reservation, ends the eviction
+// protection of its pieces, and restores the freed capacity to active stream
+// readers.
+func (p *Pool) ReleasePreload(infoHash metainfo.Hash) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.preloadBudgets[infoHash]; !ok {
+	p.releasePreloadLocked(infoHash)
+}
+
+// releasePreloadLocked removes a torrent's preload reservation and its piece
+// protection, if it holds one. Must be called with p.mu held.
+func (p *Pool) releasePreloadLocked(infoHash metainfo.Hash) {
+	reservation, ok := p.preloadBudgets[infoHash]
+	if !ok {
 		return
 	}
 	delete(p.preloadBudgets, infoHash)
+	p.clearPreloadProtectionLocked(infoHash, reservation)
 	p.refreshReadaheadLocked(p.readaheadBudget)
+}
+
+// clearPreloadProtectionLocked ends the eviction protection of a reservation's
+// pieces. Must be called with p.mu held.
+func (p *Pool) clearPreloadProtectionLocked(infoHash metainfo.Hash, reservation preloadReservation) {
+	if p.cfg.Registry != nil {
+		p.cfg.Registry.ClearActiveRange(infoHash, reservation.headID)
+		p.cfg.Registry.ClearActiveRange(infoHash, reservation.tailID)
+	}
 }
 
 // readaheadPlan divides the protection budget among active memory-storage
@@ -1159,12 +1216,19 @@ func preloadProtectionCapacity(totalBudget int64) int64 {
 }
 
 // preloadReservation is the protection budget held by a torrent's preload,
-// the file it protects, and whether it protects both that file's head and
-// tail.
+// the file and pieces it protects, and whether it protects both that file's
+// head and tail.
 type preloadReservation struct {
 	bytes            int64
 	coversBoundaries bool
 	filePath         string
+	// headStart, headEnd, tailStart, and tailEnd are the inclusive piece
+	// ranges protected from eviction while the reservation is held.
+	headStart, headEnd, tailStart, tailEnd int
+	// headID and tailID identify the reservation's protected ranges in the
+	// registry. They are drawn from the reader ID sequence, so they never
+	// collide with a reader's own range.
+	headID, tailID uint64
 }
 
 type readerFileKey struct {
@@ -1656,6 +1720,9 @@ func (p *Pool) Close() {
 
 	for key, sr := range p.readers {
 		p.removeReaderLocked(key, sr)
+	}
+	for infoHash, reservation := range p.preloadBudgets {
+		p.clearPreloadProtectionLocked(infoHash, reservation)
 	}
 	clear(p.preloadBudgets)
 

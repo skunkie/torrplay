@@ -73,14 +73,15 @@
 //
 // # Preload Reservations
 //
-// Preloads share the readahead budget with playback. ReservePreloadBudget
-// admits a preload of one file per torrent and may grant less than requested;
-// PreloadCapacity reports the preload share of the budget, and the rest is
-// always kept for playback readers so a new stream is never starved by held
-// preloads. ReleasePreloadBudget returns the reservation to active readers.
+// Preloads share the readahead budget with playback. ReservePreload admits a
+// preload of one file per torrent when the whole pieces of its head and tail
+// fit the preload share of the budget, and protects those pieces from eviction
+// until ReleasePreload. PreloadCapacity reports the preload share, and the rest
+// is always kept for playback readers so a new stream is never starved by held
+// preloads. ReleasePreload returns the reservation to active readers.
 // AcquirePreloadContext acquires a reader whose readahead is bounded to a byte
-// range. SetReadaheadBudget refuses a
-// new budget whose preload share cannot hold the existing reservations.
+// range. SetReadaheadBudget refuses a new budget whose preload share cannot
+// hold the existing reservations.
 //
 // # Idle GC
 //
