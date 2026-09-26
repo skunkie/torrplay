@@ -269,10 +269,10 @@ type Protection struct {
 	Boundaries []PieceRange
 }
 
-// torrentState holds the state specific to a single torrent.
+// torrentState holds the state specific to a single torrent. Client.mu
+// guards its fields.
 type torrentState struct {
-	mu          sync.RWMutex
-	openHandles int   // Number of live TorrentImpl handles; protected by Client.mu.
+	openHandles int   // Number of live TorrentImpl handles.
 	pieceMemory int64 // Memory used by this torrent.
 	totalPieces int   // Total number of pieces from torrent metadata.
 }
@@ -486,11 +486,9 @@ func (c *Client) MemoryStats() MemoryStats {
 func (c *Client) memoryStatsLocked() MemoryStats {
 	var activeTorrents int
 	for _, state := range c.torrents {
-		state.mu.RLock()
 		if state.pieceMemory > 0 {
 			activeTorrents++
 		}
-		state.mu.RUnlock()
 	}
 
 	return MemoryStats{
@@ -545,10 +543,7 @@ func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 		return TorrentStats{}, fmt.Errorf("%w: %s", ErrTorrentNotManaged, infoHash)
 	}
 
-	// Read torrent state fields under its own lock for consistent discipline.
-	state.mu.RLock()
 	totalPieces := state.totalPieces
-	state.mu.RUnlock()
 
 	memoryStats := c.memoryStatsLocked()
 
@@ -666,9 +661,7 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 		c.torrents[infoHash] = state
 	} else {
 		state.openHandles++
-		state.mu.Lock()
 		state.totalPieces = pieceCount
-		state.mu.Unlock()
 	}
 	handle := &torrentHandle{}
 
@@ -762,17 +755,9 @@ func (c *Client) SetMaxMemory(limitBytes int64) error {
 
 // releaseMemoryLocked releases a reservation. c.mu must be held by the caller.
 func (c *Client) releaseMemoryLocked(size int64, state *torrentState) {
-	c.used -= size
-	if c.used < 0 {
-		c.used = 0
-	}
+	c.used = max(c.used-size, 0)
 	if state != nil {
-		state.mu.Lock()
-		state.pieceMemory -= size
-		if state.pieceMemory < 0 {
-			state.pieceMemory = 0
-		}
-		state.mu.Unlock()
+		state.pieceMemory = max(state.pieceMemory-size, 0)
 	}
 }
 
@@ -862,9 +847,7 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 		// Reserve the memory. The reservation remains pending until its buffer
 		// is published or refunded by completeAllocation.
 		c.used += size
-		state.mu.Lock()
 		state.pieceMemory += size
-		state.mu.Unlock()
 		c.pendingAllocations++
 		c.allocations.Add(1)
 		c.mu.Unlock()
@@ -1035,17 +1018,9 @@ func (c *Client) evictPassLocked(target int64, protection evictionProtection, re
 
 			c.queueEvictionLocked(key)
 			c.countEvictionLocked(pd, protection, inActiveRange, inFileBoundary)
-			size := int64(dataLen)
 			detached := c.evictPieceLocked(key, pd)
-			if reusable == nil && size == reuseSize {
+			if reusable == nil && int64(dataLen) == reuseSize {
 				reusable = detached
-			}
-
-			// Update torrent-specific memory usage.
-			if state, exists := c.torrents[key.infoHash]; exists {
-				state.mu.Lock()
-				state.pieceMemory -= size
-				state.mu.Unlock()
 			}
 		}
 
@@ -1183,11 +1158,7 @@ func (c *Client) evictPieceLocked(key pieceKey, pd *pieceData) []byte {
 	pd.evicted = true
 	data := pd.data
 	if pd.data != nil {
-		size := int64(len(pd.data))
-		c.used -= size
-		if c.used < 0 {
-			c.used = 0
-		}
+		c.releaseMemoryLocked(int64(len(pd.data)), pd.torrent)
 		pd.data = nil
 	}
 	pd.mu.Unlock()

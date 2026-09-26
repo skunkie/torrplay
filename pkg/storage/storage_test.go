@@ -1124,6 +1124,12 @@ func TestClient_SetMaxMemory(t *testing.T) {
 		stats, err := client.TorrentStats(infoHash)
 		require.NoError(t, err)
 		assert.Equal(t, 2, stats.ResidentPieces)
+		client.mu.RLock()
+		assert.Equal(t, int64(512), client.torrents[infoHash].pieceMemory, "eviction must release the torrent's memory")
+		client.mu.RUnlock()
+
+		require.NoError(t, client.SetMaxMemory(0))
+		assert.Zero(t, client.MemoryStats().TorrentsUsingMemory, "a torrent without resident pieces uses no memory")
 	})
 
 	t.Run("enforces limit across active ranges", func(t *testing.T) {
