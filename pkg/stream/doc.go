@@ -16,9 +16,9 @@
 //
 // The Pool type is the central manager. Each torrent file can have multiple
 // readers acquired simultaneously, and every Acquire creates a new reader. The
-// caller receives an io.ReadSeeker backed by an io.SectionReader so that
-// http.ServeContent can serve Range requests without blocking on sequential
-// reads.
+// caller receives a buffered io.ReadSeeker of the file for http.ServeContent.
+// A seek moves the torrent reader only when the next read starts, so the size
+// probe of http.ServeContent never shifts the reader's readahead.
 //
 // # Lingering Readers
 //

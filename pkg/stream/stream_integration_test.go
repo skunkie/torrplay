@@ -196,7 +196,7 @@ func TestPool_Acquire(t *testing.T) {
 
 		buf := make([]byte, 1)
 		if _, err := reader1.Read(buf); !errors.Is(err, io.ErrClosedPipe) {
-			t.Fatalf("expected released wrapper to be retired, got %v", err)
+			t.Fatalf("expected released stream to be retired, got %v", err)
 		}
 
 		// The next request gets a new reader, and the lingering one closes.
@@ -492,7 +492,7 @@ func TestPoolStaleReaderCannotMoveLingeringReader(t *testing.T) {
 	// A caller that keeps its reader after release must neither read nor move
 	// the lingering torrent reader.
 	_, err := stale.Seek(f.Length()/2, io.SeekStart)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, io.ErrClosedPipe)
 	_, err = stale.Read(make([]byte, 1))
 	require.ErrorIs(t, err, io.ErrClosedPipe)
 

@@ -180,444 +180,161 @@ func newTestPool(t *testing.T, cfg Config) *Pool {
 	return p
 }
 
-// memReadSeekCloser is an in-memory io.ReadSeekCloser backed by bytes.Reader,
-// used for testing ReadAt behavior, position restoration, and callbacks.
-type memReadSeekCloser struct {
+// recordingReader is an in-memory io.ReadSeeker that records the reads and
+// seeks reaching it.
+type recordingReader struct {
 	*bytes.Reader
-	closed bool
-}
-
-func (m *memReadSeekCloser) Close() error {
-	m.closed = true
-	return nil
-}
-
-func newMemReader(data []byte) *memReadSeekCloser {
-	return &memReadSeekCloser{Reader: bytes.NewReader(data)}
-}
-
-func TestReadAtWrapper_ReadAt(t *testing.T) {
-	t.Run("basic read", func(t *testing.T) {
-		data := []byte("hello world")
-		s := newMemReader(data)
-		var cbOffset int64
-		rw := &readAtWrapper{
-			reader: s,
-			onOffsetChange: func(off int64) {
-				cbOffset = off
-			},
-		}
-
-		buf := make([]byte, 5)
-		n, err := rw.ReadAt(buf, 0)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if n != 5 {
-			t.Fatalf("expected 5 bytes, got %d", n)
-		}
-		if string(buf) != "hello" {
-			t.Fatalf("expected 'hello', got %q", buf)
-		}
-		// Callback should have fired with offset 5 (0 + 5 bytes read).
-		if cbOffset != 5 {
-			t.Fatalf("expected callback offset 5, got %d", cbOffset)
-		}
-		if rw.offset != 5 {
-			t.Fatalf("expected rw.offset=5, got %d", rw.offset)
-		}
-	})
-
-	t.Run("mid file offset", func(t *testing.T) {
-		data := []byte("0123456789")
-		s := newMemReader(data)
-		var cbOffset int64
-		rw := &readAtWrapper{
-			reader: s,
-			onOffsetChange: func(off int64) {
-				cbOffset = off
-			},
-		}
-
-		buf := make([]byte, 3)
-		n, err := rw.ReadAt(buf, 7)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if n != 3 {
-			t.Fatalf("expected 3 bytes, got %d", n)
-		}
-		if string(buf) != "789" {
-			t.Fatalf("expected '789', got %q", buf)
-		}
-		if cbOffset != 10 { // 7 + 3
-			t.Fatalf("expected callback offset 10, got %d", cbOffset)
-		}
-	})
-
-	t.Run("partial read with EOF", func(t *testing.T) {
-		data := []byte("abc")
-		s := newMemReader(data)
-		var cbOffset int64
-		var cbCalled bool
-		rw := &readAtWrapper{
-			reader: s,
-			onOffsetChange: func(off int64) {
-				cbOffset = off
-				cbCalled = true
-			},
-		}
-
-		// Request 10 bytes starting at offset 0 — only 3 available.
-		buf := make([]byte, 10)
-		n, err := rw.ReadAt(buf, 0)
-		if !errors.Is(err, io.EOF) {
-			t.Fatalf("expected io.EOF, got %v", err)
-		}
-		if n != 3 {
-			t.Fatalf("expected 3 bytes (partial), got %d", n)
-		}
-		if string(buf[:n]) != "abc" {
-			t.Fatalf("expected 'abc', got %q", buf[:n])
-		}
-		// Callback should fire even on partial read with error.
-		if !cbCalled {
-			t.Fatal("expected onOffsetChange to be called on partial read")
-		}
-		if cbOffset != 3 {
-			t.Fatalf("expected callback offset 3, got %d", cbOffset)
-		}
-	})
-
-	t.Run("preserves read progress", func(t *testing.T) {
-		data := []byte("0123456789")
-		s := newMemReader(data)
-		_, _ = s.Seek(3, io.SeekStart)
-
-		rw := &readAtWrapper{reader: s}
-
-		buf := make([]byte, 2)
-		n, err := rw.ReadAt(buf, 7)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if n != 2 || string(buf) != "78" {
-			t.Fatalf("expected '78', got %q", buf[:n])
-		}
-
-		// The small-read path fills its cache through the end of the source. The
-		// dedicated torrent reader remains there so readahead stays anchored to
-		// the most recently fetched data.
-		pos, _ := s.Seek(0, io.SeekCurrent)
-		if pos != int64(len(data)) {
-			t.Fatalf("expected position advanced to %d, got %d", len(data), pos)
-		}
-	})
-
-	t.Run("callback fires after unlock", func(t *testing.T) {
-		data := []byte("abcd")
-		s := newMemReader(data)
-
-		// Track whether the callback sees the wrapper lock still held.
-		var mu sync.Mutex
-		var callbacks []int64
-		rw := &readAtWrapper{
-			reader: s,
-			onOffsetChange: func(off int64) {
-				mu.Lock()
-				callbacks = append(callbacks, off)
-				mu.Unlock()
-			},
-		}
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 2)
-			_, _ = rw.ReadAt(buf, 0) // "ab"
-		}()
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 2)
-			_, _ = rw.ReadAt(buf, 2) // "cd"
-		}()
-		wg.Wait()
-
-		mu.Lock()
-		defer mu.Unlock()
-		if len(callbacks) != 2 {
-			t.Fatalf("expected 2 callbacks, got %d", len(callbacks))
-		}
-		// Both offsets should be present (order may vary).
-		if (callbacks[0] != 2 || callbacks[1] != 4) && (callbacks[0] != 4 || callbacks[1] != 2) {
-			t.Fatalf("expected offsets [2,4] or [4,2], got %v", callbacks)
-		}
-	})
-
-	t.Run("nil callback", func(t *testing.T) {
-		data := []byte("test")
-		s := newMemReader(data)
-		rw := &readAtWrapper{reader: s} // onOffsetChange is nil
-
-		buf := make([]byte, 4)
-		n, err := rw.ReadAt(buf, 0)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if n != 4 || string(buf) != "test" {
-			t.Fatalf("expected 'test', got %q", buf[:n])
-		}
-	})
-
-	t.Run("large read bypasses cache", func(t *testing.T) {
-		const size = 600 * 1024 // larger than 256KB defaultWrapperBufSize
-		data := make([]byte, size)
-		for i := range data {
-			data[i] = byte(i % 251)
-		}
-		s := newMemReader(data)
-		var cbOffset int64
-		rw := &readAtWrapper{
-			reader: s,
-			onOffsetChange: func(off int64) {
-				cbOffset = off
-			},
-		}
-
-		buf := make([]byte, size)
-		n, err := rw.ReadAt(buf, 0)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if n != size {
-			t.Fatalf("expected %d bytes, got %d", size, n)
-		}
-		if !bytes.Equal(buf, data) {
-			t.Fatal("data mismatch in large read")
-		}
-		if cbOffset != int64(size) {
-			t.Fatalf("expected callback offset %d, got %d", size, cbOffset)
-		}
-	})
-
-	t.Run("large partial read with EOF", func(t *testing.T) {
-		const dataSize = 300 * 1024
-		const reqSize = 500 * 1024
-		data := make([]byte, dataSize)
-		for i := range data {
-			data[i] = byte(i % 17)
-		}
-		s := newMemReader(data)
-		rw := &readAtWrapper{reader: s}
-
-		buf := make([]byte, reqSize)
-		n, err := rw.ReadAt(buf, 0)
-		if !errors.Is(err, io.EOF) {
-			t.Fatalf("expected io.EOF, got %v", err)
-		}
-		if n != dataSize {
-			t.Fatalf("expected %d bytes, got %d", dataSize, n)
-		}
-		if !bytes.Equal(buf[:n], data) {
-			t.Fatal("data mismatch in partial large read")
-		}
-	})
-
-	t.Run("read spanning cache boundary", func(t *testing.T) {
-		const totalSize = 300 * 1024
-		data := make([]byte, totalSize)
-		for i := range data {
-			data[i] = byte(i % 251)
-		}
-		s := newMemReader(data)
-		rw := &readAtWrapper{reader: s}
-
-		// 1. Prime cache with 256KB from offset 0
-		smallBuf := make([]byte, 10)
-		n, err := rw.ReadAt(smallBuf, 0)
-		if err != nil || n != 10 {
-			t.Fatalf("prime cache failed: %d, %v", n, err)
-		}
-
-		// 2. Read starting near end of cache that spans beyond 256KB into the unbuffered remainder
-		off := int64(256*1024 - 100)
-		spanBuf := make([]byte, 200) // 100 bytes from cache, 100 bytes from refill
-		n, err = rw.ReadAt(spanBuf, off)
-		if err != nil {
-			t.Fatalf("spanning read error: %v", err)
-		}
-		if n != 200 {
-			t.Fatalf("expected 200 bytes, got %d", n)
-		}
-		if !bytes.Equal(spanBuf, data[off:off+200]) {
-			t.Fatal("data mismatch in boundary spanning read")
-		}
-	})
-
-	t.Run("concurrent reads", func(t *testing.T) {
-		data := make([]byte, 1024)
-		for i := range data {
-			data[i] = byte(i % 256)
-		}
-		s := newMemReader(data)
-
-		var mu sync.Mutex
-		var offsets []int64
-		rw := &readAtWrapper{
-			reader: s,
-			onOffsetChange: func(off int64) {
-				mu.Lock()
-				offsets = append(offsets, off)
-				mu.Unlock()
-			},
-		}
-
-		// Launch multiple goroutines reading at different offsets concurrently.
-		const goroutines = 8
-		var wg sync.WaitGroup
-		wg.Add(goroutines)
-		for i := range goroutines {
-			go func(idx int) {
-				defer wg.Done()
-				off := int64(idx * 100)
-				buf := make([]byte, 10)
-				_, _ = rw.ReadAt(buf, off)
-			}(i)
-		}
-		wg.Wait()
-
-		mu.Lock()
-		defer mu.Unlock()
-		if len(offsets) != goroutines {
-			t.Fatalf("expected %d callbacks, got %d", goroutines, len(offsets))
-		}
-		// Each callback should have offset = start + 10 bytes read.
-		// Order is not deterministic, so check that every expected offset is present.
-		expected := make(map[int64]int)
-		for i := range goroutines {
-			e := int64(i*100 + 10)
-			expected[e]++
-		}
-		for _, off := range offsets {
-			expected[off]--
-		}
-		for e, count := range expected {
-			if count != 0 {
-				t.Errorf("offset %d: expected count 1, got %d (present=%d)", e, count, goroutines-count)
-			}
-		}
-	})
-}
-
-func TestReadAtWrapper_Retire(t *testing.T) {
-	s := newMemReader([]byte("xy"))
-	calls := 0
-	rw := &readAtWrapper{reader: s, onOffsetChange: func(int64) { calls++ }}
-	if _, err := rw.ReadAt(make([]byte, 1), 0); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	rw.retire()
-	rw.retire()
-	if s.closed {
-		t.Fatal("retiring a wrapper must leave the torrent reader to the pool")
-	}
-	if rw.cacheBuf != nil || rw.offset != 0 {
-		t.Fatalf("expected cache and offset reset, got cache=%v offset=%d", rw.cacheBuf != nil, rw.offset)
-	}
-	if _, err := rw.ReadAt(make([]byte, 1), 1); !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("expected io.ErrClosedPipe after retire, got %v", err)
-	}
-	rw.notifyOffsetChange(1)
-	if calls != 1 {
-		t.Fatalf("expected no offset callbacks after retire, got %d calls", calls)
-	}
-}
-
-// TestPool_NewReadSeeker verifies that newReadSeeker readers report playback reads.
-func TestPool_NewReadSeeker(t *testing.T) {
-	var observed []StorageMode
-	pool := &Pool{cfg: Config{ReadObserver: func(mode StorageMode, duration time.Duration) {
-		if duration < 0 {
-			t.Errorf("negative read duration %v", duration)
-		}
-		observed = append(observed, mode)
-	}}}
-	read := func(pool *Pool, mode StorageMode) {
-		t.Helper()
-		wrapper := &readAtWrapper{reader: newMemReader([]byte("abcdef"))}
-		reader := pool.newReadSeeker(wrapper, 6, mode)
-		if _, err := reader.Read(make([]byte, 3)); err != nil {
-			t.Fatalf("read failed: %v", err)
-		}
-	}
-
-	read(pool, FileStorage)
-	read(pool, MemoryStorage)
-	read(&Pool{}, MemoryStorage)
-
-	if want := []StorageMode{FileStorage, MemoryStorage}; !slices.Equal(observed, want) {
-		t.Fatalf("expected observed reads %v, got %v", want, observed)
-	}
-}
-
-func TestStorageMode_String(t *testing.T) {
-	for mode, want := range map[StorageMode]string{MemoryStorage: "memory", FileStorage: "file", StorageMode(9): "unknown"} {
-		if got := mode.String(); got != want {
-			t.Errorf("StorageMode(%d).String() = %q, want %q", mode, got, want)
-		}
-	}
-}
-
-// TestSeekNotifyingReader_Read verifies that a pending seek is notified before the next read.
-func TestSeekNotifyingReader_Read(t *testing.T) {
-	var events []string
-	underlying := &orderRecordingReader{
-		ReadSeeker: io.NewSectionReader(bytes.NewReader([]byte("abcdef")), 0, 6),
-		events:     &events,
-	}
-	reader := &seekNotifyingReader{
-		ReadSeeker: underlying,
-		onSeek: func(offset int64) {
-			events = append(events, fmt.Sprintf("notify %d", offset))
-		},
-	}
-
-	// The size probe used by http.ServeContent must not be reported.
-	if _, err := reader.Seek(0, io.SeekEnd); err != nil {
-		t.Fatalf("seek to end failed: %v", err)
-	}
-	position, err := reader.Seek(4, io.SeekStart)
-	if err != nil || position != 4 {
-		t.Fatalf("seek failed: position=%d err=%v", position, err)
-	}
-	if len(events) != 0 {
-		t.Fatalf("expected no notification before a read, got %v", events)
-	}
-
-	buf := make([]byte, 2)
-	if _, err := reader.Read(buf); err != nil {
-		t.Fatalf("read failed: %v", err)
-	}
-	if _, err := reader.Read(buf); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected EOF, got %v", err)
-	}
-	want := []string{"notify 4", "read", "read"}
-	if !slices.Equal(events, want) {
-		t.Fatalf("expected %v, got %v", want, events)
-	}
-}
-
-// orderRecordingReader records reads so tests can check notification order.
-type orderRecordingReader struct {
-	io.ReadSeeker
 	events *[]string
 }
 
-func (r *orderRecordingReader) Read(p []byte) (int, error) {
+func newRecordingReader(data []byte, events *[]string) *recordingReader {
+	return &recordingReader{Reader: bytes.NewReader(data), events: events}
+}
+
+func (r *recordingReader) Read(p []byte) (int, error) {
 	*r.events = append(*r.events, "read")
-	return r.ReadSeeker.Read(p)
+	return r.Reader.Read(p)
+}
+
+func (r *recordingReader) Seek(offset int64, whence int) (int64, error) {
+	*r.events = append(*r.events, fmt.Sprintf("seek %d", offset))
+	return r.Reader.Seek(offset, whence)
+}
+
+func TestStreamReadSeeker_Read(t *testing.T) {
+	newStream := func(data []byte, length int64) (*streamReadSeeker, *[]string) {
+		events := &[]string{}
+		return newStreamReadSeeker(newRecordingReader(data, events), length, func(position int64) {
+			*events = append(*events, fmt.Sprintf("report %d", position))
+		}), events
+	}
+
+	t.Run("reads sequentially and reports each position", func(t *testing.T) {
+		s, events := newStream([]byte("hello world"), 11)
+		buf := make([]byte, 5)
+		n, err := s.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "hello", string(buf[:n]))
+		n, err = s.Read(make([]byte, 16))
+		require.NoError(t, err)
+		assert.Equal(t, 6, n)
+		_, err = s.Read(buf)
+		require.ErrorIs(t, err, io.EOF)
+		assert.Equal(t, []string{"read", "report 5", "report 11"}, *events, "one buffered read serves both")
+	})
+
+	t.Run("ends at the file length", func(t *testing.T) {
+		s, _ := newStream([]byte("abcdef"), 4)
+		data, err := io.ReadAll(s)
+		require.NoError(t, err)
+		assert.Equal(t, "abcd", string(data))
+	})
+
+	t.Run("reports a seek before the read", func(t *testing.T) {
+		s, events := newStream([]byte("abcdef"), 6)
+		// The size probe used by http.ServeContent must not reach the reader.
+		end, err := s.Seek(0, io.SeekEnd)
+		require.NoError(t, err)
+		assert.Equal(t, int64(6), end)
+		position, err := s.Seek(4, io.SeekStart)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), position)
+		assert.Empty(t, *events, "a seek alone must not move or report the reader")
+
+		buf := make([]byte, 2)
+		n, err := s.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "ef", string(buf[:n]))
+		assert.Equal(t, []string{"report 4", "seek 4", "read", "report 6"}, *events)
+	})
+
+	t.Run("keeps the buffer without a move", func(t *testing.T) {
+		s, events := newStream([]byte("abcdef"), 6)
+		_, err := s.Read(make([]byte, 2))
+		require.NoError(t, err)
+		position, err := s.Seek(0, io.SeekCurrent)
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), position)
+		buf := make([]byte, 2)
+		_, err = s.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "cd", string(buf))
+		assert.Equal(t, []string{"read", "report 2", "report 2", "report 4"}, *events)
+	})
+
+	t.Run("seeking back rereads", func(t *testing.T) {
+		s, _ := newStream([]byte("abcdef"), 6)
+		_, err := s.Read(make([]byte, 4))
+		require.NoError(t, err)
+		_, err = s.Seek(-3, io.SeekCurrent)
+		require.NoError(t, err)
+		buf := make([]byte, 2)
+		_, err = s.Read(buf)
+		require.NoError(t, err)
+		assert.Equal(t, "bc", string(buf))
+	})
+
+	t.Run("reads the end past the length", func(t *testing.T) {
+		s, _ := newStream([]byte("abcdef"), 6)
+		position, err := s.Seek(10, io.SeekStart)
+		require.NoError(t, err)
+		assert.Equal(t, int64(10), position)
+		_, err = s.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	})
+
+	t.Run("rejects invalid seeks", func(t *testing.T) {
+		s, _ := newStream([]byte("abcdef"), 6)
+		_, err := s.Seek(-1, io.SeekStart)
+		require.Error(t, err)
+		_, err = s.Seek(0, 42)
+		require.Error(t, err)
+	})
+
+	t.Run("reports without its lock held", func(t *testing.T) {
+		var s *streamReadSeeker
+		reports := 0
+		s = newStreamReadSeeker(bytes.NewReader([]byte("abcd")), 4, func(int64) {
+			// Reporting takes pool.mu, which must never be acquired under
+			// the stream's lock.
+			require.True(t, s.mu.TryLock(), "the stream lock is held while reporting")
+			s.mu.Unlock()
+			reports++
+		})
+		_, err := s.Seek(1, io.SeekStart)
+		require.NoError(t, err)
+		_, err = s.Read(make([]byte, 2))
+		require.NoError(t, err)
+		assert.Equal(t, 2, reports)
+	})
+
+	t.Run("observes read durations", func(t *testing.T) {
+		s := newStreamReadSeeker(bytes.NewReader([]byte("abcd")), 4, nil)
+		var durations []time.Duration
+		s.observeRead = func(d time.Duration) { durations = append(durations, d) }
+		_, err := s.Read(make([]byte, 2))
+		require.NoError(t, err)
+		require.Len(t, durations, 1)
+		assert.GreaterOrEqual(t, durations[0], time.Duration(0))
+	})
+}
+
+func TestStreamReadSeeker_Retire(t *testing.T) {
+	var events []string
+	reports := 0
+	s := newStreamReadSeeker(newRecordingReader([]byte("xy"), &events), 2, func(int64) { reports++ })
+	_, err := s.Read(make([]byte, 1))
+	require.NoError(t, err)
+
+	s.retire()
+	s.retire()
+	assert.Nil(t, s.buf, "retiring must free the buffer")
+	_, err = s.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+	_, err = s.Seek(0, io.SeekStart)
+	require.ErrorIs(t, err, io.ErrClosedPipe)
+	assert.Equal(t, 1, reports, "a retired stream must not report")
+	assert.Equal(t, []string{"read"}, events, "a retired stream must not touch its reader")
 }
 
 func TestPool_Close(t *testing.T) {
@@ -626,7 +343,7 @@ func TestPool_Close(t *testing.T) {
 		reader := newBlockingReader()
 		readerCtx, cancel := context.WithCancel(context.Background())
 		reader.SetContext(readerCtx)
-		wrapper := &readAtWrapper{reader: reader}
+		stream := newStreamReadSeeker(reader, 1, nil)
 		key := uint64(1)
 
 		pool.mu.Lock()
@@ -635,13 +352,13 @@ func TestPool_Close(t *testing.T) {
 			cancel:   cancel,
 			reader:   reader,
 			readerID: 1,
-			wrapper:  wrapper,
+			stream:   stream,
 		}
 		pool.mu.Unlock()
 
 		readDone := make(chan error, 1)
 		go func() {
-			_, err := wrapper.ReadAt(make([]byte, 1), 0)
+			_, err := stream.Read(make([]byte, 1))
 			readDone <- err
 		}()
 		<-reader.readStarted
@@ -1650,96 +1367,50 @@ func TestPoolReaderContextLifecycle(t *testing.T) {
 	}
 }
 
-func BenchmarkReadAtWrapper_ReadAt(b *testing.B) {
-	const totalSize = 16 * 1024 * 1024 // 16 MB
+func BenchmarkStreamReadSeeker_Read(b *testing.B) {
+	const totalSize = 16 << 20
 	data := make([]byte, totalSize)
 	for i := range data {
 		data[i] = byte(i)
 	}
 
-	chunkSizes := []struct {
-		name string
-		size int
-	}{
-		{"4KB", 4 * 1024},
-		{"16KB", 16 * 1024},
-		{"32KB", 32 * 1024},
-		{"64KB", 64 * 1024},
-		{"256KB", 256 * 1024},
-		{"1MB", 1024 * 1024},
-	}
-
-	for _, tc := range chunkSizes {
-		b.Run(tc.name, func(b *testing.B) {
-			s := newMemReader(data)
-			rw := &readAtWrapper{reader: s}
-			buf := make([]byte, tc.size)
-
-			b.SetBytes(int64(tc.size))
-			b.ResetTimer()
-
-			var off int64
+	for _, size := range []int{4 << 10, 32 << 10, 256 << 10, 1 << 20} {
+		b.Run(fmt.Sprintf("%dKB", size>>10), func(b *testing.B) {
+			s := newStreamReadSeeker(bytes.NewReader(data), totalSize, nil)
+			buf := make([]byte, size)
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
 			for range b.N {
-				if off+int64(tc.size) > totalSize {
-					off = 0
+				if _, err := io.ReadFull(s, buf); err != nil {
+					if _, err := s.Seek(0, io.SeekStart); err != nil {
+						b.Fatal(err)
+					}
 				}
-				_, err := rw.ReadAt(buf, off)
-				if err != nil {
-					b.Fatalf("read failed: %v", err)
-				}
-				off += int64(tc.size)
 			}
 		})
 	}
 }
 
-func BenchmarkReadAtWrapper_RandomCacheMiss(b *testing.B) {
-	const totalSize = 16 * 1024 * 1024
-	const chunkSize = 16 * 1024
-	const windowCount = totalSize / defaultWrapperBufSize
-	data := make([]byte, totalSize)
-	s := newMemReader(data)
-	rw := &readAtWrapper{reader: s}
+func BenchmarkStreamReadSeeker_SeekRead(b *testing.B) {
+	const totalSize = 16 << 20
+	const chunkSize = 16 << 10
+	const windowCount = totalSize / readBufferSize
+	s := newStreamReadSeeker(bytes.NewReader(make([]byte, totalSize)), totalSize, nil)
 	buf := make([]byte, chunkSize)
 
 	b.SetBytes(chunkSize)
 	b.ReportAllocs()
-	b.ResetTimer()
-
 	for i := range b.N {
-		// A coprime stride visits every 256 KiB window before repeating, forcing
-		// a cache refill rather than measuring the sequential cache-hit path.
+		// A coprime stride visits every buffer-sized window before repeating,
+		// so each read refills the buffer.
 		window := (i * 17) % windowCount
-		off := int64(window * defaultWrapperBufSize)
-		if _, err := rw.ReadAt(buf, off); err != nil {
+		if _, err := s.Seek(int64(window*readBufferSize), io.SeekStart); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := io.ReadFull(s, buf); err != nil {
 			b.Fatal(err)
 		}
 	}
-}
-
-func BenchmarkReadAtWrapper_ReadAt_Parallel(b *testing.B) {
-	const totalSize = 16 * 1024 * 1024
-	const chunkSize = 16 * 1024
-	data := make([]byte, totalSize)
-	s := newMemReader(data)
-	rw := &readAtWrapper{reader: s}
-	var next atomic.Uint64
-	chunkCount := uint64(totalSize / chunkSize)
-
-	b.SetBytes(chunkSize)
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	b.RunParallel(func(pb *testing.PB) {
-		buf := make([]byte, chunkSize)
-		for pb.Next() {
-			chunk := (next.Add(1) - 1) % chunkCount
-			if _, err := rw.ReadAt(buf, int64(chunk*chunkSize)); err != nil {
-				b.Error(err)
-				return
-			}
-		}
-	})
 }
 
 func BenchmarkPriorityClaimResetAndClear(b *testing.B) {

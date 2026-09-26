@@ -5,6 +5,7 @@
 package stream
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -149,218 +150,146 @@ type priorityClaim struct {
 	owners map[any]torrent.PiecePriority
 }
 
-const defaultWrapperBufSize = 256 * 1024
+// readBufferSize is the size of a stream's read buffer. It lets the small
+// reads of an HTTP response copy take fewer turns through the torrent reader.
+const readBufferSize = 256 << 10
 
-// readAtWrapper adapts a torrent.Reader (io.ReadSeekCloser) to io.ReaderAt.
-// It seeks to the requested offset and leaves the dedicated underlying reader
-// at the end of the read so its torrent readahead window remains active.
+// streamReadSeeker is the io.ReadSeeker handed to one caller of Acquire. It
+// buffers reads from its dedicated torrent reader and reports the caller's
+// position to the pool, which moves the reader's eviction protection and piece
+// priorities with it.
 //
-// Lock ordering: wrapper.mu is never held while acquiring pool.mu. Pool
-// lifecycle paths may hold pool.mu while acquiring wrapper.mu to replace or
-// close a wrapper. This is safe because ReadAt and notifyOffsetChange always
-// release wrapper.mu before invoking the pool callback.
-type readAtWrapper struct {
+// A seek only records its destination. The torrent reader moves, and the
+// destination is reported, when the next read starts, before that read can
+// block on torrent data, so the torrent reader never follows positions that
+// are not read, such as the end-of-file seek that http.ServeContent uses to
+// learn the content size.
+//
+// Like other io.ReadSeekers, it is not safe for concurrent use. The pool may
+// retire it concurrently, which waits for a read in progress.
+//
+// Lock ordering: mu is never held while acquiring pool.mu, so onPosition runs
+// without it. The pool may hold pool.mu while retiring the stream.
+type streamReadSeeker struct {
+	buf    *bufio.Reader
 	closed bool
+	length int64
 	mu     sync.Mutex
-	reader io.ReadSeekCloser
-	offset int64 // tracks the read position in bytes
-
-	cacheBuf   []byte
-	cacheStart int64 // start byte offset of cached window
-	cacheLen   int   // valid byte count in cacheBuf
-
-	// onOffsetChange is called when the read position moves, allowing the
-	// caller to update the active eviction-protection range. The parameter
-	// is the new byte offset. May be nil. Must be called WITHOUT rw.mu held.
-	onOffsetChange func(newOffset int64)
-}
-
-// retire detaches a released wrapper from its torrent reader, so a stale
-// caller can neither read nor move a lingering reader, and frees its buffer.
-// The pool closes the torrent reader itself. It is safe to call more than
-// once.
-func (rw *readAtWrapper) retire() {
-	rw.mu.Lock()
-	defer rw.mu.Unlock()
-	rw.closed = true
-	rw.onOffsetChange = nil
-	rw.cacheBuf = nil
-	rw.cacheLen = 0
-	rw.cacheStart = 0
-	rw.offset = 0
-}
-
-// notifyOffsetChange invokes the current callback without holding rw.mu. Seek
-// notifications use this path so the pool can protect the destination before
-// the next potentially blocking ReadAt cache refill.
-func (rw *readAtWrapper) notifyOffsetChange(newOffset int64) {
-	rw.mu.Lock()
-	if rw.closed {
-		rw.mu.Unlock()
-		return
-	}
-	cb := rw.onOffsetChange
-	rw.mu.Unlock()
-	if cb != nil {
-		cb(newOffset)
-	}
-}
-
-// ReadAt seeks to the requested offset, reads data, and notifies the pool of the
-// new offset. It utilizes an internal read buffer to satisfy small sequential reads
-// without seeking or invoking the underlying reader repeatedly. The callback fires
-// WITHOUT the wrapper lock held to maintain a consistent lock order.
-// Note: ReadAt serializes concurrent I/O per wrapper under rw.mu to protect the
-// underlying reader's shared Seek and Read positions.
-func (rw *readAtWrapper) ReadAt(p []byte, off int64) (int, error) {
-	rw.mu.Lock()
-	if rw.closed {
-		rw.mu.Unlock()
-		return 0, io.ErrClosedPipe
-	}
-
-	// 1. Try to fulfill the read request from the internal buffer.
-	if rw.cacheLen > 0 && off >= rw.cacheStart && off < rw.cacheStart+int64(rw.cacheLen) {
-		rel := off - rw.cacheStart
-		n := copy(p, rw.cacheBuf[rel:rw.cacheLen])
-		rw.offset = off + int64(n)
-		offset := rw.offset
-		cb := rw.onOffsetChange
-		rw.mu.Unlock()
-
-		if cb != nil {
-			cb(offset)
-		}
-		if n < len(p) {
-			nn, err := rw.ReadAt(p[n:], off+int64(n))
-			return n + nn, err
-		}
-		return n, nil
-	}
-
-	// 2. Buffer miss: check current position, seek if necessary, and refill buffer.
-	pos, err := rw.reader.Seek(0, io.SeekCurrent)
-	if err != nil {
-		rw.mu.Unlock()
-		return 0, err
-	}
-
-	if pos != off {
-		if _, err := rw.reader.Seek(off, io.SeekStart); err != nil {
-			_, _ = rw.reader.Seek(pos, io.SeekStart)
-			rw.mu.Unlock()
-			return 0, err
-		}
-	}
-
-	// If the requested read is large enough, bypass cacheBuf to avoid
-	// redundant buffer allocations and memory copies.
-	if len(p) >= defaultWrapperBufSize {
-		rw.cacheLen = 0
-		readBytes := 0
-		var readErr error
-		for readBytes < len(p) {
-			nn, e := rw.reader.Read(p[readBytes:])
-			readBytes += nn
-			if e != nil {
-				readErr = e
-				break
-			}
-		}
-		rw.offset = off + int64(readBytes)
-		offset := rw.offset
-		cb := rw.onOffsetChange
-		rw.mu.Unlock()
-
-		if cb != nil {
-			cb(offset)
-		}
-		if readBytes < len(p) && readErr != nil {
-			return readBytes, readErr
-		}
-		return readBytes, nil
-	}
-
-	if rw.cacheBuf == nil {
-		rw.cacheBuf = make([]byte, defaultWrapperBufSize)
-	}
-
-	fill := rw.cacheBuf
-	readBytes := 0
-	var readErr error
-	for readBytes < len(fill) {
-		nn, e := rw.reader.Read(fill[readBytes:])
-		readBytes += nn
-		if e != nil {
-			readErr = e
-			break
-		}
-	}
-
-	rw.cacheStart = off
-	rw.cacheLen = readBytes
-
-	if readBytes == 0 && readErr != nil {
-		rw.mu.Unlock()
-		return 0, readErr
-	}
-
-	n := copy(p, rw.cacheBuf[:rw.cacheLen])
-	rw.offset = off + int64(n)
-	offset := rw.offset
-	cb := rw.onOffsetChange
-	rw.mu.Unlock()
-
-	if cb != nil {
-		cb(offset)
-	}
-
-	if n < len(p) {
-		if readErr != nil {
-			return n, readErr
-		}
-		nn, err := rw.ReadAt(p[n:], off+int64(n))
-		return n + nn, err
-	}
-	return n, nil
-}
-
-// seekNotifyingReader reports the destination of a seek when the next read
-// starts, before that read can block on torrent data. Deferring the report
-// skips positions that are never read, such as the end-of-file seek that
-// http.ServeContent uses to learn the content size. io.SectionReader still
-// provides the bounded file view. Like other io.ReadSeekers, it is not safe
-// for concurrent use.
-type seekNotifyingReader struct {
-	io.ReadSeeker
+	// moved reports that the caller's position no longer matches the torrent
+	// reader's, which moves on the next read.
+	moved bool
 	// observeRead, when set, receives the duration of each Read.
 	observeRead func(time.Duration)
-	onSeek      func(int64)
+	// onPosition receives the caller's position after a seek and after each
+	// read. The pool ignores reports for a released reader.
+	onPosition func(int64)
+	position   int64
+	reader     io.ReadSeeker
+	// seekPending reports a seek not yet followed by a read.
 	seekPending bool
-	seekTarget  int64
 }
 
-func (r *seekNotifyingReader) Read(p []byte) (int, error) {
-	if r.observeRead != nil {
-		start := time.Now()
-		defer func() { r.observeRead(time.Since(start)) }()
+func newStreamReadSeeker(reader io.ReadSeeker, length int64, onPosition func(int64)) *streamReadSeeker {
+	return &streamReadSeeker{
+		buf:        bufio.NewReaderSize(reader, readBufferSize),
+		length:     length,
+		onPosition: onPosition,
+		reader:     reader,
 	}
-	if r.seekPending {
-		r.seekPending = false
-		if r.onSeek != nil {
-			r.onSeek(r.seekTarget)
+}
+
+// Read reads from the caller's position, first moving the torrent reader there
+// after a seek.
+func (s *streamReadSeeker) Read(p []byte) (int, error) {
+	if s.observeRead != nil {
+		start := time.Now()
+		defer func() { s.observeRead(time.Since(start)) }()
+	}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return 0, io.ErrClosedPipe
+	}
+	if s.seekPending {
+		s.seekPending = false
+		position := s.position
+		s.mu.Unlock()
+		s.reportPosition(position)
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return 0, io.ErrClosedPipe
 		}
 	}
-	return r.ReadSeeker.Read(p)
+	if s.position >= s.length {
+		s.mu.Unlock()
+		return 0, io.EOF
+	}
+	if s.moved {
+		if _, err := s.reader.Seek(s.position, io.SeekStart); err != nil {
+			s.mu.Unlock()
+			return 0, err
+		}
+		s.buf.Reset(s.reader)
+		s.moved = false
+	}
+	n, err := s.buf.Read(p[:min(int64(len(p)), s.length-s.position)])
+	s.position += int64(n)
+	position := s.position
+	s.mu.Unlock()
+
+	if n > 0 {
+		s.reportPosition(position)
+	}
+	return n, err
 }
 
-func (r *seekNotifyingReader) Seek(offset int64, whence int) (int64, error) {
-	position, err := r.ReadSeeker.Seek(offset, whence)
-	if err == nil {
-		r.seekPending = true
-		r.seekTarget = position
+// Seek records the caller's new position, reported by the next read. A
+// position past the end is allowed and reads as the end of the file.
+func (s *streamReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return 0, io.ErrClosedPipe
 	}
-	return position, err
+	switch whence {
+	case io.SeekStart:
+	case io.SeekCurrent:
+		offset += s.position
+	case io.SeekEnd:
+		offset += s.length
+	default:
+		return 0, errors.New("stream: invalid whence")
+	}
+	if offset < 0 {
+		return 0, errors.New("stream: negative position")
+	}
+	if offset != s.position {
+		s.position = offset
+		s.moved = true
+	}
+	s.seekPending = true
+	return offset, nil
+}
+
+// reportPosition reports position to the pool. It must be called without
+// s.mu held.
+func (s *streamReadSeeker) reportPosition(position int64) {
+	if s.onPosition != nil {
+		s.onPosition(position)
+	}
+}
+
+// retire detaches a released stream from its torrent reader, so a stale
+// caller can neither read nor move a lingering reader, and frees its buffer.
+// It waits for a read in progress. The pool closes the torrent reader itself.
+// It is safe to call more than once.
+func (s *streamReadSeeker) retire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.closed = true
+	s.buf = nil
 }
 
 // streamReader wraps a torrent.Reader with lifecycle management.
@@ -372,9 +301,9 @@ type streamReader struct {
 	isFileStorage bool
 	// lingerSince is when a released reader started lingering.
 	lingerSince time.Time
-	// lastOffset is the last byte offset reported by the onOffsetChange
-	// callback. Updated under pool.mu only, so code holding pool.mu can
-	// read it without acquiring wrapper.mu.
+	// lastOffset is the last byte offset the reader's stream reported.
+	// Updated under pool.mu only, so code holding pool.mu can read it without
+	// acquiring the stream's lock.
 	lastOffset   int64
 	lastPieceIdx int64
 	// prioritizedPieces tracks the piece claims currently owned by this reader.
@@ -384,7 +313,8 @@ type streamReader struct {
 	readahead         int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
 	reader            torrent.Reader
 	readerID          uint64
-	wrapper           *readAtWrapper
+	// stream is the caller's view of reader.
+	stream *streamReadSeeker
 }
 
 // Pool manages torrent readers with dynamic readahead management.
@@ -482,7 +412,12 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 	reader := file.NewReader()
 	reader.SetContext(readerCtx)
 
-	wrapper := p.newReaderWrapper(reader, readerID)
+	stream := newStreamReadSeeker(reader, file.Length(), func(position int64) {
+		p.updateActiveRange(readerID, position)
+	})
+	if observe := p.cfg.ReadObserver; observe != nil {
+		stream.observeRead = func(d time.Duration) { observe(mode, d) }
+	}
 
 	sr := &streamReader{
 		active:        true,
@@ -493,7 +428,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		lastPieceIdx:  -1,
 		reader:        reader,
 		readerID:      readerID,
-		wrapper:       wrapper,
+		stream:        stream,
 	}
 	p.readers[readerID] = sr
 	if pl := p.preloads[infoHash]; pl != nil && pl.file == file {
@@ -519,18 +454,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		slog.Uint64("readerID", readerID),
 		slog.Int64("readahead", sr.readahead))
 
-	return p.newReadSeeker(wrapper, file.Length(), mode), p.releaseFunc(readerID), nil
-}
-
-// newReaderWrapper returns a wrapper for reader whose position changes update
-// the eviction-protection range and piece priorities of the reader with
-// readerID.
-func (p *Pool) newReaderWrapper(reader io.ReadSeekCloser, readerID uint64) *readAtWrapper {
-	wrapper := &readAtWrapper{reader: reader}
-	wrapper.onOffsetChange = func(newOffset int64) {
-		p.updateActiveRange(readerID, newOffset)
-	}
-	return wrapper
+	return stream, p.releaseFunc(readerID), nil
 }
 
 // releaseFunc returns an idempotent ReleaseFunc for the reader with readerID.
@@ -541,26 +465,16 @@ func (p *Pool) releaseFunc(readerID uint64) ReleaseFunc {
 	}
 }
 
-// newReadSeeker returns the bounded view of wrapper handed to callers. Reads
-// are timed for Config.ReadObserver.
-func (p *Pool) newReadSeeker(wrapper *readAtWrapper, length int64, mode StorageMode) io.ReadSeeker {
-	r := &seekNotifyingReader{ReadSeeker: io.NewSectionReader(wrapper, 0, length), onSeek: wrapper.notifyOffsetChange}
-	if observe := p.cfg.ReadObserver; observe != nil {
-		r.observeRead = func(d time.Duration) { observe(mode, d) }
-	}
-	return r
-}
-
-// closeStreamReaderLocked cancels and closes a reader. Retiring the wrapper
-// first serializes with any in-flight ReadAt operation. The caller must hold
+// closeStreamReaderLocked cancels and closes a reader. Canceling first ends a
+// read in progress, and retiring its stream then waits for that read. The caller must hold
 // Pool.mu so no new pool-owned use can begin while closure is in progress.
 func closeStreamReaderLocked(sr *streamReader) {
 	if sr.cancel != nil {
 		sr.cancel()
 		sr.cancel = nil
 	}
-	if sr.wrapper != nil {
-		sr.wrapper.retire()
+	if sr.stream != nil {
+		sr.stream.retire()
 	}
 	if sr.reader != nil {
 		_ = sr.reader.Close()
@@ -601,8 +515,8 @@ func (p *Pool) release(readerID uint64) {
 	p.clearReaderClaimsLocked(sr)
 	// The caller is done with its reader, so a stale call cannot move the
 	// lingering reader's position.
-	if sr.wrapper != nil {
-		sr.wrapper.retire()
+	if sr.stream != nil {
+		sr.stream.retire()
 	}
 	sr.lingerSince = time.Now()
 	p.logger.Debug("reader lingering",
@@ -1089,8 +1003,8 @@ func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 }
 
 // updateActiveRange recalculates and refreshes the eviction-protection
-// window for a reader based on its new read offset. Called asynchronously
-// from readAtWrapper when the position moves. Takes pool.mu to protect
+// window for a reader based on its new read offset. Called by the reader's
+// stream when its position moves. Takes pool.mu to protect
 // against concurrent release, Close, and lingering-reader closure.
 //
 // Piece-priority claims are applied by a goroutine, so the reading goroutine
@@ -1108,7 +1022,7 @@ func (p *Pool) updateActiveRange(readerID uint64, newOffset int64) {
 
 	// Cache the offset on the streamReader so other pool.mu holders
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
-	// wrapper.mu — preserving the lock order.
+	// the stream's lock, preserving the lock order.
 	sr.lastOffset = newOffset
 	currentPiece := filePiece(file, newOffset)
 	pieceChanged := (currentPiece != sr.lastPieceIdx) || (sr.lastPieceIdx < 0)
