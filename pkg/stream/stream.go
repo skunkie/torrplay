@@ -516,9 +516,10 @@ func (p *Pool) AcquireContext(ctx context.Context, file *torrent.File, mode Stor
 	}
 
 	if isFileStorage {
+		// File-storage pieces live on disk, so they need neither a share of
+		// the budget nor eviction protection.
 		sr.readahead = p.cfg.FileReadaheadBytes
 		reader.SetReadahead(p.cfg.FileReadaheadBytes)
-		p.registerActiveRangeLocked(infoHash, key, file, p.cfg.FileReadaheadBytes, 0, defaultFileBoundaryBytes)
 	} else {
 		p.refreshReadaheadLocked(p.readaheadBudget)
 	}
@@ -1190,9 +1191,9 @@ func (p *Pool) updateActiveRange(infoHash metainfo.Hash, key readerKey, file *to
 	}
 
 	readahead := sr.readahead
-	prioEnabled := p.cfg.PriorityWindowFraction > 0 && !sr.isFileStorage
+	prioEnabled := p.cfg.PriorityWindowFraction > 0
 
-	if p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
+	if !sr.isFileStorage && p.cfg.Registry != nil && file != nil && file.Torrent() != nil && file.Torrent().Info() != nil {
 		start, end := computeRange(file, pieceLength, readahead, newOffset)
 		p.cfg.Registry.SetActiveRange(infoHash, key.readerID, start, end)
 	}

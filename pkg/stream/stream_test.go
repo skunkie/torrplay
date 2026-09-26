@@ -1439,33 +1439,36 @@ func TestPoolPriorityWindowFraction(t *testing.T) {
 		}
 	})
 
-	t.Run("file storage skipped", func(t *testing.T) {
-		// File-storage readers skip prioritization even when fraction > 0.
-		// With a nil Registry, updateActiveRange returns early before any
-		// prioritization logic — the test verifies that the reader's
-		// prioritizedPieces are never modified.
+	t.Run("file storage claims pieces without protection", func(t *testing.T) {
+		// File-storage readers download in rarity order like memory readers,
+		// so they claim the pieces just ahead too; their pieces live on disk,
+		// so they register no eviction protection.
+		c := newTestTorrentClient(t)
+		to, file := addSizedTorrent(t, c, "movie", 64, 640)
+		reg := newProtectionRegistry()
 		p := newTestPool(t, Config{
+			FileReadaheadBytes:     4 * 64,
 			Logger:                 testLogger(),
-			Registry:               nil,
-			PriorityWindowFraction: 0.5,
+			PriorityWindowFraction: 1,
+			Registry:               reg,
 		})
-		infoHash := metainfo.Hash{21}
-
-		sr := &streamReader{
-			active:        true,
-			infoHash:      infoHash,
-			readerID:      1,
-			readahead:     1024,
-			isFileStorage: true,
+		_, release, err := p.Acquire(file, FileStorage)
+		require.NoError(t, err)
+		defer release()
+		var key readerKey
+		p.mu.Lock()
+		for k := range p.readers {
+			key = k
 		}
-		key := readerKey{infoHash: infoHash, filePath: "f", readerID: 1}
-		p.readers[key] = sr
+		p.mu.Unlock()
 
-		p.updateActiveRange(infoHash, key, &torrent.File{}, 512)
-
-		if len(sr.prioritizedPieces) != 0 {
-			t.Fatalf("expected no prioritized pieces for file-storage reader, got %d", len(sr.prioritizedPieces))
-		}
+		p.updateActiveRange(to.InfoHash(), key, file, 2*64)
+		require.Eventually(t, func() bool {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			return len(p.readers[key].prioritizedPieces) == 4
+		}, 5*time.Second, time.Millisecond, "a file-storage reader must claim the pieces ahead")
+		assert.Empty(t, reg.protectedPieces(), "file-storage pieces need no eviction protection")
 	})
 }
 

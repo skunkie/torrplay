@@ -35,8 +35,9 @@
 //
 // # Active Range Protection
 //
-// Each active reader registers a forward-weighted readahead window
-// (1/4 behind, full readahead ahead) through the ActiveRangeRegistry interface. Pieces
+// Each active memory-storage reader registers a forward-weighted readahead
+// window (1/4 behind, full readahead ahead) through the ActiveRangeRegistry
+// interface; file-storage pieces live on disk and need no protection. Pieces
 // inside this window are protected from LRU eviction. When the reader is
 // released, the active range is cleared immediately so those pieces become
 // eviction candidates again. A seek is reported when the next read starts, so
