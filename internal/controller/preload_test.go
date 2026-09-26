@@ -703,15 +703,15 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	to.Drop()
 	<-to.Closed()
 	assert.Equal(t, api.Idle, ctrl.getPreloadStatus(ih).Status, "closed torrent reported a ready preload")
-	require.Eventually(t, func() bool {
-		_, exists := ctrl.preloads.Load(ih)
-		return !exists
-	}, time.Second, time.Millisecond)
+	// A preload is deleted from the registry before it is retired, so wait for
+	// the retirement itself.
 	select {
 	case <-stale.retired:
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("removed preload was not retired")
 	}
+	_, exists := ctrl.preloads.Load(ih)
+	assert.False(t, exists)
 
 	// Re-adding the torrent creates a new instance, which must get a new task.
 	readded := addSintelTorrent(t, ctrl)
@@ -2011,15 +2011,15 @@ func TestReadyPreloadExpires(t *testing.T) {
 	ctrl.schedulePreloadExpiryLocked(task)
 	ctrl.preloadsMu.Unlock()
 
-	require.Eventually(t, func() bool {
-		_, exists := ctrl.preloads.Load(ih)
-		return !exists
-	}, time.Second, time.Millisecond)
+	// removePreload deletes the task before releasing it, so wait for the
+	// release itself rather than only for the task to leave the registry.
 	select {
 	case <-cleared:
-	default:
+	case <-time.After(time.Second):
 		t.Fatal("preload expiry did not release cache protection")
 	}
+	_, exists := ctrl.preloads.Load(ih)
+	assert.False(t, exists)
 }
 
 func TestPreloadStatusSnapshotExpires(t *testing.T) {
