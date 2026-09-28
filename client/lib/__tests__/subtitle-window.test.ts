@@ -70,6 +70,29 @@ describe('playback-bounded subtitle extraction', () => {
     expect(repeatedStarts).toHaveLength(0);
   });
 
+  it('skips ahead through the index when playback jumps past the scan without a seek', async () => {
+    // A resume seek that lands after the scan started reaches it as a time
+    // change only, so the scan must catch up instead of reading every cluster.
+    const movie = indexedSubtitleMovie();
+    const fetchFn = rangeFetch(movie.buffer);
+    const cache = new SubtitleSourceCache('/movie.mkv');
+    const clock = playbackClock();
+    const onSkip = vi.fn();
+    const cues: SubtitleCue[] = [];
+    await probeEmbeddedSubtitleTracks('/movie.mkv', fetchFn, undefined, cache);
+    const loading = loadEmbeddedSubtitleTrackVtt('/movie.mkv', 1, fetchFn, undefined, batch => cues.push(...batch), { cache, ...clock, onSkip });
+    await vi.waitFor(() => expect(clock.waitForTimeChange).toHaveBeenCalledTimes(1));
+    const before = fetchFn.mock.calls.length;
+
+    clock.advance(105);
+    await loading;
+
+    expect(cues.map(cue => cue.startTime)).toEqual([0, 10, 20, 30, 70, 80, 90, 100, 110, 120]);
+    const starts = requestedStarts(fetchFn).slice(before);
+    expect(starts.some(offset => offset >= movie.clusterOffsets[5] && offset < movie.clusterOffsets[7])).toBe(false);
+    expect(onSkip).toHaveBeenCalled();
+  });
+
   it('skips old clusters when no seek index is available', async () => {
     const movie = indexedSubtitleMovie(1000000, false);
     const cues: SubtitleCue[] = [];

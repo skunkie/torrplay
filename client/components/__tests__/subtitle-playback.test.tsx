@@ -178,6 +178,20 @@ it('extracts a default embedded track without exposing a binary subtitle source'
   expect(loadEmbeddedSubtitleTrackVtt).toHaveBeenCalledTimes(1);
 });
 
+it('scans a track again after a scan that skipped clusters playback had passed', async () => {
+  vi.mocked(probeEmbeddedSubtitleTracks).mockResolvedValue([embedded]);
+  vi.mocked(loadEmbeddedSubtitleTrackVtt).mockImplementation(async (_url, _number, _fetch, _signal, onCues, playback) => {
+    onCues?.([cue]);
+    playback?.onSkip?.();
+    return vtt;
+  });
+  render(<VideoPlayer options={{ src: mkv }} />);
+  await waitFor(() => expect(loadEmbeddedSubtitleTrackVtt).toHaveBeenCalledTimes(1));
+  await select('Off');
+  await select('English');
+  await waitFor(() => expect(loadEmbeddedSubtitleTrackVtt).toHaveBeenCalledTimes(2));
+});
+
 it('renders selected embedded dialogue in the caption overlay at the playback time', async () => {
   vi.mocked(probeEmbeddedSubtitleTracks).mockResolvedValue([embedded]);
   const { container } = render(<VideoPlayer options={{ src: mkv }} />);

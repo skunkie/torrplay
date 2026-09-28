@@ -641,7 +641,10 @@ export interface SubtitlePlaybackOptions {
   cache: SubtitleSourceCache,
   currentTime: () => number,
   waitForTimeChange: (signal?: AbortSignal) => Promise<void>,
-  onWait?: () => void
+  onWait?: () => void,
+  // onSkip is called when the scan skips clusters that playback has already
+  // passed, so the cues before them were not all loaded.
+  onSkip?: () => void
 }
 
 class SubtitleRangeReader {
@@ -872,11 +875,46 @@ export async function loadEmbeddedSubtitleTrackVtt(
   let pendingBlocks: Uint8Array[] = [];
   let clusterEnd = Infinity;
   let clusterHasKnownSize = false;
-  let skipOldClusters = false;
+  let clusterOffset = 0;
+  let metadata: SubtitleMetadata | undefined;
   const startTime = playback?.currentTime() ?? 0;
 
+  // indexedCluster returns the offset of the last indexed cluster starting at
+  // or before target seconds, or undefined when the index has none.
+  const indexedCluster = async (target: number): Promise<number | undefined> => {
+    let found: number | undefined;
+    for (const entry of await readSubtitleIndex(reader, metadata!)) {
+      if (entry.time > target) break;
+      found = entry.offset;
+    }
+    if (found === undefined) return undefined;
+    // Ignore a bad index entry rather than parsing arbitrary bytes as a cluster.
+    return (await reader.element(found))?.id === ID_CLUSTER ? found : undefined;
+  };
+
+  // skipPassedCluster moves the scan past a cluster at timestamp seconds that
+  // playback has passed by more than the preroll, as after a seek that reached
+  // the scan only as a time change: forward through the index, or to the next
+  // cluster without one. It reports whether the scan moved.
+  const skipPassedCluster = async (timestamp: number): Promise<boolean> => {
+    const target = playback!.currentTime() - SUBTITLE_SEEK_PREROLL_SECONDS;
+    if (timestamp >= target) return false;
+    const next = await indexedCluster(target);
+    if (next !== undefined && next > clusterOffset) {
+      position = next;
+    } else if (metadata!.index?.length === 0 && clusterHasKnownSize) {
+      position = clusterEnd;
+    } else {
+      return false;
+    }
+    inCluster = false;
+    pendingBlocks = [];
+    playback!.onSkip?.();
+    return true;
+  };
+
   if (playback) {
-    const metadata = playback.cache.metadata ?? await readSubtitleMetadata(reader);
+    metadata = playback.cache.metadata ?? await readSubtitleMetadata(reader);
     playback.cache.metadata = metadata;
     position = metadata.firstCluster;
     timecodeScaleNs = metadata.timecodeScaleNs;
@@ -884,16 +922,7 @@ export async function loadEmbeddedSubtitleTrackVtt(
     if (track?.unavailableReason) throw new Error(track.unavailableReason);
     codecId = track?.codecId ?? codecId;
     if (startTime > SUBTITLE_SEEK_PREROLL_SECONDS) {
-      const index = await readSubtitleIndex(reader, metadata);
-      skipOldClusters = index.length === 0;
-      const target = startTime - SUBTITLE_SEEK_PREROLL_SECONDS;
-      for (const entry of index) {
-        if (entry.time > target) break;
-        position = entry.offset;
-      }
-      const cluster = await reader.element(position);
-      // Ignore a bad index entry rather than parsing arbitrary bytes as a cluster.
-      if (cluster?.id !== ID_CLUSTER) position = metadata.firstCluster;
+      position = await indexedCluster(startTime - SUBTITLE_SEEK_PREROLL_SECONDS) ?? metadata.firstCluster;
     }
   }
 
@@ -924,6 +953,7 @@ export async function loadEmbeddedSubtitleTrackVtt(
       if (pendingBlocks.length) throw new Error('Missing Matroska cluster timestamp');
       inCluster = true;
       clusterTimestamp = undefined;
+      clusterOffset = element.offset;
       clusterEnd = element.end;
       clusterHasKnownSize = !element.unknownSize;
       position = element.dataOffset;
@@ -954,18 +984,15 @@ export async function loadEmbeddedSubtitleTrackVtt(
         clusterTimestamp = await reader.payload(element, true);
         if (playback) {
           const timestamp = readUInt(clusterTimestamp, element.dataOffset - element.offset, element.end - element.dataOffset) * timecodeScaleNs / 1e9;
-          if (skipOldClusters && clusterHasKnownSize && timestamp < startTime - SUBTITLE_SEEK_PREROLL_SECONDS) {
-            position = clusterEnd;
-            inCluster = false;
-            pendingBlocks = [];
-            continue;
-          }
+          if (await skipPassedCluster(timestamp)) continue;
           if (timestamp > playback.currentTime() + SUBTITLE_LOOK_AHEAD_SECONDS) playback.onWait?.();
           while (timestamp > playback.currentTime() + SUBTITLE_LOOK_AHEAD_SECONDS) {
             signal?.throwIfAborted();
             await playback.waitForTimeChange(signal);
           }
           signal?.throwIfAborted();
+          // Playback may have jumped past the cluster while the scan waited.
+          if (await skipPassedCluster(timestamp)) continue;
         }
       }
       if (element.id === ID_SIMPLE_BLOCK || element.id === ID_BLOCK) {
