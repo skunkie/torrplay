@@ -219,6 +219,74 @@ func TestPool_Preload(t *testing.T) {
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
 	})
 
+	t.Run("waits for a slot when it loses a piece while every slot is taken", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
+		writePieces(t, ready, readyData, allPieces(ready)...)
+		reg := newProtectionRegistry()
+		pool := newPool(t, reg)
+		owners := func() int {
+			reg.mu.Lock()
+			defer reg.mu.Unlock()
+			return len(reg.ranges)
+		}
+		_, err := pool.Preload(readyFile, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+		running := make([]*torrent.Torrent, 0, maxConcurrentPreloads)
+		runningData := make([][]byte, 0, maxConcurrentPreloads)
+		for i := range maxConcurrentPreloads {
+			to, file, data := addHashedTorrent(t, c, fmt.Sprintf("running%d", i))
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+			running = append(running, to)
+			runningData = append(runningData, data)
+		}
+		reserved := reservedPreloadBytes(pool)
+		require.Equal(t, 1+maxConcurrentPreloads, owners(), "each preload protects its pieces under one owner")
+
+		corrupt := slices.Clone(readyData)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, ready, corrupt, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadQueued)
+		assert.Empty(t, preloadClaims(pool, ready), "a preload waiting for a slot claims nothing")
+		assert.Equal(t, reserved, reservedPreloadBytes(pool), "it keeps its reservation")
+
+		// A finished preload frees a slot for it without a second reservation.
+		writePieces(t, running[0], runningData[0], allPieces(running[0])...)
+		waitForPreloadState(t, pool, running[0].InfoHash(), PreloadReady)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadRunning)
+		assert.Len(t, preloadClaims(pool, ready), 10)
+		assert.Equal(t, reserved, reservedPreloadBytes(pool))
+		assert.Equal(t, 1+maxConcurrentPreloads, owners(), "running again must not protect its pieces a second time")
+
+		writePieces(t, ready, readyData, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+	})
+
+	t.Run("becomes ready again while waiting when its piece returns", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
+		writePieces(t, ready, readyData, allPieces(ready)...)
+		pool := newPool(t, nil)
+		_, err := pool.Preload(readyFile, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+		for i := range maxConcurrentPreloads {
+			_, file, _ := addHashedTorrent(t, c, fmt.Sprintf("running%d", i))
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+
+		corrupt := slices.Clone(readyData)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, ready, corrupt, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadQueued)
+		writePieces(t, ready, readyData, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+		assert.Empty(t, preloadClaims(pool, ready))
+	})
+
 	t.Run("returns the preload of the same file unchanged", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		to, file := addSizedTorrent(t, c, "movie", 64, 640)

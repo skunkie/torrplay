@@ -457,7 +457,9 @@ func (p *Pool) dispatchPreloadsLocked() {
 			p.preloadQueue = p.preloadQueue[1:]
 			continue
 		}
-		if pl.mode == MemoryStorage && !p.reservePreloadLocked(pl) {
+		// A ready preload that lost a piece waits here still holding its
+		// reservation.
+		if pl.mode == MemoryStorage && !pl.reserved && !p.reservePreloadLocked(pl) {
 			if p.runningPreloadCountLocked() > 0 {
 				return
 			}
@@ -486,12 +488,15 @@ func (p *Pool) runningPreloadCountLocked() int {
 	return count
 }
 
-// startPreloadLocked claims a preload's pieces and starts its watcher. Must be
-// called with p.mu held.
+// startPreloadLocked claims a preload's pieces and starts its watcher, unless
+// the preload is already watched. Must be called with p.mu held.
 func (p *Pool) startPreloadLocked(pl *preload) {
 	pl.state = PreloadRunning
 	pl.markProgress(time.Now())
 	p.claimPreloadLocked(pl)
+	if pl.cancel != nil {
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	pl.cancel = cancel
 	p.preloadWatchers.Go(func() { p.watchPreload(ctx, pl) })
@@ -579,7 +584,8 @@ func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan
 
 // updatePreloadLocked records a preload's progress. A running preload whose
 // pieces are all complete becomes ready and gives up its priority claims; a
-// ready preload that lost a piece runs again. Must be called with p.mu held.
+// ready preload that lost a piece runs again, or waits first in the queue
+// while every preload slot is taken. Must be called with p.mu held.
 func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete bool) {
 	if p.closed || p.preloads[pl.infoHash] != pl {
 		return
@@ -603,12 +609,26 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 		}
 		p.dispatchPreloadsLocked()
 	case pl.state == PreloadReady && !complete:
+		// Downloading again takes a preload slot like any other, so while
+		// every slot is taken the preload waits first in the queue, keeping
+		// its reservation and watcher.
+		if p.runningPreloadCountLocked() >= maxConcurrentPreloads {
+			pl.state = PreloadQueued
+			p.preloadQueue = slices.Insert(p.preloadQueue, 0, pl)
+			p.logger.Debug("preload lost a piece and waits for a slot",
+				slog.String("hash", pl.infoHash.HexString()),
+				slog.String("file", pl.file.Path()))
+			return
+		}
 		pl.state = PreloadRunning
 		pl.markProgress(time.Now())
 		p.claimPreloadLocked(pl)
 		p.logger.Debug("preload lost a piece and runs again",
 			slog.String("hash", pl.infoHash.HexString()),
 			slog.String("file", pl.file.Path()))
+	case pl.state == PreloadQueued && pl.cancel != nil && complete:
+		// A ready preload waiting for a slot got its piece back meanwhile.
+		pl.state = PreloadReady
 	}
 }
 
