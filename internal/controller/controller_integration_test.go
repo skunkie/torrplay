@@ -794,6 +794,8 @@ func TestIntegrationStreamFailsWhilePiecesExceedMemory(t *testing.T) {
 	settled := requests.Load()
 	assert.Never(t, func() bool { return requests.Load() != settled }, time.Second, 50*time.Millisecond,
 		"pieces that never fit must not be requested again")
+	require.Error(t, readStart(), "a retried stream cannot succeed either")
+	assert.Equal(t, settled, requests.Load(), "a retried stream must not request pieces that never fit")
 
 	require.NoError(t, storageClient.SetMaxMemory(4<<20))
 	require.NoError(t, readStart(), "a stream must work once pieces fit")

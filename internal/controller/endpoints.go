@@ -1999,20 +1999,22 @@ func (c *Controller) watchStorageWrites(to *torrent.Torrent, fileStorage bool) {
 // writes can never succeed, so the torrent stops downloading and its reads
 // fail, and logged records that once.
 func (c *Controller) memoryWriteFailed(to *torrent.Torrent, err error, logged *sync.Once) {
-	storageClient := c.storageClient.Load()
-	info := to.Info()
-	if !errors.Is(err, memstorage.ErrInsufficientMemory) || storageClient == nil || info == nil {
-		return
-	}
-	limit := storageClient.MemoryStats().LimitBytes
-	if info.PieceLength <= limit {
+	if !errors.Is(err, memstorage.ErrInsufficientMemory) || !c.piecesExceedMemoryLimit(to) {
 		return
 	}
 	to.DisallowDataDownload()
 	logged.Do(func() {
 		c.logger.Load().Error("stopped downloading torrent whose pieces are larger than the memory limit",
-			"hash", to.InfoHash(), "pieceLength", info.PieceLength, "memoryLimit", limit)
+			"hash", to.InfoHash(), "pieceLength", to.Info().PieceLength)
 	})
+}
+
+// piecesExceedMemoryLimit reports whether the pieces of to are larger than the
+// whole memory storage limit, so memory storage can never hold one.
+func (c *Controller) piecesExceedMemoryLimit(to *torrent.Torrent) bool {
+	storageClient := c.storageClient.Load()
+	info := to.Info()
+	return storageClient != nil && info != nil && info.PieceLength > storageClient.MemoryStats().LimitBytes
 }
 
 // loadTorrent is the single entry point for adding a torrent to the client.
@@ -2067,11 +2069,6 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	// The torrent client stops a torrent's downloads after a storage error, such
-	// as a failed file-storage write or piece completion read, so each stream
-	// tries again.
-	to.AllowDataDownload()
-
 	if err := c.waitForInfo(to); err != nil {
 		api.HandleError(w, err)
 		return
@@ -2101,6 +2098,12 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	}
 
 	mode, saved := c.torrentStorageMode(ih)
+	// The torrent client stops a torrent's downloads after a storage error, such
+	// as a failed file-storage write or piece completion read, so each stream
+	// tries again, unless its pieces can never fit memory storage.
+	if mode == stream.FileStorage || !c.piecesExceedMemoryLimit(to) {
+		to.AllowDataDownload()
+	}
 	if saved {
 		go func() {
 			err := c.updateTorrent(ih, api.TorrentUpdate{
