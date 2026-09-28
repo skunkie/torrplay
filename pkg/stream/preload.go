@@ -609,6 +609,12 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 		}
 		p.dispatchPreloadsLocked()
 	case pl.state == PreloadReady && !complete:
+		// A preload that is due for removal is not worth downloading again.
+		if p.readyPreloadExpiredLocked(pl, time.Now()) {
+			p.removePreloadLocked(pl.infoHash)
+			p.dispatchPreloadsLocked()
+			return
+		}
 		// Downloading again takes a preload slot like any other, so while
 		// every slot is taken the preload waits first in the queue, keeping
 		// its reservation and watcher.
@@ -818,6 +824,17 @@ func (p *Pool) stopPreloadLocked(pl *preload) {
 	p.releasePreloadReservationLocked(pl)
 }
 
+// readyPreloadExpiredLocked reports whether a ready preload is due for
+// removal at now: its file has no reader, and it was read or has stayed unread
+// for the ready TTL. Must be called with p.mu held.
+func (p *Pool) readyPreloadExpiredLocked(pl *preload, now time.Time) bool {
+	if p.fileHasReadersLocked(pl.file) {
+		return false
+	}
+	ttl := p.cfg.PreloadReadyTTL
+	return pl.fileRead || (ttl > 0 && now.Sub(pl.readyAt) >= ttl)
+}
+
 // expirePreloads removes preloads whose torrent closed, ready preloads whose
 // file has not been read within the ready TTL, read preloads whose file has no
 // reader left, and failed or evicted preloads that have reported their final
@@ -838,10 +855,7 @@ func (p *Pool) expirePreloads() {
 			p.removePreloadLocked(infoHash)
 			removed = true
 		case pl.state == PreloadReady:
-			if p.fileHasReadersLocked(pl.file) {
-				continue
-			}
-			if pl.fileRead || (ttl > 0 && now.Sub(pl.readyAt) >= ttl) {
+			if p.readyPreloadExpiredLocked(pl, now) {
 				p.removePreloadLocked(infoHash)
 				removed = true
 			}

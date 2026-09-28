@@ -219,6 +219,26 @@ func TestPool_Preload(t *testing.T) {
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
 	})
 
+	t.Run("is removed rather than run again when it loses a piece past its ready TTL", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "expired")
+		writePieces(t, to, data, allPieces(to)...)
+		pool := newPool(t, nil)
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+		pool.mu.Lock()
+		pool.preloads[to.InfoHash()].readyAt = time.Now().Add(-2 * defaultPreloadReadyTTL)
+		pool.mu.Unlock()
+
+		corrupt := slices.Clone(data)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, to, corrupt, 3)
+		require.Eventually(t, func() bool { return preloadState(pool, to.InfoHash()) == 0 }, 5*time.Second, time.Millisecond,
+			"an expired unread preload must be removed")
+		assert.Empty(t, preloadClaims(pool, to), "it must not claim its pieces again")
+	})
+
 	t.Run("waits for a slot when it loses a piece while every slot is taken", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
