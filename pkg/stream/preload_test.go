@@ -342,6 +342,31 @@ func TestPool_Preload(t *testing.T) {
 		assert.Less(t, reservedPreloadBytes(pool), reserved, "its reservation must return to playback")
 	})
 
+	t.Run("is evicted for a new preload while waiting for a slot", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
+		writePieces(t, ready, readyData, allPieces(ready)...)
+		pool := newPool(t, nil)
+		_, err := pool.Preload(readyFile, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+		for i := range maxConcurrentPreloads {
+			_, file, _ := addHashedTorrent(t, c, fmt.Sprintf("running%d", i))
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+		corrupt := slices.Clone(readyData)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, ready, corrupt, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadQueued)
+
+		pool.mu.Lock()
+		evicted := pool.evictIdlePreloadLocked()
+		pool.mu.Unlock()
+		require.True(t, evicted, "a waiting cache is idle")
+		assert.Equal(t, PreloadEvicted, preloadState(pool, ready.InfoHash()))
+	})
+
 	t.Run("becomes ready again while waiting when its piece returns", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")

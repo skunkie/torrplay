@@ -709,13 +709,14 @@ func (p *Pool) reservedPreloadBytesLocked() int64 {
 	return reserved
 }
 
-// evictIdlePreloadLocked evicts the oldest ready preload, skipping preloads
-// whose file is being read. It returns false when there is none. Must be
-// called with p.mu held.
+// evictIdlePreloadLocked evicts the oldest preload holding a cache, ready or
+// waiting for a slot after losing a piece, skipping preloads whose file is
+// being read. It returns false when there is none. Must be called with p.mu
+// held.
 func (p *Pool) evictIdlePreloadLocked() bool {
 	var victim *preload
 	for _, pl := range p.preloads {
-		if pl.state != PreloadReady || !pl.reserved || p.fileHasReadersLocked(pl.file) {
+		if !pl.holdsCache() || !pl.reserved || p.fileHasReadersLocked(pl.file) {
 			continue
 		}
 		if victim == nil || pl.readyAt.Before(victim.readyAt) {
@@ -730,9 +731,9 @@ func (p *Pool) evictIdlePreloadLocked() bool {
 }
 
 // shrinkPreloadsLocked evicts preloads until their reservations fit the
-// preload share of the current budget. It gives up the cheapest first: ready
-// preloads no reader is using, then running preloads, and last ready preloads
-// whose file is being read. Must be called with p.mu held.
+// preload share of the current budget. It gives up the cheapest first: cached
+// preloads no reader is using, then running preloads, and last cached
+// preloads whose file is being read. Must be called with p.mu held.
 func (p *Pool) shrinkPreloadsLocked() {
 	for p.reservedPreloadBytesLocked() > preloadProtectionCapacity(p.readaheadBudget) {
 		if p.evictIdlePreloadLocked() {
@@ -754,11 +755,11 @@ func (p *Pool) shrinkPreloadsLocked() {
 	}
 }
 
-// releaseReadPreloadsLocked releases the preloads holding a cache that is due
-// for removal, such as one whose file was read and has no reader left,
+// releaseExpiredPreloadsLocked releases the preloads holding a cache that is
+// due for removal, such as one whose file was read and has no reader left,
 // including a lingering one: playback of the file has ended, so its cache has
 // served its purpose. Must be called with p.mu held.
-func (p *Pool) releaseReadPreloadsLocked() {
+func (p *Pool) releaseExpiredPreloadsLocked() {
 	released := false
 	now := time.Now()
 	for infoHash, pl := range p.preloads {
@@ -826,13 +827,18 @@ func (p *Pool) stopPreloadLocked(pl *preload) {
 	p.releasePreloadReservationLocked(pl)
 }
 
+// holdsCache reports whether the preload holds its cache without downloading:
+// it is ready, or waits for a slot with its reservation after losing a piece.
+func (pl *preload) holdsCache() bool {
+	return pl.state == PreloadReady || (pl.state == PreloadQueued && pl.reserved)
+}
+
 // cachedPreloadExpiredLocked reports whether a preload holding its cache,
 // ready or queued with its reservation after losing a piece, is due for
 // removal at now: its file has no reader, and it was read or has stayed unread
 // for the ready TTL since it became ready. Must be called with p.mu held.
 func (p *Pool) cachedPreloadExpiredLocked(pl *preload, now time.Time) bool {
-	holdsCache := pl.state == PreloadReady || (pl.state == PreloadQueued && pl.reserved)
-	if !holdsCache || p.fileHasReadersLocked(pl.file) {
+	if !pl.holdsCache() || p.fileHasReadersLocked(pl.file) {
 		return false
 	}
 	ttl := p.cfg.PreloadReadyTTL

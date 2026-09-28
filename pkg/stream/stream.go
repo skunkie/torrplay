@@ -617,7 +617,7 @@ func (p *Pool) closeLingeringReadersLocked(file *torrent.File) {
 			slog.Uint64("readerID", sr.readerID))
 	}
 	if closed {
-		p.releaseReadPreloadsLocked()
+		p.releaseExpiredPreloadsLocked()
 	}
 }
 
@@ -1178,7 +1178,7 @@ func (p *Pool) sampleMemoryPressure() float64 {
 }
 
 // closeExpiredLingeringReaders closes readers that have lingered at least the
-// effective linger timeout. Lingering readers hold no share of the readahead
+// effective linger timeout, and lingering readers whose torrent has closed. Lingering readers hold no share of the readahead
 // budget, so closing them needs no rebalance.
 func (p *Pool) closeExpiredLingeringReaders() {
 	p.mu.Lock()
@@ -1192,7 +1192,7 @@ func (p *Pool) closeExpiredLingeringReaders() {
 			continue
 		}
 		lingered := now.Sub(sr.lingerSince)
-		if lingered < timeout {
+		if lingered < timeout && !torrentClosed(sr.file) {
 			continue
 		}
 		p.removeReaderLocked(sr)
@@ -1203,6 +1203,6 @@ func (p *Pool) closeExpiredLingeringReaders() {
 			slog.Duration("lingered", lingered))
 	}
 	if closed {
-		p.releaseReadPreloadsLocked()
+		p.releaseExpiredPreloadsLocked()
 	}
 }
