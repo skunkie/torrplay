@@ -31,7 +31,8 @@
 // while another reader of its file is active closes at once, so a file has at
 // most one lingering reader. Other viewers' readers never close it, because
 // the engine is shared; readers still lingering after LingerTimeout are
-// closed. Readers of a dropped torrent close on release.
+// closed. Readers of a dropped torrent close on release, or within a second
+// when the torrent is dropped while they linger.
 //
 // # Eviction Protection
 //
@@ -85,8 +86,9 @@
 // the readahead budget, reported by PreloadCapacity, and protects them from
 // eviction until it is removed. The rest of the budget is always kept for
 // playback readers, so a new stream is never starved by held preloads. When
-// the share is full, a queued preload evicts the oldest ready preload; ready
-// preloads of files being read stay pinned. A preload that cannot fit and has
+// the share is full, a queued preload evicts the oldest preload holding its
+// cache, ready or waiting for a slot after losing a piece; those of files
+// being read stay pinned. A preload that cannot fit and has
 // nothing to wait for fails, and so does a running preload whose torrent
 // completes no data within PreloadStallTimeout, such as one without peers, so
 // it cannot hold its slot forever. A preload waiting behind other viewers'
@@ -98,16 +100,18 @@
 // A ready preload serves one playback of its file: once the file has been read
 // and has no reader left, including a lingering one, the preload is released,
 // so the linger timeout is its grace period between the player's requests. A
-// ready preload whose file is never read expires PreloadReadyTTL after it
-// became ready, and a failed or evicted preload reports its final state for
-// as long. File-storage preloads write to disk and reserve nothing.
+// preload whose file is never read expires PreloadReadyTTL after it first
+// became ready, even while it waits to download a lost piece again, and a
+// failed or evicted preload reports its final state for as long. File-storage preloads write to disk and reserve nothing.
 //
 // # Memory Pressure
 //
 // When MemoryUsage is configured, the linger timeout shortens under memory
 // pressure (1 s at ≥90 %, 5 s at ≥75 %, 10 s at ≥50 %), so pieces are not
 // downloaded only to be evicted. Without MemoryUsage the fixed LingerTimeout
-// (default 30 s) is used.
+// (default 30 s) is used. Expiry runs every second while the pool has readers
+// or preloads, so the shortest timeout holds, and every five seconds when it
+// has neither.
 //
 // # Thread Safety
 //

@@ -105,9 +105,10 @@ type Config struct {
 	// makes the nearest pieces download first. Values above 1 are clamped to 1.
 	// A non-positive value disables prioritization.
 	PriorityWindowFraction float64
-	// PreloadReadyTTL is how long a ready preload whose file has not been read
-	// stays cached, and how long a failed or evicted preload keeps reporting
-	// its final state. A preload whose file was read is released once the
+	// PreloadReadyTTL is how long a preload whose file has not been read stays
+	// cached after it first became ready, including while it waits to download
+	// a lost piece again, and how long a failed or evicted preload keeps
+	// reporting its final state. A preload whose file was read is released once the
 	// file has no reader left, including a lingering one, whatever the TTL.
 	// Zero defaults to 5 minutes. Negative values keep unread and finished
 	// preloads until they are replaced, cancelled, or evicted.
@@ -343,7 +344,7 @@ type Pool struct {
 }
 
 // New creates a new stream pool and starts a background goroutine that closes
-// expired lingering readers.
+// expired lingering readers and expires preloads.
 // Callers must call Close() when the pool is no longer needed to terminate
 // the background goroutine and avoid resource leakage.
 func New(cfg Config) *Pool {
@@ -606,7 +607,7 @@ func (p *Pool) refreshReadaheadLocked() {
 		slog.Int64("perReaderShare", plan.share))
 }
 
-// closeLingeringReadersLocked closes file's lingering reader. A ready preload
+// closeLingeringReadersLocked closes file's lingering reader. A cached preload
 // of the file stays while the file has another reader. Must be called with
 // p.mu held.
 func (p *Pool) closeLingeringReadersLocked(file *torrent.File) {

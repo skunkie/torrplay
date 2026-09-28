@@ -448,7 +448,7 @@ func preloadProtectionCapacity(totalBudget int64) int64 {
 
 // dispatchPreloadsLocked starts queued preloads in FIFO order while fewer than
 // maxConcurrentPreloads are running. A memory-storage preload first reserves
-// its pieces, evicting ready preloads that no reader is using if it must. When
+// its pieces, evicting cached preloads that no reader is using if it must. When
 // its pieces do not fit, it waits for a running preload to become ready and
 // evictable, or fails when none is running. Must be called with p.mu held.
 func (p *Pool) dispatchPreloadsLocked() {
@@ -668,7 +668,7 @@ func (p *Pool) unclaimPreloadLocked(pl *preload) {
 }
 
 // reservePreloadLocked reserves a memory-storage preload's pieces and protects
-// them from eviction, evicting ready preloads that no reader is using, oldest
+// them from eviction, evicting cached preloads that no reader is using, oldest
 // first, when the preload share is full. It returns false when the pieces do
 // not fit even then. Must be called with p.mu held.
 func (p *Pool) reservePreloadLocked(pl *preload) bool {
