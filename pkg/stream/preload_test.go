@@ -1250,7 +1250,7 @@ func TestPool_PreloadAt(t *testing.T) {
 		return slices.Sorted(maps.Keys(preloadClaims(pool, to)))
 	}
 
-	t.Run("places its window at the resolved offset once the head and tail are cached", func(t *testing.T) {
+	t.Run("places its window at the resolved offset before the head and tail are cached", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		to, file, data := addHashedTorrent(t, c, "movie")
 		reg := newProtectionRegistry()
@@ -1260,10 +1260,12 @@ func TestPool_PreloadAt(t *testing.T) {
 		status, err := pool.PreloadAt(file, MemoryStorage, position)
 		require.NoError(t, err)
 		assert.Equal(t, PreloadStatus{FilePath: file.Path(), Position: position, State: PreloadRunning, TargetBytes: 256}, status)
-		assert.Equal(t, []int{0, 9}, claimed(pool, to), "the window waits for the head and tail")
+		assert.Equal(t, []int{0, 9}, claimed(pool, to), "the window waits for its seek index")
 		assert.Equal(t, []int{0, 9}, protected(reg))
 
-		writePieces(t, to, data, 0, 9)
+		// The seek index reads only the first piece, so the window is placed
+		// while the tail still downloads.
+		writePieces(t, to, data, 0)
 		var call seekCall
 		select {
 		case call = <-calls:
@@ -1274,9 +1276,11 @@ func TestPool_PreloadAt(t *testing.T) {
 		assert.Equal(t, data[:8], call.header, "the seek index must read the file")
 		require.Eventually(t, func() bool { return slices.Equal(claimed(pool, to), []int{0, 4, 5, 9}) }, 5*time.Second, time.Millisecond)
 		assert.Equal(t, []int{0, 4, 5, 9}, protected(reg))
-		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "the window must complete before the preload is ready")
 
 		writePieces(t, to, data, 4, 5)
+		assert.Never(t, func() bool { return preloadState(pool, to.InfoHash()) == PreloadReady }, 50*time.Millisecond, time.Millisecond,
+			"the tail must complete before the preload is ready")
+		writePieces(t, to, data, 9)
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
 		status, _ = pool.PreloadStatus(to.InfoHash())
 		assert.Equal(t, int64(256), status.TargetBytes)

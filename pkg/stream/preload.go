@@ -206,10 +206,11 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 
 // PreloadAt is Preload for playback that resumes at position. Besides a
 // smaller head and tail, the preload plans a window of the file's data at
-// position. Once the head and tail are cached, which usually hold the
-// container's seek index, Config.SeekIndex resolves position to a byte
-// offset, and the window is placed there, starting an eighth of its size
-// before the offset. When position cannot be resolved, the preload is ready
+// position. As soon as the preload runs, Config.SeekIndex resolves position
+// to a byte offset through a torrent reader, which downloads the pieces
+// holding the container's seek index first, and the window is placed there,
+// starting an eighth of its size before the offset, to download with the head
+// and tail. When position cannot be resolved, the preload is ready
 // with its head and tail. A non-positive position, or a file the preload
 // covers whole or leaves no piece of a window for, preloads as Preload does.
 // A request whose plan has a window at another position, or none where the
@@ -717,9 +718,9 @@ func (p *Pool) startPreloadLocked(pl *preload) {
 // watchPreload follows the piece states of a preload's ranges for as long as
 // the preload runs or is ready. It marks the preload ready once every piece is
 // complete, and running again if storage evicts one of its pieces, and it
-// removes the preload when its torrent closes. Once the head and tail of a
-// preload with a resume window are complete, it resolves the playback position
-// and places the window before the preload can become ready.
+// removes the preload when its torrent closes. When a preload with a resume
+// window starts running, it first resolves the playback position and places
+// the window, which the preload must complete before it can become ready.
 func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	to := pl.file.Torrent()
 	// Subscribe before reading the piece states, so no change between the
@@ -737,7 +738,7 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 			return
 		}
 		p.updatePreloadLocked(pl, completedBytes, complete)
-		place := pl.state == PreloadRunning && complete && pl.awaitingWindow()
+		place := pl.state == PreloadRunning && pl.awaitingWindow()
 		p.mu.Unlock()
 
 		if place {
