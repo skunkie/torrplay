@@ -792,6 +792,59 @@ describe('TorrentPlayerDialog', () => {
       cancelSpy.mockClear();
     });
 
+    it('plays after 15 seconds without cancelling a preload that is not ready', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
+          fileIndex: 0,
+          targetBytes: 1000,
+          completedBytes: 100,
+          progress: 0.1,
+          status: 'preloading',
+          activePeers: 1,
+          downloadRate: 10,
+          totalPeers: 1,
+        });
+        vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue({
+          fileIndex: 0,
+          targetBytes: 1000,
+          completedBytes: 100,
+          progress: 0.1,
+          status: 'preloading',
+          activePeers: 1,
+          downloadRate: 10,
+          totalPeers: 1,
+        });
+        const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
+
+        const { unmount } = render(
+          <TorrentPlayerDialog
+            torrent={mockTorrentSingleVideo}
+            open={true}
+            onOpenChange={vi.fn()}
+            enablePreload={true}
+          />,
+        );
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(14000);
+        });
+        expect(screen.getByTestId('player-preload-badge')).toBeInTheDocument();
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+        expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
+        expect(cancelSpy).not.toHaveBeenCalled();
+
+        // The preload is still the player's, so closing it cancels it.
+        unmount();
+        expect(cancelSpy).toHaveBeenCalledWith('1234567890');
+        cancelSpy.mockClear();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('stops polling without clearing status when the preload is evicted', async () => {
       vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
         fileIndex: 0,

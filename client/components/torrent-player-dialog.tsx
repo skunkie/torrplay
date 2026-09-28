@@ -246,10 +246,12 @@ export const TorrentPlayerDialog = ({
         };
         pollTimerRef.current = setTimeout(poll, 400);
 
-        // Stop badge after timeout if still active
+        // Play after 15 seconds even if the preload is not ready. The preload
+        // keeps downloading what playback is about to request, such as a
+        // resume window, and closing the player still cancels it.
         timeoutTimerRef.current = setTimeout(() => {
           if (!isMounted) return;
-          cancelActivePreload();
+          stopPreloadPolling();
           preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
         }, 15000);
