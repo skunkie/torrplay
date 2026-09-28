@@ -4,6 +4,11 @@
 
 const PLAYBACK_POSITIONS_STORAGE_KEY = 'torrplay_playback_positions';
 
+// MAX_PLAYBACK_POSITION_TORRENTS is how many torrents keep saved positions.
+// Saving a position makes its torrent the most recent, and the least recently
+// saved torrents beyond the limit are forgotten.
+const MAX_PLAYBACK_POSITION_TORRENTS = 100;
+
 // PlaybackPositionKey identifies the torrent file a playback position belongs to.
 export interface PlaybackPositionKey {
   hash: string,
@@ -59,8 +64,16 @@ export function savePlaybackPositionSeconds(hash: string, filePath: string, posi
     delete positions[hash][filePath];
     if (Object.keys(positions[hash]).length === 0) delete positions[hash];
   } else {
-    if (!positions[hash]) positions[hash] = {};
-    positions[hash][filePath] = Math.round(positionSeconds);
+    // Object keys keep their insertion order, info hashes never being array
+    // indexes, so reinserting the torrent makes it the most recent.
+    const files = positions[hash] ?? {};
+    delete positions[hash];
+    files[filePath] = Math.round(positionSeconds);
+    positions[hash] = files;
+    const hashes = Object.keys(positions);
+    for (const stale of hashes.slice(0, Math.max(hashes.length - MAX_PLAYBACK_POSITION_TORRENTS, 0))) {
+      delete positions[stale];
+    }
   }
   writePlaybackPositions(positions);
 }

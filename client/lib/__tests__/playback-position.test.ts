@@ -46,4 +46,20 @@ describe('playback position storage', () => {
     expect(getPlaybackPositionSeconds('hash-a', 'movie.mkv')).toBe(123);
     expect(getPlaybackPositionSeconds('hash-b', 'movie.mkv')).toBe(0);
   });
+
+  it('forgets the least recently saved torrents beyond the limit', () => {
+    const hashOf = (index: number) => `hash-${index}`;
+    for (let index = 0; index < 100; index++) {
+      savePlaybackPositionSeconds(hashOf(index), 'movie.mkv', 10);
+    }
+    // Saving again makes the first torrent the most recent.
+    savePlaybackPositionSeconds(hashOf(0), 'movie.mkv', 20);
+
+    savePlaybackPositionSeconds(hashOf(100), 'movie.mkv', 10);
+
+    expect(getPlaybackPositionSeconds(hashOf(0), 'movie.mkv')).toBe(20);
+    expect(getPlaybackPositionSeconds(hashOf(1), 'movie.mkv')).toBe(0);
+    expect(getPlaybackPositionSeconds(hashOf(2), 'movie.mkv')).toBe(10);
+    expect(getPlaybackPositionSeconds(hashOf(100), 'movie.mkv')).toBe(10);
+  });
 });
