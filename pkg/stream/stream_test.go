@@ -431,63 +431,16 @@ func TestPool_ExpireInterval(t *testing.T) {
 	p.mu.Lock()
 	p.readers[1] = &streamReader{readerID: 1}
 	p.mu.Unlock()
-	assert.Equal(t, minLingerTimeout, p.expireInterval(), "a pool with readers checks as often as the shortest linger timeout")
+	assert.Equal(t, busyExpireInterval, p.expireInterval(), "a pool with readers checks often")
 
 	p.mu.Lock()
 	delete(p.readers, 1)
 	p.preloads[metainfo.Hash{1}] = &preload{}
 	p.mu.Unlock()
-	assert.Equal(t, minLingerTimeout, p.expireInterval(), "a pool with preloads checks often")
+	assert.Equal(t, busyExpireInterval, p.expireInterval(), "a pool with preloads checks often")
 	p.mu.Lock()
 	delete(p.preloads, metainfo.Hash{1})
 	p.mu.Unlock()
-}
-
-func TestPool_EffectiveLingerTimeout(t *testing.T) {
-	t.Run("no pressure", func(t *testing.T) {
-		p := newTestPool(t, Config{
-			Logger:        testLogger(),
-			LingerTimeout: 30 * time.Second,
-		})
-
-		if got := p.effectiveLingerTimeout(-1); got != 30*time.Second {
-			t.Fatalf("expected 30s, got %v", got)
-		}
-	})
-
-	t.Run("with pressure func", func(t *testing.T) {
-		tests := []struct {
-			usage float64
-			want  time.Duration
-		}{
-			{0.30, 30 * time.Second},
-			{0.60, 10 * time.Second},
-			{0.80, 5 * time.Second},
-			{0.95, 1 * time.Second},
-		}
-
-		for _, tc := range tests {
-			p := newTestPool(t, Config{
-				Logger:        testLogger(),
-				LingerTimeout: 30 * time.Second,
-			})
-
-			got := p.effectiveLingerTimeout(tc.usage)
-			if got != tc.want {
-				t.Errorf("usage=%.2f: expected %v, got %v", tc.usage, tc.want, got)
-			}
-		}
-	})
-
-	t.Run("pressure never extends a shorter timeout", func(t *testing.T) {
-		p := newTestPool(t, Config{Logger: testLogger(), LingerTimeout: 3 * time.Second})
-		if got := p.effectiveLingerTimeout(0.60); got != 3*time.Second {
-			t.Fatalf("expected 3s, got %v", got)
-		}
-		if got := p.effectiveLingerTimeout(0.95); got != time.Second {
-			t.Fatalf("expected 1s, got %v", got)
-		}
-	})
 }
 
 // byteReadahead returns the readahead the pool assigns to a reader without
@@ -753,24 +706,24 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 		assert.Zero(t, pool.StreamingTorrentCount())
 	})
 
-	t.Run("closes within the pressure-shortened timeout", func(t *testing.T) {
+	t.Run("closes after the timeout", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		to, f := addTestTorrent(t, c)
-		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Hour, MemoryUsage: func() float64 { return 0.95 }})
+		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Second})
 		defer pool.Close()
 
 		_, release := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
 		release()
 		require.True(t, pool.HasReaders(to.InfoHash()), "a released reader lingers")
 		assert.Eventually(t, func() bool { return !pool.HasReaders(to.InfoHash()) }, 3*time.Second, 10*time.Millisecond,
-			"the expiry loop must close a reader lingering past the 1 s pressure timeout")
+			"the expiry loop must close a reader lingering past its timeout")
 	})
 
 	t.Run("steady new readers do not postpone it", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		to, f := addTestTorrent(t, c)
 		_, other, _ := addHashedTorrent(t, c, "other")
-		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Hour, MemoryUsage: func() float64 { return 0.95 }})
+		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Second})
 		defer pool.Close()
 
 		_, release := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
@@ -809,18 +762,14 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 		assert.Equal(t, int64(1024), sr.readahead, "a lingering reader keeps reading ahead")
 	})
 
-	t.Run("memory pressure shortens the timeout", func(t *testing.T) {
-		p := newTestPool(t, Config{
-			Logger:        testLogger(),
-			LingerTimeout: 30 * time.Second,
-			MemoryUsage:   func() float64 { return 0.95 },
-		})
-		key := lingering(p, 2*time.Second)
+	t.Run("closes readers past the timeout", func(t *testing.T) {
+		p := newTestPool(t, Config{Logger: testLogger(), LingerTimeout: 30 * time.Second})
+		key := lingering(p, 31*time.Second)
 
 		p.closeExpiredLingeringReaders()
 
 		_, ok := p.readers[key]
-		assert.False(t, ok, "critical memory pressure must close a reader lingering longer than 1s")
+		assert.False(t, ok, "a reader lingering past its timeout must close")
 	})
 
 	t.Run("ignores active readers", func(t *testing.T) {
@@ -1075,7 +1024,6 @@ func TestPoolReadaheadRebalance(t *testing.T) {
 		p := newTestPool(t, Config{
 			Logger:        testLogger(),
 			LingerTimeout: 30 * time.Second,
-			MemoryUsage:   func() float64 { return 0.3 },
 		})
 		infoHash := metainfo.Hash{5}
 		pool := int64(10000)

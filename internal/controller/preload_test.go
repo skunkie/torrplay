@@ -480,6 +480,47 @@ func TestTorrentActivityReadsDoNotRaceClientReconfigure(t *testing.T) {
 
 // setTestMemoryLimit rebuilds the torrent client, stream pool, and storage for
 // a new memory limit, as a settings update does.
+// Memory storage keeps pieces cached until it needs room, so it is normally
+// full. That must not cut short the grace period a released reader lingers
+// for its player's next request.
+func TestStreamReaderLingersWhenMemoryIsFull(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	const limit = 16 << 20
+	setTestMemoryLimit(t, ctrl, limit)
+
+	cached := addSyntheticTorrent(t, ctrl, 2*limit, 1<<20)
+	data := make([]byte, 1<<20)
+	storageClient := ctrl.storageClient.Load()
+	for index := 0; storageClient.MemoryStats().UsedBytes < limit; index++ {
+		_, err := cached.Piece(index).Storage().WriteAt(data, 0)
+		require.NoError(t, err)
+	}
+	require.Equal(t, int64(limit), storageClient.MemoryStats().UsedBytes, "memory storage must be full")
+
+	played := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/stream/%s?index=0", played.InfoHash()), http.NoBody).WithContext(ctx)
+		ctrl.router.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	pool := ctrl.streamPool.Load()
+	require.Eventually(t, func() bool { return pool.HasActiveReaders(played.InfoHash()) }, 5*time.Second, time.Millisecond)
+	cancel()
+	select {
+	case <-served:
+	case <-time.After(10 * time.Second):
+		t.Fatal("stream request did not end after its context was cancelled")
+	}
+	require.False(t, pool.HasActiveReaders(played.InfoHash()))
+
+	// The expiry loop runs every second, so this spans several of its runs.
+	time.Sleep(2500 * time.Millisecond)
+	assert.True(t, pool.HasReaders(played.InfoHash()), "a released reader must keep lingering while memory storage is full")
+}
+
 func setTestMemoryLimit(t *testing.T, ctrl *Controller, limit int64) {
 	t.Helper()
 	ctrl.mu.Lock()

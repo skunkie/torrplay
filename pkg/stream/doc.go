@@ -102,16 +102,11 @@
 // so the linger timeout is its grace period between the player's requests. A
 // preload whose file is never read expires PreloadReadyTTL after it first
 // became ready, even while it waits to download a lost piece again, and a
-// failed or evicted preload reports its final state for as long. File-storage preloads write to disk and reserve nothing.
+// failed or evicted preload reports its final state for as long. File-storage
+// preloads write to disk and reserve nothing.
 //
-// # Memory Pressure
-//
-// When MemoryUsage is configured, the linger timeout shortens under memory
-// pressure (1 s at ≥90 %, 5 s at ≥75 %, 10 s at ≥50 %), so pieces are not
-// downloaded only to be evicted. Without MemoryUsage the fixed LingerTimeout
-// (default 30 s) is used. Expiry runs every second while the pool has readers
-// or preloads, so the shortest timeout holds, and every five seconds when it
-// has neither.
+// Expiry runs every second while the pool has readers or preloads, and every
+// five seconds when it has neither.
 //
 // # Thread Safety
 //

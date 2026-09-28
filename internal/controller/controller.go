@@ -1002,13 +1002,6 @@ func (c *Controller) configureTorrentClient() error {
 		LingerTimeout:          30 * time.Second,
 		Logger:                 logger,
 		PriorityWindowFraction: 0.15,
-		MemoryUsage: func() float64 {
-			stats := storageClient.MemoryStats()
-			if stats.LimitBytes <= 0 {
-				return 0
-			}
-			return float64(stats.UsedBytes) / float64(stats.LimitBytes)
-		},
 		ReadObserver: func(mode stream.StorageMode, duration time.Duration) {
 			if mode == stream.FileStorage {
 				observeFileRead(duration)

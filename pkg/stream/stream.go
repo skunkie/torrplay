@@ -90,13 +90,7 @@ type Config struct {
 	Logger *slog.Logger
 	// LingerTimeout is how long a released reader stays open, still reading
 	// ahead, for its player's next request. Zero defaults to 30 seconds.
-	// Memory pressure may shorten it.
 	LingerTimeout time.Duration
-	// MemoryUsage returns the current memory usage ratio (0.0–1.0).
-	// When set, lingering readers close sooner under memory pressure to
-	// prevent pieces from being downloaded and immediately evicted.
-	// When nil, a fixed LingerTimeout is used.
-	MemoryUsage func() float64
 	// PriorityWindowFraction, when > 0, raises the pieces just ahead of a
 	// playback reader to PiecePriorityNow. The fraction applies to the
 	// readahead window size in pieces, and at least one piece is claimed. The
@@ -1139,10 +1133,10 @@ func (p *Pool) Close() {
 }
 
 const (
-	// minLingerTimeout is the shortest linger timeout memory pressure
-	// selects. expireLoop runs this often while the pool has readers or
-	// preloads, so that timeout holds.
-	minLingerTimeout = time.Second
+	// busyExpireInterval is how often expireLoop runs while the pool has
+	// readers or preloads, so readers close and preloads expire within a
+	// second of their deadline.
+	busyExpireInterval = time.Second
 	// idleExpireInterval is how often expireLoop runs while the pool has no
 	// readers or preloads, so an idle pool rarely wakes.
 	idleExpireInterval = 5 * time.Second
@@ -1163,7 +1157,7 @@ func (p *Pool) expireLoop() {
 			// Only an idle wait is shortened; resetting a busy one on every
 			// new reader would keep postponing the next run.
 			if idle {
-				timer.Reset(minLingerTimeout)
+				timer.Reset(busyExpireInterval)
 				idle = false
 			}
 		case <-timer.C:
@@ -1192,42 +1186,18 @@ func (p *Pool) expireInterval() time.Duration {
 	if len(p.readers) == 0 && len(p.preloads) == 0 {
 		return idleExpireInterval
 	}
-	return minLingerTimeout
+	return busyExpireInterval
 }
 
-// effectiveLingerTimeout returns the linger timeout for the given memory
-// usage. usage < 0 means "no memory-usage callback configured" and returns
-// p.cfg.LingerTimeout. Pressure only ever shortens the configured timeout.
-func (p *Pool) effectiveLingerTimeout(usage float64) time.Duration {
-	switch {
-	case usage >= 0.90:
-		return min(p.cfg.LingerTimeout, minLingerTimeout)
-	case usage >= 0.75:
-		return min(p.cfg.LingerTimeout, 5*time.Second)
-	case usage >= 0.50:
-		return min(p.cfg.LingerTimeout, 10*time.Second)
-	default:
-		return p.cfg.LingerTimeout
-	}
-}
-
-// sampleMemoryPressure returns the current memory usage ratio, calling
-// MemoryUsage at most once. Returns -1 if no function is set.
-func (p *Pool) sampleMemoryPressure() float64 {
-	if p.cfg.MemoryUsage == nil {
-		return -1
-	}
-	return p.cfg.MemoryUsage()
-}
-
-// closeExpiredLingeringReaders closes readers that have lingered at least the
-// effective linger timeout, and lingering readers whose torrent has closed. Lingering readers hold no share of the readahead
-// budget, so closing them needs no rebalance.
+// closeExpiredLingeringReaders closes readers that have lingered at least
+// LingerTimeout, and lingering readers whose torrent has closed. Lingering
+// readers hold no share of the readahead budget, so closing them needs no
+// rebalance.
 func (p *Pool) closeExpiredLingeringReaders() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	timeout := p.effectiveLingerTimeout(p.sampleMemoryPressure())
+	timeout := p.cfg.LingerTimeout
 	now := time.Now()
 	closed := false
 	for _, sr := range p.readers {

@@ -266,7 +266,6 @@ func TestEngineSoak(t *testing.T) {
 	pool := New(Config{
 		Logger:                 testLogger(),
 		LingerTimeout:          300 * time.Millisecond,
-		MemoryUsage:            func() float64 { return float64(e.storage.MemoryStats().UsedBytes) / memoryLimit },
 		PreloadReadyTTL:        2 * time.Second,
 		PreloadStallTimeout:    3 * time.Second,
 		PriorityWindowFraction: 0.15,
