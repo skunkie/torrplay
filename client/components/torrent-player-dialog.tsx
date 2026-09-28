@@ -19,13 +19,18 @@ interface TorrentPlayerDialogProps {
   enablePreload?: boolean
 }
 
-// isInactivePreloadStatus reports whether the server is not preloading now, so
-// the player should stop polling and play without waiting. A queued preload
-// may wait for other torrents' preloads, while playback outranks preloads, so
-// the player plays at once and leaves the preload queued, still cancelling it
-// on close.
+// isInactivePreloadStatus reports whether the server holds no preload for the
+// player to cancel later.
 function isInactivePreloadStatus(status: PreloadResponse['status']): boolean {
-  return status === 'evicted' || status === 'failed' || status === 'idle' || status === 'queued';
+  return status === 'evicted' || status === 'failed' || status === 'idle';
+}
+
+// shouldStopWaitingForPreload reports whether the player should stop polling
+// and play without waiting. A queued preload may wait for other torrents'
+// preloads, while playback outranks preloads, so the player plays at once and
+// leaves the preload queued, still cancelling it on close.
+function shouldStopWaitingForPreload(status: PreloadResponse['status']): boolean {
+  return isInactivePreloadStatus(status) || status === 'queued';
 }
 
 function computeVideoFiles(torrent: Torrent | null): { videoFiles: TorrentFile[], selectedFile: TorrentFile | null } {
@@ -83,10 +88,11 @@ export const TorrentPlayerDialog = ({
     }
   }, [stopPreloadPolling]);
 
-  const finishInactivePreload = useCallback((status: PreloadResponse['status']) => {
+  // stopWaitingForPreload stops polling, and forgets a preload the server no
+  // longer holds. The player keeps any other, so closing it cancels that.
+  const stopWaitingForPreload = useCallback((status: PreloadResponse['status']) => {
     stopPreloadPolling();
-    // A queued preload is still the player's, so closing the player cancels it.
-    if (status !== 'queued') {
+    if (isInactivePreloadStatus(status)) {
       activePreloadHashRef.current = null;
     }
   }, [stopPreloadPolling]);
@@ -170,8 +176,8 @@ export const TorrentPlayerDialog = ({
         setActivePeers(resp.activePeers || 0);
         setTotalPeers(resp.totalPeers || 0);
 
-        if (isInactivePreloadStatus(resp.status)) {
-          finishInactivePreload(resp.status);
+        if (shouldStopWaitingForPreload(resp.status)) {
+          stopWaitingForPreload(resp.status);
           preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
           return;
@@ -205,8 +211,8 @@ export const TorrentPlayerDialog = ({
             setActivePeers(statusResp.activePeers || 0);
             setTotalPeers(statusResp.totalPeers || 0);
 
-            if (isInactivePreloadStatus(statusResp.status)) {
-              finishInactivePreload(statusResp.status);
+            if (shouldStopWaitingForPreload(statusResp.status)) {
+              stopWaitingForPreload(statusResp.status);
               preloadedFileRef.current = currentSelectedFile.path;
               setIsPreloading(false);
               return;
@@ -254,7 +260,7 @@ export const TorrentPlayerDialog = ({
       isMounted = false;
       stopPreloadPolling();
     };
-  }, [cancelActivePreload, finishInactivePreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
+  }, [cancelActivePreload, stopWaitingForPreload, open, torrentHash, selectedFilePath, enablePreload, stopPreloadPolling]);
 
   // Clean up when dialog closes
   useEffect(() => {
