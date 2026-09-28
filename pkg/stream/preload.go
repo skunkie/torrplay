@@ -184,7 +184,7 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 		p.dispatchPreloadsLocked()
 		return PreloadStatus{}, ErrPreloadDoesNotFit
 	}
-	pl.completedBytes, _ = pl.progress()
+	pl.completedBytes, _ = pl.progress(completedPieces(to, pl.pieces))
 	pl.fileRead = p.fileHasReadersLocked(file)
 	to.AllowDataDownload()
 	p.preloads[infoHash] = pl
@@ -255,28 +255,35 @@ func (pl *preload) status() PreloadStatus {
 }
 
 // progress returns the bytes of the preload's ranges held in complete pieces,
-// and whether every piece of its ranges is complete. It reads piece states
-// under the torrent client lock.
-func (pl *preload) progress() (completedBytes int64, complete bool) {
-	to := pl.file.Torrent()
-	states := make(map[int]bool, len(pl.pieces))
-	pieceComplete := func(index int) bool {
-		done, ok := states[index]
-		if !ok {
-			done = to.PieceState(index).Complete
-			states[index] = done
-		}
-		return done
-	}
-	pieceLength := to.Info().PieceLength
+// and whether every piece of its ranges is complete, given the completion of
+// each of the preload's pieces.
+func (pl *preload) progress(complete map[int]bool) (completedBytes int64, allComplete bool) {
+	pieceComplete := func(index int) bool { return complete[index] }
+	pieceLength := pl.file.Torrent().Info().PieceLength
 	completedBytes = completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), 0, pl.headEnd) +
 		completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), pl.tailStart, pl.tailEnd)
 	for _, index := range pl.pieces {
-		if !pieceComplete(index) {
+		if !complete[index] {
 			return completedBytes, false
 		}
 	}
 	return completedBytes, true
+}
+
+// completedPieces returns the completion of each of the given ascending
+// pieces of to, read under a single acquisition of the torrent client lock.
+func completedPieces(to *torrent.Torrent, pieces []int) map[int]bool {
+	complete := make(map[int]bool, len(pieces))
+	next := 0
+	start := 0
+	for _, run := range to.PieceStateRuns() {
+		end := start + run.Length
+		for ; next < len(pieces) && pieces[next] < end; next++ {
+			complete[pieces[next]] = run.Complete
+		}
+		start = end
+	}
+	return complete
 }
 
 // completedRangeBytes returns the bytes of the file-relative range
@@ -488,17 +495,15 @@ func (p *Pool) startPreloadLocked(pl *preload) {
 // removes the preload when its torrent closes.
 func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	to := pl.file.Torrent()
-	// Subscribe before the first check, so no change between the check and
-	// the wait is missed.
+	// Subscribe before reading the piece states, so no change between the
+	// read and the wait is missed. Changes are applied in order, so the
+	// tracked states end at the latest ones.
 	sub := to.SubscribePieceStateChanges()
 	defer sub.Close()
-	watched := make(map[int]struct{}, len(pl.pieces))
-	for _, index := range pl.pieces {
-		watched[index] = struct{}{}
-	}
+	pieces := completedPieces(to, pl.pieces)
 
 	for {
-		completedBytes, complete := pl.progress()
+		completedBytes, complete := pl.progress(pieces)
 		p.mu.Lock()
 		if ctx.Err() != nil {
 			p.mu.Unlock()
@@ -507,7 +512,7 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 		p.updatePreloadLocked(pl, completedBytes, complete)
 		p.mu.Unlock()
 
-		if !waitForPieceChange(ctx, to, sub.Values, watched) {
+		if !waitForPieceChange(ctx, to, sub.Values, pieces) {
 			if ctx.Err() == nil {
 				p.mu.Lock()
 				if p.preloads[pl.infoHash] == pl {
@@ -521,10 +526,18 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	}
 }
 
-// waitForPieceChange blocks until the state of a watched piece changes, and
-// then drains changes already delivered so that a burst causes one check. It
-// returns false when ctx ends or the torrent closes.
-func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, watched map[int]struct{}) bool {
+// waitForPieceChange blocks until the state of a piece in complete changes,
+// records the new completion in complete, and records the changes already
+// delivered as well, so that a burst causes one check. It returns false when
+// ctx ends or the torrent closes.
+func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, complete map[int]bool) bool {
+	record := func(change torrent.PieceStateChange) bool {
+		if _, watched := complete[change.Index]; !watched {
+			return false
+		}
+		complete[change.Index] = change.Complete
+		return true
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -535,15 +548,16 @@ func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan
 			if !ok {
 				return false
 			}
-			if _, relevant := watched[change.Index]; !relevant {
+			if !record(change) {
 				continue
 			}
 			for {
 				select {
-				case _, ok := <-changes:
+				case change, ok := <-changes:
 					if !ok {
 						return false
 					}
+					record(change)
 				default:
 					return true
 				}

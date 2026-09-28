@@ -925,6 +925,50 @@ func TestPreloadCoversBoundaries(t *testing.T) {
 	}
 }
 
+func TestCompletedPieces(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, _, data := addHashedTorrent(t, c, "completed")
+	writePieces(t, to, data, 0, 1, 4, 9)
+
+	assert.Equal(t, map[int]bool{0: true, 2: false, 3: false, 4: true, 9: true}, completedPieces(to, []int{0, 2, 3, 4, 9}))
+	assert.Empty(t, completedPieces(to, nil))
+}
+
+func TestWaitForPieceChange(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, _, _ := addHashedTorrent(t, c, "changes")
+	change := func(index int, complete bool) torrent.PieceStateChange {
+		var state torrent.PieceState
+		state.Complete = complete
+		return torrent.PieceStateChange{Index: index, PieceState: state}
+	}
+
+	t.Run("records a burst of watched changes", func(t *testing.T) {
+		changes := make(chan torrent.PieceStateChange, 4)
+		changes <- change(7, true) // not watched
+		changes <- change(1, true)
+		changes <- change(2, true)
+		changes <- change(1, false)
+		complete := map[int]bool{1: false, 2: false}
+
+		require.True(t, waitForPieceChange(context.Background(), to, changes, complete))
+		assert.Equal(t, map[int]bool{1: false, 2: true}, complete, "later changes must win and unwatched pieces stay untracked")
+		assert.Empty(t, changes, "the burst must be drained")
+	})
+
+	t.Run("ends when the subscription closes", func(t *testing.T) {
+		changes := make(chan torrent.PieceStateChange)
+		close(changes)
+		assert.False(t, waitForPieceChange(context.Background(), to, changes, map[int]bool{}))
+	})
+
+	t.Run("ends with its context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		assert.False(t, waitForPieceChange(ctx, to, make(chan torrent.PieceStateChange), map[int]bool{}))
+	})
+}
+
 func TestCompletedRangeBytes(t *testing.T) {
 	complete := map[int]bool{0: true, 2: true}
 	pieceComplete := func(index int) bool { return complete[index] }
