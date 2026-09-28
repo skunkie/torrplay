@@ -1300,7 +1300,7 @@ func (c *Controller) applyMemoryLimit() error {
 
 // heapLimitOverhead is the memory the heap limit allows beyond memory storage
 // for the rest of the process.
-const heapLimitOverhead = 128 << 20
+const heapLimitOverhead = 256 << 20
 
 // applyHeapLimit sets the garbage collector's soft memory limit to maxMemory
 // plus heapLimitOverhead. Piece buffers that memory storage drops, such as
@@ -1312,7 +1312,9 @@ func (c *Controller) applyHeapLimit(maxMemory int64) {
 	if _, ok := os.LookupEnv("GOMEMLIMIT"); ok {
 		return
 	}
-	c.runtimeConfig.setMemoryLimit(maxMemory + heapLimitOverhead)
+	limit := maxMemory + heapLimitOverhead
+	c.runtimeConfig.setMemoryLimit(limit)
+	c.logger.Load().Info("set heap limit", "limit", limit)
 }
 
 // rollbackSettings restores the previous settings in memory and in the

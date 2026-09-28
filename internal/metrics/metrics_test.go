@@ -56,6 +56,8 @@ func TestMetrics_Handler(t *testing.T) {
 
 	// Check for Go metrics (from collectors.NewGoCollector()).
 	assert.Contains(t, bodyStr, "go_goroutines")
+	assert.Contains(t, bodyStr, "go_gc_gomemlimit_bytes")
+	assert.Contains(t, bodyStr, "go_gc_limiter_last_enabled_gc_cycle")
 
 	// Check for process metrics (from collectors.NewProcessCollector()).
 	assert.Contains(t, bodyStr, "process_cpu_seconds_total")

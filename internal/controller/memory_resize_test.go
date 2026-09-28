@@ -7,6 +7,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"testing"
 
@@ -166,6 +167,10 @@ func TestHeapLimitFollowsMaxMemory(t *testing.T) {
 	}
 
 	t.Run("startup and resize", func(t *testing.T) {
+		// t.Setenv restores the variable after the test, which Unsetenv
+		// alone would not.
+		t.Setenv("GOMEMLIMIT", "")
+		require.NoError(t, os.Unsetenv("GOMEMLIMIT"))
 		ctrl, limit := newController(t)
 		assert.Equal(t, *ctrl.settings.Load().MaxMemory+heapLimitOverhead, limit.Load())
 

@@ -6,6 +6,7 @@ package metrics
 
 import (
 	"net/http"
+	"regexp"
 	"sync/atomic"
 	"time"
 
@@ -71,7 +72,13 @@ type EngineStats struct {
 func New() *Metrics {
 	reg := prometheus.NewRegistry()
 
-	reg.MustRegister(collectors.NewGoCollector())
+	reg.MustRegister(collectors.NewGoCollector(
+		// The limiter's last enabled cycle advances while the heap runs over
+		// its soft memory limit and the garbage collector is capped.
+		collectors.WithGoCollectorRuntimeMetrics(collectors.GoRuntimeMetricsRule{
+			Matcher: regexp.MustCompile(`^/gc/limiter/last-enabled:gc-cycle$`),
+		}),
+	))
 	reg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
 	m := &Metrics{
