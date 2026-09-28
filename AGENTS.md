@@ -147,7 +147,7 @@ fix(controller): move debug profiler to loopback-only listener
 ## Downloader & Torrent Metadata Invariants
 
 - **Streaming Bandwidth Prioritization**:
-  - Treat any active streaming session as a global pause condition during background-downloader reconciliation, and do not resume background priorities while a stream remains active. A stream pool reader, including one lingering between a player's range requests, marks a stream as active; the downloader asks the pool on its periodic processing cycle.
+  - Treat any active streaming session as a global pause condition during background-downloader reconciliation, and do not resume background priorities while a stream remains active. A stream pool reader, including one lingering between a player's range requests, marks a stream as active. The stream pool wakes the downloader when it gains its first reader and when its last reader closes, so background downloads pause and resume at once; the downloader's periodic processing cycle remains a fallback.
 - **Metadata Caching & Instant Resolution**:
   - Use `loadTorrentSpec` with pre-loaded `InfoBytes` on `.torrent` uploads so `GotInfo()` can resolve without waiting for metadata from peers.
   - Preserve `InfoBytes` across in-memory to file storage migrations.
