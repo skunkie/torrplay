@@ -264,6 +264,35 @@ func TestPool_Preload(t *testing.T) {
 		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
 	})
 
+	t.Run("releases a read preload waiting for a slot once playback ends", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
+		writePieces(t, ready, readyData, allPieces(ready)...)
+		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Nanosecond})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1 << 20)
+		_, err := pool.Preload(readyFile, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+		_, release, err := pool.Acquire(context.Background(), readyFile, MemoryStorage)
+		require.NoError(t, err)
+		for i := range maxConcurrentPreloads {
+			_, file, _ := addHashedTorrent(t, c, fmt.Sprintf("running%d", i))
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+		corrupt := slices.Clone(readyData)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, ready, corrupt, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadQueued)
+		reserved := reservedPreloadBytes(pool)
+
+		release()
+		pool.closeExpiredLingeringReaders()
+		assert.Zero(t, preloadState(pool, ready.InfoHash()), "a read preload must be released once its file has no reader")
+		assert.Less(t, reservedPreloadBytes(pool), reserved, "its reservation must return to playback")
+	})
+
 	t.Run("becomes ready again while waiting when its piece returns", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")

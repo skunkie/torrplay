@@ -746,13 +746,15 @@ func (p *Pool) shrinkPreloadsLocked() {
 	}
 }
 
-// releaseReadPreloadsLocked releases the ready preloads whose file was read
+// releaseReadPreloadsLocked releases the ready preloads, and the queued ones
+// still holding a reservation after losing a piece, whose file was read
 // and has no reader left, including a lingering one: playback of the file has
 // ended, so its cache has served its purpose. Must be called with p.mu held.
 func (p *Pool) releaseReadPreloadsLocked() {
 	released := false
 	for infoHash, pl := range p.preloads {
-		if pl.state == PreloadReady && pl.fileRead && !p.fileHasReadersLocked(pl.file) {
+		holdsCache := pl.state == PreloadReady || (pl.state == PreloadQueued && pl.reserved)
+		if holdsCache && pl.fileRead && !p.fileHasReadersLocked(pl.file) {
 			p.removePreloadLocked(infoHash)
 			released = true
 		}
