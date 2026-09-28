@@ -706,6 +706,30 @@ func TestPool_PreloadStallTimeout(t *testing.T) {
 		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()))
 	})
 
+	t.Run("progress of other pieces of its torrent restarts the timer", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger(), PreloadStallTimeout: time.Minute})
+		t.Cleanup(pool.Close)
+		// The preload share holds only the first three 64-byte pieces.
+		pool.SetReadaheadBudget(400)
+		to, file, data := addHashedTorrent(t, c, "movie")
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		require.Equal(t, []int{0, 1, 2}, pool.preloads[to.InfoHash()].pieces)
+		pool.mu.Unlock()
+		stalledFor(pool, to.InfoHash(), time.Hour)
+
+		// Another viewer's playback completes a piece the preload waits behind.
+		writePieces(t, to, data, 8)
+		pool.expirePreloads()
+		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "a torrent still downloading is not stalled")
+
+		stalledFor(pool, to.InfoHash(), time.Hour)
+		pool.expirePreloads()
+		assert.Equal(t, PreloadFailed, preloadState(pool, to.InfoHash()), "without further progress the preload stalls")
+	})
+
 	t.Run("a negative timeout disables it", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		pool := New(Config{Logger: testLogger(), PreloadStallTimeout: -1})

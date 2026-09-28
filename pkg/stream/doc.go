@@ -87,9 +87,10 @@
 // playback readers, so a new stream is never starved by held preloads. When
 // the share is full, a queued preload evicts the oldest ready preload; ready
 // preloads of files being read stay pinned. A preload that cannot fit and has
-// nothing to wait for fails, and so does a running preload that completes no
-// piece within PreloadStallTimeout, such as one of a torrent without peers, so
-// it cannot hold its slot forever. A smaller SetReadaheadBudget evicts
+// nothing to wait for fails, and so does a running preload whose torrent
+// completes no data within PreloadStallTimeout, such as one without peers, so
+// it cannot hold its slot forever. A preload waiting behind other viewers'
+// playback of its torrent does not stall. A smaller SetReadaheadBudget evicts
 // preloads until they fit, cheapest first. A ready preload that loses a piece
 // to eviction downloads it again.
 //

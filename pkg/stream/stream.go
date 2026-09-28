@@ -112,9 +112,11 @@ type Config struct {
 	// Zero defaults to 5 minutes. Negative values keep unread and finished
 	// preloads until they are replaced, cancelled, or evicted.
 	PreloadReadyTTL time.Duration
-	// PreloadStallTimeout is how long a running preload may go without
-	// completing a piece before it fails, freeing its download slot and
-	// memory, as on a torrent without peers. Zero defaults to 2 minutes.
+	// PreloadStallTimeout is how long a running preload may go while neither
+	// it nor anything else of its torrent completes data before it fails,
+	// freeing its download slot and memory, as on a torrent without peers. A
+	// preload waiting behind other viewers' playback of its torrent does not
+	// stall. Zero defaults to 2 minutes.
 	// Negative values let preloads run until they complete or are removed.
 	PreloadStallTimeout time.Duration
 	// ReadObserver, when set, is called after every Read of a reader with the

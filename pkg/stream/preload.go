@@ -28,7 +28,7 @@ const (
 	// PreloadReady holds every piece of the preload's ranges.
 	PreloadReady
 	// PreloadFailed could not reserve memory with nothing left to wait for,
-	// or stopped completing pieces for the stall timeout.
+	// or its torrent completed no data for the stall timeout.
 	PreloadFailed
 	// PreloadEvicted gave up its memory to another preload or to a smaller
 	// readahead budget.
@@ -123,8 +123,9 @@ type preload struct {
 	infoHash                    metainfo.Hash
 	mode                        StorageMode
 	pieces                      []int
-	// progressAt is when a running preload started running or last completed
-	// a piece. The stall timeout runs from it.
+	// progressAt is when a running preload started running, last completed a
+	// piece, or last saw its torrent complete more data. The stall timeout
+	// runs from it.
 	progressAt time.Time
 	// readyAt is when the preload became ready. The ready TTL of a preload
 	// whose file has not been read runs from it.
@@ -133,6 +134,9 @@ type preload struct {
 	reserved    bool
 	state       PreloadState
 	targetBytes int64
+	// torrentCompleted is the torrent's completed bytes when progressAt was
+	// last set.
+	torrentCompleted int64
 }
 
 // preloadReservation is the protection budget held by a memory-storage
@@ -301,6 +305,13 @@ func completedRangeBytes(pieceComplete func(int) bool, pieceLength, fileOffset, 
 		}
 	}
 	return total
+}
+
+// markProgress records that the preload made progress at now, together with
+// its torrent's completed bytes at that time.
+func (pl *preload) markProgress(now time.Time) {
+	pl.progressAt = now
+	pl.torrentCompleted = pl.file.Torrent().BytesCompleted()
 }
 
 // planPreloadLocked sizes a preload of file. The head starts at the file's
@@ -479,7 +490,7 @@ func (p *Pool) runningPreloadCountLocked() int {
 // called with p.mu held.
 func (p *Pool) startPreloadLocked(pl *preload) {
 	pl.state = PreloadRunning
-	pl.progressAt = time.Now()
+	pl.markProgress(time.Now())
 	p.claimPreloadLocked(pl)
 	ctx, cancel := context.WithCancel(context.Background())
 	pl.cancel = cancel
@@ -574,7 +585,7 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 		return
 	}
 	if completedBytes > pl.completedBytes {
-		pl.progressAt = time.Now()
+		pl.markProgress(time.Now())
 	}
 	pl.completedBytes = completedBytes
 	switch {
@@ -593,7 +604,7 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 		p.dispatchPreloadsLocked()
 	case pl.state == PreloadReady && !complete:
 		pl.state = PreloadRunning
-		pl.progressAt = time.Now()
+		pl.markProgress(time.Now())
 		p.claimPreloadLocked(pl)
 		p.logger.Debug("preload lost a piece and runs again",
 			slog.String("hash", pl.infoHash.HexString()),
@@ -788,8 +799,10 @@ func (p *Pool) stopPreloadLocked(pl *preload) {
 // expirePreloads removes preloads whose torrent closed, ready preloads whose
 // file has not been read within the ready TTL, read preloads whose file has no
 // reader left, and failed or evicted preloads that have reported their final
-// state for the ready TTL. It fails running preloads that completed no piece
-// within the stall timeout.
+// state for the ready TTL. It fails running preloads whose torrent completed
+// no data within the stall timeout. A preload whose own pieces wait behind
+// other viewers' playback of the torrent is not stalled, because the engine is
+// shared: it downloads with the bandwidth playback leaves.
 func (p *Pool) expirePreloads() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -811,7 +824,15 @@ func (p *Pool) expirePreloads() {
 				removed = true
 			}
 		case pl.state == PreloadRunning:
-			if stall := p.cfg.PreloadStallTimeout; stall > 0 && now.Sub(pl.progressAt) >= stall {
+			stall := p.cfg.PreloadStallTimeout
+			if stall <= 0 {
+				continue
+			}
+			if pl.file.Torrent().BytesCompleted() > pl.torrentCompleted {
+				pl.markProgress(now)
+				continue
+			}
+			if now.Sub(pl.progressAt) >= stall {
 				p.finishPreloadLocked(pl, PreloadFailed)
 				p.logger.Warn("preload stalled",
 					slog.String("hash", infoHash.HexString()),
