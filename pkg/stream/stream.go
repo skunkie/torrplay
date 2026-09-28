@@ -119,6 +119,13 @@ type Config struct {
 	// stall. Zero defaults to 2 minutes.
 	// Negative values let preloads run until they complete or are removed.
 	PreloadStallTimeout time.Duration
+	// ReadaheadRampBytes, when positive, ramps up the readahead of a new
+	// reader, and of one after a seek: it reads ahead at most twice the bytes
+	// it has read since, and at least ReadaheadRampBytes or one piece, until
+	// it reaches the readahead its share allows. A player's request that reads
+	// only a container header before seeking elsewhere then downloads little
+	// past it. Zero gives every reader its full readahead at once.
+	ReadaheadRampBytes int64
 	// ReadObserver, when set, is called after every Read of a reader with the
 	// reader's storage mode and how long the Read took, including any wait
 	// for torrent data. It runs on the reading goroutine, so it must return
@@ -313,8 +320,14 @@ type streamReader struct {
 	lastOffset int64
 	lastPiece  int64
 	readahead  int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
-	reader     torrent.Reader
-	readerID   uint64
+	// runStart is the offset where the reader's current sequential reading
+	// began, at its first read or its last seek, or -1 before its first read.
+	runStart int64
+	// shareReadahead is the readahead the reader's share of the budget, or
+	// FileReadaheadBytes for file storage, allows once ramped up.
+	shareReadahead int64
+	reader         torrent.Reader
+	readerID       uint64
 	// stream is the caller's view of reader.
 	stream *streamReadSeeker
 }
@@ -436,6 +449,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		isFileStorage: isFileStorage,
 		lastPiece:     -1,
 		reader:        reader,
+		runStart:      -1,
 		readerID:      readerID,
 		stream:        stream,
 	}
@@ -449,8 +463,9 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 	if isFileStorage {
 		// File-storage pieces live on disk, so they need neither a share of
 		// the budget nor eviction protection.
-		sr.readahead = p.cfg.FileReadaheadBytes
-		reader.SetReadahead(p.cfg.FileReadaheadBytes)
+		sr.shareReadahead = p.cfg.FileReadaheadBytes
+		sr.readahead = p.rampedReadaheadLocked(sr)
+		reader.SetReadahead(sr.readahead)
 	} else {
 		p.refreshReadaheadLocked()
 	}
@@ -617,7 +632,8 @@ func (p *Pool) refreshReadaheadLocked() {
 		if sr.isFileStorage {
 			continue
 		}
-		readahead := readaheadForShare(plan.share, filePieceLength(sr.file))
+		sr.shareReadahead = readaheadForShare(plan.share, filePieceLength(sr.file))
+		readahead := p.rampedReadaheadLocked(sr)
 		sr.readahead = readahead
 		if sr.reader != nil {
 			sr.reader.SetReadahead(readahead)
@@ -770,6 +786,25 @@ func readaheadForShare(share, pieceLength int64) int64 {
 		ahead++
 	}
 	return ahead * pieceLength
+}
+
+// rampedReadaheadLocked returns sr's readahead: its share's readahead, limited
+// while it ramps up to twice the bytes it has read since its first read or
+// last seek, and at least ReadaheadRampBytes, in whole pieces. Must be called
+// with p.mu held.
+func (p *Pool) rampedReadaheadLocked(sr *streamReader) int64 {
+	if p.cfg.ReadaheadRampBytes <= 0 {
+		return sr.shareReadahead
+	}
+	var read int64
+	if sr.runStart >= 0 {
+		read = max(sr.lastOffset-sr.runStart, 0)
+	}
+	limit := max(2*read, p.cfg.ReadaheadRampBytes)
+	if pieceLength := filePieceLength(sr.file); pieceLength > 0 {
+		limit = (limit + pieceLength - 1) / pieceLength * pieceLength
+	}
+	return min(sr.shareReadahead, limit)
 }
 
 // filePieceLength returns the file's torrent piece length, or zero when the
@@ -1026,6 +1061,11 @@ func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 	// Cache the offset on the streamReader so other pool.mu holders
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
 	// the stream's lock, preserving the lock order.
+	// A read before or far past the last one is a seek, which restarts the
+	// readahead ramp.
+	if sr.runStart < 0 || newOffset < sr.lastOffset || newOffset-sr.lastOffset > max(sr.readahead, filePieceLength(file)) {
+		sr.runStart = newOffset
+	}
 	sr.lastOffset = newOffset
 	currentPiece := filePiece(file, newOffset)
 	pieceChanged := (currentPiece != sr.lastPiece) || (sr.lastPiece < 0)
@@ -1036,6 +1076,14 @@ func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 		return
 	}
 
+	if p.cfg.ReadaheadRampBytes > 0 {
+		if readahead := p.rampedReadaheadLocked(sr); readahead != sr.readahead {
+			sr.readahead = readahead
+			if sr.reader != nil {
+				sr.reader.SetReadahead(readahead)
+			}
+		}
+	}
 	readahead := sr.readahead
 	prioEnabled := p.cfg.PriorityWindowFraction > 0
 
