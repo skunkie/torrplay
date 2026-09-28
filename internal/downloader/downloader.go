@@ -248,7 +248,13 @@ func (d *Downloader) processTorrents() {
 		if shouldDownload {
 			if !isDownloading {
 				d.logger.Debug("starting background download for torrent", "hash", t.Hash)
-				to.DownloadAll()
+				// Download through file priorities, which pausing sets back to
+				// none. Piece priorities belong to the stream pool's claims,
+				// and a piece's effective priority is the highest of the two,
+				// so raising piece priorities here could not be undone.
+				for _, f := range to.Files() {
+					f.SetPriority(torrent.PiecePriorityNormal)
+				}
 				d.mu.Lock()
 				d.downloading[t.Hash] = struct{}{}
 				d.mu.Unlock()

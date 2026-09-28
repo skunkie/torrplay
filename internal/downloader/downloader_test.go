@@ -146,6 +146,38 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		}, time.Second, 10*time.Millisecond, "DownloadingTorrents metric should be 0 after torrent is removed")
 	})
 
+	t.Run("stops a download it started once streaming begins", func(t *testing.T) {
+		testMetaInfo := newTestTorrent(t, 1024)
+		testHash := testMetaInfo.HashInfoBytes()
+		storageType := api.File
+		td := t.TempDir()
+		pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+		require.NoError(t, err)
+		defer pc.Close()
+		db := &MockDB{
+			settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
+			torrents: []*database.Torrent{{Torrent: api.Torrent{Hash: testHash, Magnet: utils.MagnetURIFromHash(testHash), Storage: &storageType}}},
+		}
+		client := newTestTorrentClient(t, td)
+		streaming := false
+		downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, func() bool { return streaming })
+		to, err := client.AddTorrent(testMetaInfo)
+		require.NoError(t, err)
+		// Piece priorities count only once the pieces' completion is known.
+		require.NoError(t, to.VerifyDataContext(t.Context()))
+
+		downloader.processTorrents()
+		require.True(t, downloader.IsDownloading(testHash))
+		for index := range to.NumPieces() {
+			require.Equal(t, torrent.PiecePriorityNormal, to.PieceState(index).Priority, "piece %d must be wanted", index)
+		}
+
+		streaming = true
+		downloader.processTorrents()
+		assert.False(t, downloader.IsDownloading(testHash))
+		assertNothingWanted(t, to)
+	})
+
 	t.Run("clears priorities when disabled", func(t *testing.T) {
 		testMetaInfo := newTestTorrent(t, 1024)
 		testHash := testMetaInfo.HashInfoBytes()
@@ -178,13 +210,13 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
-		to.DownloadAll()
+		for _, f := range to.Files() {
+			f.SetPriority(torrent.PiecePriorityNormal)
+		}
 
 		downloader.processTorrents()
 
-		for _, f := range to.Files() {
-			assert.Equal(t, torrent.PiecePriorityNone, f.Priority())
-		}
+		assertNothingWanted(t, to)
 		assert.Empty(t, downloader.downloading)
 		assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
 	})
@@ -221,13 +253,13 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
-		to.DownloadAll()
+		for _, f := range to.Files() {
+			f.SetPriority(torrent.PiecePriorityNormal)
+		}
 
 		downloader.processTorrents()
 
-		for _, f := range to.Files() {
-			assert.Equal(t, torrent.PiecePriorityNone, f.Priority())
-		}
+		assertNothingWanted(t, to)
 		assert.Empty(t, downloader.downloading)
 		assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
 	})
@@ -264,14 +296,14 @@ func TestDownloader_Stop(t *testing.T) {
 
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
-		to.DownloadAll()
+		for _, f := range to.Files() {
+			f.SetPriority(torrent.PiecePriorityNormal)
+		}
 
 		downloader.Start()
 		downloader.Stop()
 
-		for _, f := range to.Files() {
-			assert.Equal(t, torrent.PiecePriorityNone, f.Priority())
-		}
+		assertNothingWanted(t, to)
 		assert.Empty(t, downloader.downloading)
 		assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
 	})
@@ -299,4 +331,16 @@ func TestDownloader_Stop(t *testing.T) {
 			downloader.Stop()
 		}
 	})
+}
+
+// assertNothingWanted checks that no piece of to is wanted, so pausing
+// actually stops the download rather than only lowering file priorities.
+func assertNothingWanted(t *testing.T, to *torrent.Torrent) {
+	t.Helper()
+	for _, f := range to.Files() {
+		assert.Equal(t, torrent.PiecePriorityNone, f.Priority())
+	}
+	for index := range to.NumPieces() {
+		assert.Equal(t, torrent.PiecePriorityNone, to.PieceState(index).Priority, "piece %d is still wanted", index)
+	}
 }
