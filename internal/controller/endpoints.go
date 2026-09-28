@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/generics"
@@ -1976,18 +1977,41 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 }
 
 // watchStorageWrites sets how to handle a failed storage write of to. The
-// torrent client logs the failure and requests the data again. Memory storage
-// fails a write only while it cannot free room, so the torrent keeps
-// downloading. A file-storage write failure, such as a full disk, would repeat,
-// so it stops the torrent's downloads and its background download.
+// torrent client logs the failure and requests the data again. A file-storage
+// write failure, such as a full disk, would repeat, so it stops the torrent's
+// downloads and its background download. Memory storage is handled by
+// memoryWriteFailed.
 func (c *Controller) watchStorageWrites(to *torrent.Torrent, fileStorage bool) {
 	if !fileStorage {
-		to.SetOnWriteChunkError(func(error) {})
+		var once sync.Once
+		to.SetOnWriteChunkError(func(err error) { c.memoryWriteFailed(to, err, &once) })
 		return
 	}
 	if d := c.downloader.Load(); d != nil {
 		d.WatchStorageWrites(to)
 	}
+}
+
+// memoryWriteFailed handles a failed memory-storage write of to. Memory
+// storage fails a write while it cannot free room, so the torrent keeps
+// downloading, unless its pieces are larger than the whole memory limit: their
+// writes can never succeed, so the torrent stops downloading and its reads
+// fail, and logged records that once.
+func (c *Controller) memoryWriteFailed(to *torrent.Torrent, err error, logged *sync.Once) {
+	storageClient := c.storageClient.Load()
+	info := to.Info()
+	if !errors.Is(err, memstorage.ErrInsufficientMemory) || storageClient == nil || info == nil {
+		return
+	}
+	limit := storageClient.MemoryStats().LimitBytes
+	if info.PieceLength <= limit {
+		return
+	}
+	to.DisallowDataDownload()
+	logged.Do(func() {
+		c.logger.Load().Error("stopped downloading torrent whose pieces are larger than the memory limit",
+			"hash", to.InfoHash(), "pieceLength", info.PieceLength, "memoryLimit", limit)
+	})
 }
 
 // loadTorrent is the single entry point for adding a torrent to the client.

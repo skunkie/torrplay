@@ -731,9 +731,9 @@ func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torre
 			if c.used+size > c.maxMemory {
 				// Unprotected and boundary pieces have already been exhausted, so
 				// an unpublished reservation is the only memory that may be
-				// reclaimed without evicting an active range. Wait for one to publish or refund instead
-				// of surfacing a transient WriteAt error, which the torrent engine
-				// treats as fatal.
+				// reclaimed without evicting an active range. Wait for one to
+				// publish or refund instead of failing the write, whose chunk the
+				// torrent client would have to download again.
 				if c.pendingAllocations > 0 {
 					c.allocationCond.Wait()
 					c.mu.Unlock()
