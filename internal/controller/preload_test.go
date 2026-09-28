@@ -736,6 +736,7 @@ func TestController_TorrentStorageMode(t *testing.T) {
 		mode, isSaved := ctrl.torrentStorageMode(ih)
 		assert.Equal(t, stream.MemoryStorage, mode, "a torrent whose data is in memory must stream from memory")
 		assert.True(t, isSaved)
+		assert.True(t, ctrl.inMemoryFallback(ih), "the background downloader must leave it alone")
 	})
 }
 

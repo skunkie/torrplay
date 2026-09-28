@@ -271,6 +271,14 @@ func (c *Controller) torrentStorageMode(ih metainfo.Hash) (mode stream.StorageMo
 	}
 }
 
+// inMemoryFallback reports whether a loaded torrent was loaded for file storage
+// but holds its data in memory storage.
+func (c *Controller) inMemoryFallback(ih metainfo.Hash) bool {
+	c.torrentTracker.mu.RLock()
+	defer c.torrentTracker.mu.RUnlock()
+	return c.torrentTracker.torrents[ih].memoryFallback
+}
+
 // cancelPreload stops a torrent's preload in the current stream pool.
 func (c *Controller) cancelPreload(ih metainfo.Hash) {
 	if pool := c.streamPool.Load(); pool != nil {

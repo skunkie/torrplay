@@ -35,6 +35,9 @@ type Downloader struct {
 	db              databaseReader
 	downloading     map[metainfo.Hash]struct{}
 	fileStoragePath string
+	// inMemoryStorage reports whether a loaded torrent holds its data in
+	// memory storage although it was saved for file storage.
+	inMemoryStorage func(metainfo.Hash) bool
 	logger          *slog.Logger
 	metrics         *metrics.Metrics
 	mu              sync.Mutex
@@ -56,8 +59,11 @@ type Downloader struct {
 // New creates a new Downloader. streaming reports whether any file is being
 // streamed, which pauses background downloads; nil means never. waitForInfo
 // waits for a torrent's metadata, so the caller can count the wait as one that
-// needs the torrent loaded; nil waits up to gotInfoTimeout.
-func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, streaming func() bool, waitForInfo func(*torrent.Torrent) error) *Downloader {
+// needs the torrent loaded; nil waits up to gotInfoTimeout. inMemoryStorage
+// reports whether a loaded torrent holds its data in memory storage although it
+// was saved for file storage, which a background download would only churn;
+// nil means never.
+func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, streaming func() bool, waitForInfo func(*torrent.Torrent) error, inMemoryStorage func(metainfo.Hash) bool) *Downloader {
 	if waitForInfo == nil {
 		waitForInfo = waitForInfoTimeout
 	}
@@ -66,6 +72,7 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		db:              db,
 		downloading:     make(map[metainfo.Hash]struct{}),
 		fileStoragePath: fsp,
+		inMemoryStorage: inMemoryStorage,
 		logger:          logger,
 		metrics:         m,
 		pieceCompletion: pc,
@@ -290,7 +297,8 @@ func (d *Downloader) processTorrents() {
 			continue
 		}
 
-		shouldDownload := downloaderEnabled && !isStreaming && !writeFailed
+		inMemory := d.inMemoryStorage != nil && d.inMemoryStorage(t.Hash)
+		shouldDownload := downloaderEnabled && !isStreaming && !writeFailed && !inMemory
 
 		if shouldDownload {
 			if !isDownloading {
