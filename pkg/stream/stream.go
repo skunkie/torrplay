@@ -1135,10 +1135,14 @@ func (p *Pool) Close() {
 	p.logger.Debug("stream pool closed")
 }
 
+// expireInterval is how often expireLoop runs. It matches the shortest linger
+// timeout memory pressure selects, so that timeout holds.
+const expireInterval = time.Second
+
 // expireLoop periodically closes readers that have lingered past the
 // effective linger timeout and expires preloads.
 func (p *Pool) expireLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(expireInterval)
 	defer ticker.Stop()
 
 	for {

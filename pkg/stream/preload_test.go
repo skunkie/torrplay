@@ -239,6 +239,31 @@ func TestPool_Preload(t *testing.T) {
 		assert.Empty(t, preloadClaims(pool, to), "it must not claim its pieces again")
 	})
 
+	t.Run("keeps its ready TTL when it downloads a lost piece again", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "again")
+		writePieces(t, to, data, allPieces(to)...)
+		pool := newPool(t, nil)
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+		readyAt := time.Now().Add(-time.Minute)
+		pool.mu.Lock()
+		pool.preloads[to.InfoHash()].readyAt = readyAt
+		pool.mu.Unlock()
+
+		corrupt := slices.Clone(data)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, to, corrupt, 3)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadRunning)
+		writePieces(t, to, data, 3)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		assert.True(t, pool.preloads[to.InfoHash()].readyAt.Equal(readyAt), "the ready TTL must run from when it first became ready")
+	})
+
 	t.Run("waits for a slot when it loses a piece while every slot is taken", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
@@ -866,13 +891,19 @@ func TestPool_PreloadStallTimeout(t *testing.T) {
 		to, file, data := addHashedTorrent(t, c, "movie")
 		_, err := pool.Preload(file, MemoryStorage)
 		require.NoError(t, err)
-		stalledFor(pool, to.InfoHash(), time.Hour)
+		// Just short of the timeout, so the pool's own expiry tick cannot
+		// fail the preload while the piece arrives.
+		stalledFor(pool, to.InfoHash(), time.Minute-10*time.Second)
 
 		writePieces(t, to, data, 0)
 		require.Eventually(t, func() bool {
 			status, _ := pool.PreloadStatus(to.InfoHash())
 			return status.CompletedBytes == 64
 		}, 5*time.Second, time.Millisecond)
+		pool.mu.Lock()
+		progressAt := pool.preloads[to.InfoHash()].progressAt
+		pool.mu.Unlock()
+		assert.WithinDuration(t, time.Now(), progressAt, 5*time.Second, "a completed piece must restart the timer")
 		pool.expirePreloads()
 		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()))
 	})
@@ -889,10 +920,17 @@ func TestPool_PreloadStallTimeout(t *testing.T) {
 		pool.mu.Lock()
 		require.Equal(t, []int{0, 1, 2}, pool.preloads[to.InfoHash()].pieces)
 		pool.mu.Unlock()
-		stalledFor(pool, to.InfoHash(), time.Hour)
 
-		// Another viewer's playback completes a piece the preload waits behind.
+		// Another viewer's playback completes a piece the preload waits
+		// behind, after the preload last saw progress an hour ago. The
+		// timer is rewound together with the progress it last saw, so an
+		// expiry tick of the pool itself cannot fail the preload first.
 		writePieces(t, to, data, 8)
+		pool.mu.Lock()
+		pl := pool.preloads[to.InfoHash()]
+		pl.progressAt = time.Now().Add(-time.Hour)
+		pl.torrentCompleted = 0
+		pool.mu.Unlock()
 		pool.expirePreloads()
 		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "a torrent still downloading is not stalled")
 

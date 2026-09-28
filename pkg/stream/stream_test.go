@@ -734,6 +734,19 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 		assert.Zero(t, pool.StreamingTorrentCount())
 	})
 
+	t.Run("closes within the pressure-shortened timeout", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addTestTorrent(t, c)
+		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Hour, MemoryUsage: func() float64 { return 0.95 }})
+		defer pool.Close()
+
+		_, release := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
+		release()
+		require.True(t, pool.HasReaders(to.InfoHash()), "a released reader lingers")
+		assert.Eventually(t, func() bool { return !pool.HasReaders(to.InfoHash()) }, 3*time.Second, 10*time.Millisecond,
+			"the expiry loop must close a reader lingering past the 1 s pressure timeout")
+	})
+
 	lingering := func(p *Pool, lingered time.Duration) uint64 {
 		key := uint64(1)
 		p.readers[key] = &streamReader{

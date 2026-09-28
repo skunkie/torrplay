@@ -127,8 +127,8 @@ type preload struct {
 	// piece, or last saw its torrent complete more data. The stall timeout
 	// runs from it.
 	progressAt time.Time
-	// readyAt is when the preload became ready. The ready TTL of a preload
-	// whose file has not been read runs from it.
+	// readyAt is when the preload first became ready. The ready TTL of a
+	// preload whose file has not been read runs from it.
 	readyAt     time.Time
 	reservation preloadReservation
 	reserved    bool
@@ -599,14 +599,20 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 	switch {
 	case pl.state == PreloadRunning && complete:
 		pl.state = PreloadReady
-		pl.readyAt = time.Now()
+		now := time.Now()
+		// A preload that downloads a lost piece again keeps the ready TTL it
+		// started when it first became ready, as one whose piece returns
+		// while it waits does.
+		if pl.readyAt.IsZero() {
+			pl.readyAt = now
+		}
 		p.unclaimPreloadLocked(pl)
 		p.logger.Debug("preload ready",
 			slog.String("hash", pl.infoHash.HexString()),
 			slog.String("file", pl.file.Path()))
 		// Playback that started and ended while the preload ran no longer
 		// needs its cache.
-		if p.cachedPreloadExpiredLocked(pl, pl.readyAt) {
+		if p.cachedPreloadExpiredLocked(pl, now) {
 			p.removePreloadLocked(pl.infoHash)
 		}
 		p.dispatchPreloadsLocked()
