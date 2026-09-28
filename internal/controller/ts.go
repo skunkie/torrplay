@@ -285,7 +285,8 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	}
 
 	if utils.Val(params.Preload) {
-		if c.waitForInfoOrDrop(to) != nil {
+		if err := c.waitForInfoOrDrop(to); err != nil {
+			api.HandleError(w, err)
 			return
 		}
 
