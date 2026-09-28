@@ -2005,7 +2005,8 @@ func (c *Controller) memoryWriteFailed(to *torrent.Torrent, err error, logged *s
 	to.DisallowDataDownload()
 	logged.Do(func() {
 		c.logger.Load().Error("stopped downloading torrent whose pieces are larger than the memory limit",
-			"hash", to.InfoHash(), "pieceLength", to.Info().PieceLength)
+			"hash", to.InfoHash(), "pieceLength", to.Info().PieceLength,
+			"memoryLimit", c.storageClient.Load().MemoryStats().LimitBytes)
 	})
 }
 
