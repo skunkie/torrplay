@@ -44,6 +44,16 @@ func TestResolvePlaybackOffset(t *testing.T) {
 		}
 	})
 
+	t.Run("matroska cluster at the position is not read", func(t *testing.T) {
+		file, secondClusterOffset, _ := buildIndexedMatroska(t, 1)
+		reader := &offsetsReader{ReaderAt: bytes.NewReader(file)}
+
+		_, ok, err := ResolvePlaybackOffset(reader, int64(len(file)), "movie.mkv", 12)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.NotContains(t, reader.offsets, secondClusterOffset, "resolution must not wait for the cluster's data")
+	})
+
 	t.Run("matroska cues past clusters without a seekhead", func(t *testing.T) {
 		file, _, firstClusterOffset := buildIndexedMatroska(t, 0)
 		reader := &furthestReader{ReaderAt: bytes.NewReader(file)}
@@ -122,6 +132,17 @@ func (r zeroPaddedReader) ReadAt(b []byte, off int64) (int, error) {
 		copy(b, r[off:])
 	}
 	return len(b), nil
+}
+
+// offsetsReader records the offset of each read through it.
+type offsetsReader struct {
+	io.ReaderAt
+	offsets []int64
+}
+
+func (r *offsetsReader) ReadAt(b []byte, off int64) (int, error) {
+	r.offsets = append(r.offsets, off)
+	return r.ReaderAt.ReadAt(b, off)
 }
 
 // furthestReader records the furthest offset read through it.

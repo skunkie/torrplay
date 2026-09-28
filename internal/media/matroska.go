@@ -14,26 +14,25 @@ import (
 )
 
 const (
-	matroskaEBMLID                = 0x1A45DFA3
-	matroskaSegmentID             = 0x18538067
-	matroskaSeekHeadID            = 0x114D9B74
-	matroskaSeekEntryID           = 0x4DBB
-	matroskaSeekIdentifierID      = 0x53AB
-	matroskaSeekPositionID        = 0x53AC
-	matroskaInfoID                = 0x1549A966
-	matroskaTimestampScaleID      = 0x2AD7B1
-	matroskaTracksID              = 0x1654AE6B
-	matroskaTrackEntryID          = 0xAE
-	matroskaTrackNumberID         = 0xD7
-	matroskaTrackTypeID           = 0x83
-	matroskaCuesID                = 0x1C53BB6B
-	matroskaCuePointID            = 0xBB
-	matroskaCueTimeID             = 0xB3
-	matroskaCueTrackPositionsID   = 0xB7
-	matroskaCueTrackID            = 0xF7
-	matroskaCueClusterPositionID  = 0xF1
-	matroskaCueRelativePositionID = 0xF0
-	matroskaClusterID             = 0x1F43B675
+	matroskaEBMLID               = 0x1A45DFA3
+	matroskaSegmentID            = 0x18538067
+	matroskaSeekHeadID           = 0x114D9B74
+	matroskaSeekEntryID          = 0x4DBB
+	matroskaSeekIdentifierID     = 0x53AB
+	matroskaSeekPositionID       = 0x53AC
+	matroskaInfoID               = 0x1549A966
+	matroskaTimestampScaleID     = 0x2AD7B1
+	matroskaTracksID             = 0x1654AE6B
+	matroskaTrackEntryID         = 0xAE
+	matroskaTrackNumberID        = 0xD7
+	matroskaTrackTypeID          = 0x83
+	matroskaCuesID               = 0x1C53BB6B
+	matroskaCuePointID           = 0xBB
+	matroskaCueTimeID            = 0xB3
+	matroskaCueTrackPositionsID  = 0xB7
+	matroskaCueTrackID           = 0xF7
+	matroskaCueClusterPositionID = 0xF1
+	matroskaClusterID            = 0x1F43B675
 )
 
 // maxMatroskaCuesBytes bounds the Cues element read into memory. Cues take a
@@ -51,10 +50,9 @@ type matroskaElement struct {
 }
 
 type matroskaCue struct {
-	clusterPosition  uint64
-	relativePosition uint64
-	time             uint64
-	track            uint64
+	clusterPosition uint64
+	time            uint64
+	track           uint64
 }
 
 func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float64) (int64, bool, error) {
@@ -123,23 +121,10 @@ func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float
 	if cue.clusterPosition > math.MaxInt64 {
 		return 0, false, nil
 	}
-	clusterOffset := segment.dataStart + int64(cue.clusterPosition)
-	cluster, clusterFound, err := readMatroskaElement(reader, clusterOffset, segment.dataEnd)
-	if err != nil || !clusterFound || cluster.id != matroskaClusterID {
-		return 0, false, err
-	}
-	resolved := cluster.offset
-	if cue.relativePosition > 0 {
-		if cue.relativePosition > math.MaxInt64 {
-			return 0, false, nil
-		}
-		relativePosition := int64(cue.relativePosition)
-		if relativePosition > cluster.dataEnd-cluster.dataStart {
-			return 0, false, nil
-		}
-		resolved = cluster.dataStart + relativePosition
-	}
-	if resolved < 0 || resolved >= size {
+	// The cluster is not read to check it: it lies away from the head and
+	// tail, so reading it would wait for its data to download.
+	resolved := segment.dataStart + int64(cue.clusterPosition)
+	if resolved < segment.dataStart || resolved >= min(size, segment.dataEnd) {
 		return 0, false, nil
 	}
 	return resolved, true, nil
@@ -334,14 +319,6 @@ func readMatroskaCuePoint(reader io.ReaderAt, point matroskaElement, videoTrack 
 					cue.clusterPosition, err = readMatroskaUint(reader, clusterElement)
 					if err != nil {
 						return cue, false, err
-					}
-					if relative, hasRelative, findErr := findMatroskaChild(reader, positions, matroskaCueRelativePositionID); findErr != nil {
-						return cue, false, findErr
-					} else if hasRelative {
-						cue.relativePosition, err = readMatroskaUint(reader, relative)
-						if err != nil {
-							return cue, false, err
-						}
 					}
 					return cue, true, nil
 				}
