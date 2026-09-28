@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,7 @@ type controllerRuntimeConfig struct {
 	configureClient  func(*torrent.ClientConfig)
 	fetchTrackers    func(context.Context, *httpclient.Client) ([][]string, error)
 	gotInfoTimeout   time.Duration
+	setMemoryLimit   func(int64) int64
 }
 
 func defaultControllerRuntimeConfig() controllerRuntimeConfig {
@@ -85,6 +87,7 @@ func defaultControllerRuntimeConfig() controllerRuntimeConfig {
 		clientCloseDelay: 500 * time.Millisecond,
 		fetchTrackers:    utils.FetchTrackers,
 		gotInfoTimeout:   30 * time.Second,
+		setMemoryLimit:   debug.SetMemoryLimit,
 	}
 }
 
@@ -180,6 +183,9 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	if runtimeConfig.gotInfoTimeout <= 0 {
 		runtimeConfig.gotInfoTimeout = defaults.gotInfoTimeout
+	}
+	if runtimeConfig.setMemoryLimit == nil {
+		runtimeConfig.setMemoryLimit = defaults.setMemoryLimit
 	}
 	// A zero close delay intentionally disables the production settling delay.
 	if runtimeConfig.clientCloseDelay < 0 {
@@ -998,6 +1004,7 @@ func (c *Controller) configureTorrentClient() error {
 	}
 
 	storageClient := memstorage.New(*currentSettings.MaxMemory, logger)
+	c.applyHeapLimit(*currentSettings.MaxMemory)
 	clientConfig.DefaultStorage = storageClient
 
 	client, err := torrent.NewClient(clientConfig)

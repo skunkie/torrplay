@@ -7,6 +7,7 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/anacrolix/torrent/metainfo"
@@ -151,4 +152,31 @@ func TestUpdateSettingsMemoryShrinkEvictsOnlyPreloadsThatDoNotFit(t *testing.T) 
 		}
 	}
 	assert.Equal(t, 1, kept, "only the preloads that do not fit may be evicted")
+}
+
+func TestHeapLimitFollowsMaxMemory(t *testing.T) {
+	newController := func(t *testing.T) (*Controller, *atomic.Int64) {
+		t.Helper()
+		var limit atomic.Int64
+		runtimeConfig := testControllerRuntimeConfig()
+		runtimeConfig.setMemoryLimit = limit.Swap
+		ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+		t.Cleanup(cleanup)
+		return ctrl, &limit
+	}
+
+	t.Run("startup and resize", func(t *testing.T) {
+		ctrl, limit := newController(t)
+		assert.Equal(t, *ctrl.settings.Load().MaxMemory+heapLimitOverhead, limit.Load())
+
+		require.Equal(t, http.StatusNoContent, patchMaxMemory(t, ctrl, 512<<20).Recorder.Code)
+		assert.Equal(t, int64(512<<20+heapLimitOverhead), limit.Load())
+	})
+
+	t.Run("gomemlimit takes precedence", func(t *testing.T) {
+		t.Setenv("GOMEMLIMIT", "1GiB")
+		ctrl, limit := newController(t)
+		require.Equal(t, http.StatusNoContent, patchMaxMemory(t, ctrl, 512<<20).Recorder.Code)
+		assert.Zero(t, limit.Load())
+	})
 }
