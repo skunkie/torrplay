@@ -758,7 +758,7 @@ describe('TorrentPlayerDialog', () => {
       expect(screen.getByTestId('player-preload-badge')).toHaveTextContent('Buffering 70%');
     });
 
-    it('keeps polling while the preload is queued', async () => {
+    it('plays at once and keeps the preload while it is queued', async () => {
       vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
         fileIndex: 0,
         targetBytes: 1000,
@@ -769,16 +769,7 @@ describe('TorrentPlayerDialog', () => {
         downloadRate: 0,
         totalPeers: 0,
       });
-      const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue({
-        fileIndex: 0,
-        targetBytes: 1000,
-        completedBytes: 0,
-        progress: 0,
-        status: 'queued',
-        activePeers: 0,
-        downloadRate: 0,
-        totalPeers: 0,
-      });
+      const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
 
       render(
         <TorrentPlayerDialog
@@ -790,9 +781,9 @@ describe('TorrentPlayerDialog', () => {
       );
 
       await waitFor(() => {
-        expect(getPreloadSpy).toHaveBeenCalled();
+        expect(screen.queryByTestId('player-preload-badge')).not.toBeInTheDocument();
       });
-      expect(screen.getByTestId('player-preload-badge')).toBeInTheDocument();
+      expect(cancelSpy).not.toHaveBeenCalled();
     });
 
     it('stops polling without clearing status when the preload is evicted', async () => {
