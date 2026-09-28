@@ -7,6 +7,7 @@
 import { type PlayerSrc } from '@vidstack/react';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { type PlaybackPositionKey } from '@/lib/playback-position';
 import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import DemoVideoPlayer from './demo-video-player';
@@ -27,6 +28,7 @@ interface VideoPlayerLayoutProps {
     onNext?: () => void
   },
   preloadBadge?: PreloadBadgeInfo | null,
+  resumeKey?: PlaybackPositionKey,
   isDemo?: boolean
 }
 
@@ -37,6 +39,7 @@ export const VideoPlayerLayout = ({
   onExit,
   playlistNavigation,
   preloadBadge,
+  resumeKey,
   isDemo = false,
 }: VideoPlayerLayoutProps) => {
   return (
@@ -58,6 +61,7 @@ export const VideoPlayerLayout = ({
               onExit={onExit}
               playlistNavigation={playlistNavigation}
               preloadBadge={preloadBadge}
+              resumeKey={resumeKey}
             />
           ) : (
             <VideoPlayer
@@ -65,6 +69,7 @@ export const VideoPlayerLayout = ({
               onExit={onExit}
               playlistNavigation={playlistNavigation}
               preloadBadge={preloadBadge}
+              resumeKey={resumeKey}
             />
           )
         )}

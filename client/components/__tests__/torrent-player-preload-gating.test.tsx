@@ -7,14 +7,19 @@ import { expect, it, vi } from 'vitest';
 
 import { TorrentPlayerDialog } from '@/components/torrent-player-dialog';
 import type { VideoPlayerProps } from '@/components/video-player';
-import type { Torrent } from '@/lib/types/api';
+import { savePlaybackPositionSeconds } from '@/lib/playback-position';
+import type { PreloadRequest, Torrent } from '@/lib/types/api';
 
 const observedPreloadBadges = vi.hoisted(() => [] as VideoPlayerProps['preloadBadge'][]);
-const { startPreloadMock } = vi.hoisted(() => ({ startPreloadMock: vi.fn(() => new Promise(() => {})) }));
+const observedResumeKeys = vi.hoisted(() => [] as VideoPlayerProps['resumeKey'][]);
+const { startPreloadMock } = vi.hoisted(() => ({
+  startPreloadMock: vi.fn<(hash: string, request: PreloadRequest) => Promise<never>>(() => new Promise(() => {})),
+}));
 
 vi.mock('@/components/video-player', () => ({
   default: (props: VideoPlayerProps) => {
     observedPreloadBadges.push(props.preloadBadge);
+    observedResumeKeys.push(props.resumeKey);
     return <div data-testid='mock-video-player' />;
   },
 }));
@@ -90,4 +95,40 @@ it('does not restart an in-flight preload when the torrent prop is replaced by a
   );
 
   expect(startPreloadMock).toHaveBeenCalledTimes(1);
+});
+
+it('preloads from the saved playback position and resumes the player there', () => {
+  localStorage.clear();
+  savePlaybackPositionSeconds('1234567890', 'movie.mp4', 900);
+  observedResumeKeys.length = 0;
+  startPreloadMock.mockClear();
+
+  render(
+    <TorrentPlayerDialog
+      torrent={makeTorrent()}
+      open={true}
+      onOpenChange={vi.fn()}
+      enablePreload={true}
+    />,
+  );
+
+  expect(startPreloadMock).toHaveBeenCalledWith('1234567890', { filePath: 'movie.mp4', playbackPositionSeconds: 900 });
+  expect(observedResumeKeys[observedResumeKeys.length - 1]).toEqual({ hash: '1234567890', filePath: 'movie.mp4' });
+  localStorage.clear();
+});
+
+it('preloads the head and tail only without a saved playback position', () => {
+  localStorage.clear();
+  startPreloadMock.mockClear();
+
+  render(
+    <TorrentPlayerDialog
+      torrent={makeTorrent()}
+      open={true}
+      onOpenChange={vi.fn()}
+      enablePreload={true}
+    />,
+  );
+
+  expect(startPreloadMock).toHaveBeenCalledWith('1234567890', { filePath: 'movie.mp4' });
 });

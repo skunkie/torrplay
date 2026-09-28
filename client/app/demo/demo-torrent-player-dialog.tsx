@@ -9,6 +9,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { TorrentPlayerDialogLayout } from '@/components/torrent-player-dialog-layout';
 import { getDemoVideoSource } from '@/lib/demo-media';
 import { getDemoSubtitleTracks } from '@/lib/demo-subtitles';
+import { type PlaybackPositionKey } from '@/lib/playback-position';
 import type { Torrent, TorrentFile } from '@/lib/types/api';
 import { getInitialVideoFile, getVideoFiles } from '@/lib/video-utils';
 
@@ -127,6 +128,12 @@ export function DemoTorrentPlayerDialog({
   }, [selectedFile, torrent]);
 
   const isPlayerVisible = !!videoPlayerOptions;
+  const torrentHash = torrent?.hash;
+  const selectedFilePath = selectedFile?.path;
+  const resumeKey = useMemo<PlaybackPositionKey | undefined>(
+    () => (torrentHash && selectedFilePath ? { hash: torrentHash, filePath: selectedFilePath } : undefined),
+    [selectedFilePath, torrentHash],
+  );
   const selectedFileIndex = selectedFile
     ? videoFiles.findIndex(file => file.path === selectedFile.path)
     : -1;
@@ -172,6 +179,7 @@ export function DemoTorrentPlayerDialog({
       handleExit={handleExit}
       playlistNavigation={playlistNavigation}
       preloadBadge={preloadBadge}
+      resumeKey={resumeKey}
       isDemo={true}
     />
   );

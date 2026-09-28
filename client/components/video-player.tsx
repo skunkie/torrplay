@@ -26,6 +26,7 @@ import {
   probeAudioTracks,
 } from '@/lib/mkv-audio';
 import { isMkvOrWebmStream } from '@/lib/mkv-subtitles';
+import { getPlaybackPositionSeconds, type PlaybackPositionKey, savePlaybackPositionSeconds } from '@/lib/playback-position';
 import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 import { getVidstackVideoElement } from '@/lib/vidstack-media';
 
@@ -47,6 +48,10 @@ function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
   return detail.message || 'Playback failed in the internal player.';
 }
 
+// PLAYBACK_POSITION_SAVE_INTERVAL_MS is how often playback saves its position
+// while it plays. Pausing, seeking, and leaving the source save it at once.
+const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5000;
+
 export interface VideoPlayerProps {
   options: {
     src?: PlayerSrc,
@@ -60,7 +65,10 @@ export interface VideoPlayerProps {
     onNext?: () => void
   },
   internalOnly?: boolean,
-  preloadBadge?: PreloadBadgeInfo | null
+  preloadBadge?: PreloadBadgeInfo | null,
+  // resumeKey, when set, names the torrent file whose playback resumes from
+  // its saved position and saves its position as it plays.
+  resumeKey?: PlaybackPositionKey
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();
@@ -72,6 +80,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   playlistNavigation,
   internalOnly = false,
   preloadBadge,
+  resumeKey,
 }) => {
   const isPreloading = !!preloadBadge;
   const player = useRef<MediaPlayerInstance>(null);
@@ -80,6 +89,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [preferenceLoaded, setPreferenceLoaded] = useState(internalOnly);
   const hasPlayedRef = useRef(false);
   const handleEndedRef = useRef<(() => void) | null>(null);
+  // resumeFromRef holds the saved position the current source resumes from,
+  // and resumedRef whether the source has had its chance to resume. Positions
+  // are recorded only after that, so the start of a source never overwrites
+  // its saved position.
+  const resumeFromRef = useRef(0);
+  const resumedRef = useRef(false);
+  const lastPositionRef = useRef<number | null>(null);
+  const lastPositionSaveMsRef = useRef(0);
 
   // Audio track management
   const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
@@ -94,6 +111,40 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     : (options.src && 'src' in options.src && typeof options.src.src === 'string')
       ? options.src.src
       : undefined;
+
+  const resumeHash = resumeKey?.hash;
+  const resumeFilePath = resumeKey?.filePath;
+
+  // Each source resumes from the position saved for it when it loads, and its
+  // latest position is saved when it is left or the page is hidden.
+  useEffect(() => {
+    resumeFromRef.current = resumeHash && resumeFilePath
+      ? getPlaybackPositionSeconds(resumeHash, resumeFilePath)
+      : 0;
+    resumedRef.current = false;
+    lastPositionRef.current = null;
+    lastPositionSaveMsRef.current = 0;
+    const flush = () => {
+      if (resumeHash && resumeFilePath && lastPositionRef.current !== null) {
+        savePlaybackPositionSeconds(resumeHash, resumeFilePath, lastPositionRef.current);
+      }
+    };
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, [resumeHash, resumeFilePath, streamUrl]);
+
+  const recordPosition = (positionSeconds: number, force: boolean) => {
+    if (!resumeHash || !resumeFilePath || !resumedRef.current || !hasPlayedRef.current) return;
+    if (!Number.isFinite(positionSeconds) || positionSeconds < 0) return;
+    lastPositionRef.current = positionSeconds;
+    const now = Date.now();
+    if (!force && now - lastPositionSaveMsRef.current < PLAYBACK_POSITION_SAVE_INTERVAL_MS) return;
+    lastPositionSaveMsRef.current = now;
+    savePlaybackPositionSeconds(resumeHash, resumeFilePath, positionSeconds);
+  };
 
   const isMkv = isMkvOrWebmStream(streamUrl) ||
     (typeof options.src === 'object' && 'type' in options.src && options.src.type === 'video/webm');
@@ -250,6 +301,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onPause();
     }
+    // A finished file starts from the beginning next time.
+    recordPosition(0, true);
     if (handleEndedRef.current && hasPlayedRef.current) {
       handleEndedRef.current();
     }
@@ -272,11 +325,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onPause();
     }
+    if (player.current && !player.current.state?.ended) {
+      recordPosition(player.current.currentTime, true);
+    }
   };
 
   const handleSeeked = () => {
     if (isWasmAudioActive && syncEngineRef.current && player.current) {
       syncEngineRef.current.onSeek(player.current.currentTime);
+    }
+    if (player.current) {
+      recordPosition(player.current.currentTime, true);
     }
   };
 
@@ -284,6 +343,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onTimeUpdate(detail.currentTime);
     }
+    recordPosition(detail.currentTime, false);
   };
 
   const handleWaiting = () => {
@@ -391,6 +451,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const handleCanPlay = useCallback(() => {
     canPlayRef.current = true;
     setPlaybackError(null);
+    if (!resumedRef.current && player.current) {
+      resumedRef.current = true;
+      const resumeFrom = resumeFromRef.current;
+      const duration = player.current.duration;
+      if (resumeFrom > 0 && (!duration || resumeFrom < duration)) {
+        player.current.currentTime = resumeFrom;
+      }
+    }
     if (!isPreloading && options.autoPlay) {
       tryPlay();
     }
