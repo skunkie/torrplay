@@ -15,6 +15,7 @@ import (
 	"io"
 	"maps"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -30,6 +31,8 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
+	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -84,17 +87,12 @@ func addStressTorrent(t *testing.T, ctrl *Controller, name string, seed uint64) 
 // throttled webseed, and saves it with memory storage.
 func addStressTorrentFiles(t *testing.T, ctrl *Controller, name string, seed uint64, sizes ...int) stressTorrent {
 	t.Helper()
-	files := make([][]byte, 0, len(sizes))
-	infoFiles := make([]metainfo.FileInfo, 0, len(sizes))
-	var all []byte
+	files, infoBytes := stressInfo(t, name, seed, sizes...)
+	var info metainfo.Info
+	require.NoError(t, bencode.Unmarshal(infoBytes, &info))
 	paths := make(map[string][]byte)
-	for i, size := range sizes {
-		data := stressData(seed*16+uint64(i), size)
-		path := fmt.Sprintf("%s-%d.mkv", name, i)
-		files = append(files, data)
-		infoFiles = append(infoFiles, metainfo.FileInfo{Length: int64(size), Path: []string{path}})
-		paths["/"+name+"/"+path] = data
-		all = append(all, data...)
+	for i := range info.Files {
+		paths["/"+name+"/"+info.Files[i].Path[0]] = files[i]
 	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -107,6 +105,27 @@ func addStressTorrentFiles(t *testing.T, ctrl *Controller, name string, seed uin
 	}))
 	t.Cleanup(server.Close)
 
+	meta := &metainfo.MetaInfo{InfoBytes: infoBytes, UrlList: metainfo.UrlList{server.URL + "/"}}
+	_, _, err := ctrl.currentClient().AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta))
+	require.NoError(t, err)
+	st := stressTorrent{hash: meta.HashInfoBytes(), name: name, files: files, payload: files[0]}
+	saveStressTorrent(t, ctrl, st, nil, api.Memory)
+	return st
+}
+
+// stressInfo builds the info of a torrent of one file per size, returning the
+// files' data and the bencoded info.
+func stressInfo(t *testing.T, name string, seed uint64, sizes ...int) ([][]byte, []byte) {
+	t.Helper()
+	files := make([][]byte, 0, len(sizes))
+	infoFiles := make([]metainfo.FileInfo, 0, len(sizes))
+	var all []byte
+	for i, size := range sizes {
+		data := stressData(seed*16+uint64(i), size)
+		files = append(files, data)
+		infoFiles = append(infoFiles, metainfo.FileInfo{Length: int64(size), Path: []string{fmt.Sprintf("%s-%d.mkv", name, i)}})
+		all = append(all, data...)
+	}
 	pieces := make([]byte, 0, (len(all)+stressPieceLength-1)/stressPieceLength*sha1.Size)
 	for offset := 0; offset < len(all); offset += stressPieceLength {
 		sum := sha1.Sum(all[offset:min(offset+stressPieceLength, len(all))])
@@ -114,21 +133,29 @@ func addStressTorrentFiles(t *testing.T, ctrl *Controller, name string, seed uin
 	}
 	infoBytes, err := bencode.Marshal(metainfo.Info{Name: name, PieceLength: stressPieceLength, Pieces: pieces, Files: infoFiles})
 	require.NoError(t, err)
-	meta := &metainfo.MetaInfo{InfoBytes: infoBytes, UrlList: metainfo.UrlList{server.URL + "/"}}
-	_, _, err = ctrl.currentClient().AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta))
-	require.NoError(t, err)
+	return files, infoBytes
+}
 
-	ih := meta.HashInfoBytes()
-	storage := api.Memory
-	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{Torrent: api.Torrent{
-		Hash:      ih,
-		Magnet:    utils.MagnetURIFromHash(ih),
-		Name:      name,
-		Title:     &name,
-		Storage:   &storage,
-		TotalSize: int64(len(all)),
-	}}))
-	return stressTorrent{hash: ih, name: name, files: files, payload: files[0]}
+// saveStressTorrent saves a torrent in the database with the given storage,
+// and with its info when infoBytes is set, so the controller can load it from
+// the database.
+func saveStressTorrent(t *testing.T, ctrl *Controller, st stressTorrent, infoBytes []byte, storage api.TorrentStorage) {
+	t.Helper()
+	var total int64
+	for _, file := range st.files {
+		total += int64(len(file))
+	}
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash:      st.hash,
+			Magnet:    utils.MagnetURIFromHash(st.hash),
+			Name:      st.name,
+			Title:     &st.name,
+			Storage:   &storage,
+			TotalSize: total,
+		},
+		InfoBytes: infoBytes,
+	}))
 }
 
 // stressClient drives the controller's HTTP API.
@@ -538,5 +565,202 @@ func TestPreloadChurn(t *testing.T) {
 		_, preloading := ctrl.preloadStatus(st.hash)
 		assert.False(t, preloading, "%s keeps a preload", st.name)
 	}
+	logStorage(t, ctrl, limit)
+}
+
+// stressSeeder is an in-process BitTorrent client that seeds complete
+// torrents to the controller's client over loopback TCP, with a shared upload
+// rate like a single remote peer.
+type stressSeeder struct {
+	client *torrent.Client
+	addr   net.Addr
+}
+
+func newStressSeeder(t *testing.T, uploadRate int) *stressSeeder {
+	t.Helper()
+	storageClient := memstorage.New(1<<30, nil)
+	cfg := torrent.NewDefaultClientConfig()
+	cfg.DefaultStorage = storageClient
+	cfg.DataDir = t.TempDir()
+	cfg.DisablePEX = true
+	cfg.DisableTrackers = true
+	cfg.DisableIPv6 = true
+	cfg.DisableUTP = true
+	cfg.DisableWebseeds = true
+	cfg.DisableWebtorrent = true
+	cfg.ListenHost = func(string) string { return "127.0.0.1" }
+	cfg.ListenPort = 0
+	cfg.NoDHT = true
+	cfg.NoDefaultPortForwarding = true
+	cfg.Seed = true
+	cfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(uploadRate), 256<<10)
+	client, err := torrent.NewClient(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		client.Close()
+		_ = storageClient.Close()
+	})
+	addrs := client.ListenAddrs()
+	require.NotEmpty(t, addrs)
+	return &stressSeeder{client: client, addr: addrs[0]}
+}
+
+// seed makes the seeder hold every piece of a torrent.
+func (s *stressSeeder) seed(t *testing.T, infoBytes []byte, files [][]byte) {
+	t.Helper()
+	to, _, err := s.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(&metainfo.MetaInfo{InfoBytes: infoBytes}))
+	require.NoError(t, err)
+	<-to.GotInfo()
+	all := bytes.Join(files, nil)
+	for index := range to.NumPieces() {
+		start := index * stressPieceLength
+		piece := to.Piece(index)
+		_, err := piece.Storage().WriteAt(all[start:min(start+stressPieceLength, len(all))], 0)
+		require.NoError(t, err)
+		require.NoError(t, piece.VerifyData())
+	}
+	require.Equal(t, to.Length(), to.BytesCompleted(), "the seeder must hold the whole torrent")
+}
+
+// newPeerController returns a controller whose torrent client connects to
+// peers over loopback TCP.
+func newPeerController(t *testing.T) *Controller {
+	t.Helper()
+	runtimeConfig := testControllerRuntimeConfig()
+	runtimeConfig.configureClient = func(config *torrent.ClientConfig) {
+		config.NoDHT = true
+		config.DisablePEX = true
+		config.DisableTrackers = true
+		config.DisableWebtorrent = true
+		config.DisableWebseeds = true
+		config.NoDefaultPortForwarding = true
+		config.DisableIPv6 = true
+		config.DisableUTP = true
+		config.ListenHost = func(string) string { return "127.0.0.1" }
+	}
+	ctrl, _ := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+	ctrl.Start()
+	return ctrl
+}
+
+// addPeerTorrent saves a torrent the seeder seeds, loads it the way the
+// controller loads saved torrents, and connects it to the seeder.
+func addPeerTorrent(t *testing.T, ctrl *Controller, seeder *stressSeeder, name string, seed uint64, storage api.TorrentStorage) stressTorrent {
+	t.Helper()
+	files, infoBytes := stressInfo(t, name, seed, stressFileSize)
+	seeder.seed(t, infoBytes, files)
+	st := stressTorrent{hash: metainfo.HashBytes(infoBytes), name: name, files: files, payload: files[0]}
+	saveStressTorrent(t, ctrl, st, infoBytes, storage)
+	to, err := ctrl.addTorrentByHash(st.hash)
+	require.NoError(t, err)
+	to.AddPeers([]torrent.PeerInfo{{Addr: seeder.addr, Trusted: true}})
+	return st
+}
+
+// TestStreamingFromPeer streams a file from a BitTorrent peer, seeking as a
+// player does, while two other torrents from the same peer preload, so
+// playback and preloads share one peer's upload. Without the webseed request
+// timer, it bounds the time to the first byte of each seek.
+func TestStreamingFromPeer(t *testing.T) {
+	const limit = 128 << 20
+	ctrl := newPeerController(t)
+	setTestMemoryLimit(t, ctrl, limit)
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	client := stressClient{t: t, server: server}
+	seeder := newStressSeeder(t, stressSeedRate)
+
+	preloaded := []stressTorrent{
+		addPeerTorrent(t, ctrl, seeder, "peer-a", 51, api.Memory),
+		addPeerTorrent(t, ctrl, seeder, "peer-b", 52, api.Memory),
+	}
+	streamed := addPeerTorrent(t, ctrl, seeder, "peer-streamed", 53, api.Memory)
+	for _, st := range preloaded {
+		client.preload(st, 0)
+	}
+
+	var worst time.Duration
+	for _, fraction := range []float64{0, 0.5, 0.1, 0.9, 0.3, 0.7} {
+		start := int64(fraction*stressFileSize) &^ (1<<20 - 1)
+		began := time.Now()
+		require.NoError(t, client.readRange(context.Background(), streamed, 0, start, start+1<<20))
+		latency := time.Since(began)
+		t.Logf("1 MiB at %2.0f%%: %v", 100*fraction, latency.Round(time.Millisecond))
+		worst = max(worst, latency)
+	}
+	// A 1 MiB range takes 64 ms at the peer's rate. The bound leaves room for
+	// connection setup and the peer's queued preload pieces, but not for
+	// playback waiting behind the preloads.
+	assert.Less(t, worst, 3*time.Second, "playback must not wait behind preloads from the same peer")
+
+	for _, st := range preloaded {
+		status := client.waitForPreloadEnd(st, 60*time.Second)
+		t.Logf("preload %s: %s, %d of %d MiB", st.name, status.Status, status.CompletedBytes>>20, status.TargetBytes>>20)
+		assert.Equal(t, api.Ready, status.Status)
+	}
+	logStorage(t, ctrl, limit)
+}
+
+// TestStreamingFileStorageBesideDownloader streams a file-storage torrent
+// from a peer while the background downloader has another file-storage
+// torrent, and checks that the downloader pauses for the stream, including
+// while its reader lingers, and resumes after it.
+func TestStreamingFileStorageBesideDownloader(t *testing.T) {
+	const limit = 128 << 20
+	ctrl := newPeerController(t)
+	ctrl.mu.Lock()
+	settings := ctrl.settings.Load()
+	settings.EnableDownloader = utils.Ptr(true)
+	settings.FileStoragePath = utils.Ptr(t.TempDir())
+	ctrl.mu.Unlock()
+	require.NoError(t, ctrl.db.UpdateSettings(database.FromAPISettings(settings)))
+	setTestMemoryLimit(t, ctrl, limit)
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	client := stressClient{t: t, server: server}
+	// A slow peer, so the background download is still running when the
+	// stream starts.
+	seeder := newStressSeeder(t, 4<<20)
+
+	background := addPeerTorrent(t, ctrl, seeder, "fs-background", 61, api.File)
+	streamed := addPeerTorrent(t, ctrl, seeder, "fs-streamed", 62, api.File)
+	downloader := ctrl.downloader.Load()
+	// Start runs a pass at once, on its own goroutine, instead of after the
+	// one-minute interval. Stop clears what is downloading, so a pass that
+	// wrongly resumes shows within moments.
+	cycle := func() {
+		downloader.Stop()
+		downloader.Start()
+	}
+	downloading := func() bool { return downloader.IsDownloading(background.hash) }
+
+	cycle()
+	require.Eventually(t, downloading, 5*time.Second, 10*time.Millisecond, "the downloader must download the saved file-storage torrent")
+
+	ctx := t.Context()
+	streaming := make(chan error, 1)
+	go func() {
+		for offset := int64(0); offset < 16<<20; offset += 4 << 20 {
+			if err := client.readRange(ctx, streamed, 0, offset, offset+4<<20); err != nil {
+				streaming <- err
+				return
+			}
+		}
+		streaming <- nil
+	}()
+	pool := ctrl.streamPool.Load()
+	require.Eventually(t, func() bool { return pool.HasReaders(streamed.hash) }, 10*time.Second, 10*time.Millisecond)
+	cycle()
+	assert.Never(t, downloading, time.Second, 10*time.Millisecond, "the downloader must pause while a file streams")
+	require.NoError(t, <-streaming, "the file-storage stream must read correctly")
+
+	require.True(t, pool.HasReaders(streamed.hash), "the finished stream's reader lingers")
+	cycle()
+	assert.Never(t, downloading, time.Second, 10*time.Millisecond, "a lingering reader keeps the downloader paused")
+
+	require.Eventually(t, func() bool { return pool.StreamingTorrentCount() == 0 }, 45*time.Second, 50*time.Millisecond,
+		"the lingering reader must close")
+	cycle()
+	assert.Eventually(t, downloading, 5*time.Second, 10*time.Millisecond, "the downloader must resume after the stream")
 	logStorage(t, ctrl, limit)
 }
