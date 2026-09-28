@@ -310,6 +310,14 @@ func TestStreamReadSeeker_Retire(t *testing.T) {
 	assert.Equal(t, []string{"read"}, events, "a retired stream must not touch its reader")
 }
 
+func TestStorageMode_String(t *testing.T) {
+	for mode, want := range map[StorageMode]string{MemoryStorage: "memory", FileStorage: "file", StorageMode(9): "unknown"} {
+		if got := mode.String(); got != want {
+			t.Errorf("StorageMode(%d).String() = %q, want %q", mode, got, want)
+		}
+	}
+}
+
 func TestPool_Close(t *testing.T) {
 	t.Run("serializes with active read", func(t *testing.T) {
 		pool := New(Config{Logger: testLogger()})
