@@ -283,7 +283,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		return nil, err
 	}
 
-	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers, c.isStreaming, c.waitForInfo, c.inMemoryFallback))
+	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers, c.downloaderHooks()))
 
 	if *appSettings.EnableDlna {
 		err = c.dlna.Start(*appSettings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
@@ -910,6 +910,16 @@ func (c *Controller) currentClient() *torrent.Client {
 	return c.client
 }
 
+// downloaderHooks returns how the background downloader asks the controller
+// about streaming, metadata, and storage.
+func (c *Controller) downloaderHooks() downloader.Hooks {
+	return downloader.Hooks{
+		InMemoryStorage: c.inMemoryFallback,
+		Streaming:       c.isStreaming,
+		WaitForInfo:     c.waitForInfo,
+	}
+}
+
 func (c *Controller) configureTorrentClient() error {
 	c.torrentConfigMu.Lock()
 	defer c.torrentConfigMu.Unlock()
@@ -1037,7 +1047,7 @@ func (c *Controller) configureTorrentClient() error {
 	if isReconfiguring {
 		c.downloader.Load().Stop()
 		c.trackers = newTrackers
-		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers, c.isStreaming, c.waitForInfo, c.inMemoryFallback)
+		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers, c.downloaderHooks())
 		c.downloader.Store(newDownloader)
 		if utils.Val(currentSettings.EnableDownloader) {
 			newDownloader.Start()

@@ -56,14 +56,25 @@ type Downloader struct {
 	writeFailed map[metainfo.Hash]struct{}
 }
 
-// New creates a new Downloader. streaming reports whether any file is being
-// streamed, which pauses background downloads; nil means never. waitForInfo
-// waits for a torrent's metadata, so the caller can count the wait as one that
-// needs the torrent loaded; nil waits up to gotInfoTimeout. inMemoryStorage
-// reports whether a loaded torrent holds its data in memory storage although it
-// was saved for file storage, which a background download would only churn;
-// nil means never.
-func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, streaming func() bool, waitForInfo func(*torrent.Torrent) error, inMemoryStorage func(metainfo.Hash) bool) *Downloader {
+// Hooks lets the downloader's owner take part in its decisions. A nil hook
+// keeps its default.
+type Hooks struct {
+	// InMemoryStorage reports whether a loaded torrent holds its data in
+	// memory storage although it was saved for file storage, which a
+	// background download would only churn. Nil means never.
+	InMemoryStorage func(metainfo.Hash) bool
+	// Streaming reports whether any file is being streamed, which pauses
+	// background downloads. Nil means never.
+	Streaming func() bool
+	// WaitForInfo waits for a torrent's metadata, so the owner can count the
+	// wait as one that needs the torrent loaded. Nil waits up to
+	// gotInfoTimeout.
+	WaitForInfo func(*torrent.Torrent) error
+}
+
+// New creates a new Downloader.
+func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, hooks Hooks) *Downloader {
+	waitForInfo := hooks.WaitForInfo
 	if waitForInfo == nil {
 		waitForInfo = waitForInfoTimeout
 	}
@@ -72,11 +83,11 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		db:              db,
 		downloading:     make(map[metainfo.Hash]struct{}),
 		fileStoragePath: fsp,
-		inMemoryStorage: inMemoryStorage,
+		inMemoryStorage: hooks.InMemoryStorage,
 		logger:          logger,
 		metrics:         m,
 		pieceCompletion: pc,
-		streaming:       streaming,
+		streaming:       hooks.Streaming,
 		trackers:        trackers,
 		waitForInfo:     waitForInfo,
 		wake:            make(chan struct{}, 1),
