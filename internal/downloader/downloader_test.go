@@ -166,8 +166,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, func() bool { return streaming })
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
-		// Piece priorities count only once the pieces' completion is known.
-		require.NoError(t, to.VerifyDataContext(t.Context()))
+		verifyData(t, to)
 
 		downloader.processTorrents()
 		require.True(t, downloader.IsDownloading(testHash))
@@ -198,7 +197,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		downloader := New(client, db, slog.New(slog.DiscardHandler), m, pc, td, nil, nil)
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
-		require.NoError(t, to.VerifyDataContext(t.Context()))
+		verifyData(t, to)
 		downloader.processTorrents()
 		require.True(t, downloader.IsDownloading(testHash))
 
@@ -332,7 +331,7 @@ func TestDownloader_Wake(t *testing.T) {
 	downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, streaming.Load)
 	to, err := client.AddTorrent(testMetaInfo)
 	require.NoError(t, err)
-	require.NoError(t, to.VerifyDataContext(t.Context()))
+	verifyData(t, to)
 	downloading := func() bool { return downloader.IsDownloading(testHash) }
 
 	downloader.Start()
@@ -430,4 +429,20 @@ func readFirstByte(t *testing.T, to *torrent.Torrent) error {
 	r.SetContext(ctx)
 	_, err := r.Read(make([]byte, 1))
 	return err
+}
+
+// verifyData checks the pieces of to and waits until their completion is
+// recorded, which the torrent client finishes after the check returns. Piece
+// priorities count only once it is.
+func verifyData(t *testing.T, to *torrent.Torrent) {
+	t.Helper()
+	require.NoError(t, to.VerifyDataContext(t.Context()))
+	require.Eventually(t, func() bool {
+		for index := range to.NumPieces() {
+			if to.PieceState(index).Marking {
+				return false
+			}
+		}
+		return true
+	}, time.Second, time.Millisecond)
 }
