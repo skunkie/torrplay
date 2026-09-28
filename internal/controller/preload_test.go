@@ -716,6 +716,27 @@ func TestController_TorrentStorageMode(t *testing.T) {
 			assert.Equal(t, tt.wantSaved, saved)
 		})
 	}
+
+	t.Run("saved with file storage but loaded into memory", func(t *testing.T) {
+		// A path below a regular file cannot be created, so the torrent
+		// falls back to memory storage.
+		blocker := filepath.Join(t.TempDir(), "file")
+		require.NoError(t, os.WriteFile(blocker, nil, 0o600))
+		ctrl.mu.Lock()
+		ctrl.settings.Load().FileStoragePath = utils.Ptr(filepath.Join(blocker, "storage"))
+		ctrl.mu.Unlock()
+		info := metainfo.Info{Name: "fallback.mkv", PieceLength: 1 << 20, Length: 1 << 20, Pieces: make([]byte, sha1.Size)}
+		infoBytes, err := bencode.Marshal(info)
+		require.NoError(t, err)
+		ih := metainfo.HashBytes(infoBytes)
+		saved(ih, api.File)
+		_, err = ctrl.loadTorrentSpec(&torrent.TorrentSpec{AddTorrentOpts: torrent.AddTorrentOpts{InfoHash: ih, InfoBytes: infoBytes}}, api.File)
+		require.NoError(t, err)
+
+		mode, isSaved := ctrl.torrentStorageMode(ih)
+		assert.Equal(t, stream.MemoryStorage, mode, "a torrent whose data is in memory must stream from memory")
+		assert.True(t, isSaved)
+	})
 }
 
 func TestDeleteTorrentClearsPreload(t *testing.T) {

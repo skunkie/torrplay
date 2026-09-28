@@ -1968,8 +1968,9 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 
 	c.torrentTracker.mu.Lock()
 	c.torrentTracker.torrents[to.InfoHash()] = torrentInfo{
-		lastUsedAt:  time.Now(),
-		storageType: storageType,
+		lastUsedAt:     time.Now(),
+		memoryFallback: added && storageType == api.File && spec.Storage == nil,
+		storageType:    storageType,
 	}
 	c.torrentTracker.mu.Unlock()
 

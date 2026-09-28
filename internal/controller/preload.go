@@ -241,27 +241,34 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool 
 }
 
 // torrentStorageMode returns the storage a torrent's streams, preload, and
-// stats use: the storage a saved torrent was stored with, otherwise the storage
-// a loaded one was loaded into, and memory storage by default. File storage is
-// only ever chosen for saved torrents, so an unsaved torrent streams from
-// memory. It also reports whether the torrent is saved.
+// stats use: memory storage for a torrent loaded for file storage whose data
+// fell back to memory, otherwise the storage a saved torrent was stored with,
+// otherwise the storage a loaded one was loaded into, and memory storage by
+// default. File storage is only ever chosen for saved torrents, so an unsaved
+// torrent streams from memory. It also reports whether the torrent is saved.
 func (c *Controller) torrentStorageMode(ih metainfo.Hash) (mode stream.StorageMode, saved bool) {
+	c.torrentTracker.mu.RLock()
+	info, loaded := c.torrentTracker.torrents[ih]
+	c.torrentTracker.mu.RUnlock()
+
 	t, err := c.db.GetTorrent(ih)
-	if err == nil {
+	saved = err == nil
+	if err != nil && !errors.Is(err, database.ErrTorrentNotFound) {
+		c.logger.Load().Error("failed to get torrent from database for its storage mode", "err", err, "hash", ih)
+	}
+	switch {
+	case loaded && info.memoryFallback:
+		return stream.MemoryStorage, saved
+	case saved:
 		if utils.Val(t.Storage) == api.File {
 			return stream.FileStorage, true
 		}
 		return stream.MemoryStorage, true
-	}
-	if !errors.Is(err, database.ErrTorrentNotFound) {
-		c.logger.Load().Error("failed to get torrent from database for its storage mode", "err", err, "hash", ih)
-	}
-	c.torrentTracker.mu.RLock()
-	defer c.torrentTracker.mu.RUnlock()
-	if info, ok := c.torrentTracker.torrents[ih]; ok && info.storageType == api.File {
+	case loaded && info.storageType == api.File:
 		return stream.FileStorage, false
+	default:
+		return stream.MemoryStorage, false
 	}
-	return stream.MemoryStorage, false
 }
 
 // cancelPreload stops a torrent's preload in the current stream pool.

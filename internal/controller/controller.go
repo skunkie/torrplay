@@ -95,8 +95,12 @@ func init() {
 }
 
 type torrentInfo struct {
-	lastUsedAt  time.Time
-	storageType api.TorrentStorage
+	lastUsedAt time.Time
+	// memoryFallback reports that the torrent was loaded for file storage but
+	// holds its data in memory storage, because the file storage directory
+	// was unavailable.
+	memoryFallback bool
+	storageType    api.TorrentStorage
 }
 
 // torrentTracker tracks loaded torrents and drops those that have been inactive for a specified time-to-live (TTL).
