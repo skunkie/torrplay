@@ -84,9 +84,10 @@
 // PiecePriorityHigh, and a watcher marks them ready once every piece is
 // complete. At most two preloads download at a time, in request order.
 //
-// PreloadAt preloads for playback that resumes at a position. It shrinks the
-// head and tail to a quarter of the preload's size each at most and keeps the
-// rest, in whole pieces, for a window at the position. As soon as the preload
+// PreloadAt preloads for playback that resumes at a position. Its head and
+// tail are only the file's first and last pieces, which usually hold the
+// container's header and seek index, and it keeps the rest, in whole pieces,
+// for a window at the position. As soon as the preload
 // runs, Config.SeekIndex resolves the position to a byte offset through a
 // torrent reader, which downloads the pieces holding the container's seek
 // index first. The window is placed there, starting an eighth of its size

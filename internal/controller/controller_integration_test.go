@@ -1070,9 +1070,10 @@ func newRateLimitedSeeder(t *testing.T, meta *metainfo.MetaInfo, payload []byte,
 	return seeder
 }
 
-// A preload at a playback position fetched from a slow peer downloads its
-// resume window with its head and tail rather than after them, so a player
-// that stops waiting for the preload still finds the data it resumes from.
+// A preload at a playback position fetched from a slow peer spends its
+// bandwidth on the data playback resumes from: besides the file's first and
+// last pieces, which hold the header and Cues, it downloads the window at the
+// position and nothing else from the start of the file.
 func TestIntegrationPreloadAtPlaybackPositionFromSlowPeer(t *testing.T) {
 	payload, clusterOffsets := matroskaFixture(128, 64<<10)
 	meta := webseedMetaInfo(t, payload, "", "Sintel.mkv")
@@ -1130,18 +1131,13 @@ wait:
 	}
 
 	piece := func(offset int64) int { return int(offset / localWebseedPieceLength) }
-	// The head and tail each take the 128 KiB at their end of the file.
-	var boundaryDone time.Time
-	for index := range to.NumPieces() {
-		inHead := index < piece(128<<10)
-		inTail := index >= piece(int64(len(payload))-128<<10)
-		if (inHead || inTail) && completedAt[index].After(boundaryDone) {
-			boundaryDone = completedAt[index]
-		}
+	_, windowDone := completedAt[piece(clusterOffsets[60])]
+	assert.True(t, windowDone, "the cluster at the position must be preloaded")
+	_, first := completedAt[0]
+	_, last := completedAt[to.NumPieces()-1]
+	assert.True(t, first && last, "the header and Cues must be preloaded")
+	for index := 1; index < piece(128<<10); index++ {
+		_, done := completedAt[index]
+		assert.False(t, done, "piece %d at the start of the file must not be preloaded", index)
 	}
-	windowStart, ok := completedAt[piece(clusterOffsets[60])]
-	require.True(t, ok, "the cluster at the position must be preloaded")
-	assert.True(t, windowStart.Before(boundaryDone),
-		"the window must download with the head and tail, not after them: window piece at %v, head and tail done at %v",
-		windowStart.Sub(boundaryDone), boundaryDone)
 }

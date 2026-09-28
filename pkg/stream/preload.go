@@ -204,9 +204,10 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 	return p.PreloadAt(file, mode, 0)
 }
 
-// PreloadAt is Preload for playback that resumes at position. Besides a
-// smaller head and tail, the preload plans a window of the file's data at
-// position. As soon as the preload runs, Config.SeekIndex resolves position
+// PreloadAt is Preload for playback that resumes at position. Its head and
+// tail are only the file's first and last pieces, which usually hold the
+// container's header and seek index, and the rest of the preload is a window
+// of the file's data at position. As soon as the preload runs, Config.SeekIndex resolves position
 // to a byte offset through a torrent reader, which downloads the pieces
 // holding the container's seek index first, and the window is placed there,
 // starting an eighth of its size before the offset, to download with the head
@@ -384,10 +385,10 @@ func (pl *preload) markProgress(now time.Time) {
 // planPreloadLocked sizes a preload of file. The head starts at the file's
 // beginning and the tail, when the file is large enough to have one, covers at
 // least a default boundary or one piece at its end, so container metadata at
-// either end is cached. A preload at a positive position keeps whole pieces of
-// its budget for a resume window, shrinking the head and tail to a quarter of
-// the budget each at most, unless the budget covers the whole file or leaves
-// no piece for the window. Memory-storage preloads are trimmed to whole pieces
+// either end is cached. A preload at a positive position caches only the
+// file's first and last pieces as its head and tail and keeps the rest of its
+// budget, in whole pieces, for a resume window, unless the budget covers the
+// whole file or leaves no piece for the window. Memory-storage preloads are trimmed to whole pieces
 // within their share of the preload capacity. It returns false when not even
 // one piece fits. Must be called with p.mu held.
 func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position time.Duration) (*preload, bool) {
@@ -404,15 +405,19 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position 
 	}
 
 	startend := max(int64(defaultFileBoundaryBytes), info.PieceLength)
-	resume := position > 0 && file.Length() > budget && budget/4 > 0
+	resume := position > 0 && file.Length() > budget
 	if !resume {
 		position = 0
 	}
 	var headEnd, tailStart, tailEnd int64
 	switch {
 	case resume:
-		boundary := min(startend, budget/4)
-		headEnd, tailStart, tailEnd = boundary, file.Length()-boundary, file.Length()
+		// Playback that resumes reads only the container's header and seek
+		// index, which the file's first and last pieces usually hold.
+		pieceLength := max(info.PieceLength, 1)
+		headEnd = min(pieceLength-file.Offset()%pieceLength, file.Length())
+		tailStart = max((file.Offset()+file.Length()-1)/pieceLength*pieceLength-file.Offset(), headEnd)
+		tailEnd = file.Length()
 	case file.Length() <= startend, budget <= startend:
 		headEnd = budget
 	default:
@@ -451,8 +456,10 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position 
 		tailStart:    tailStart,
 		windowPieces: windowPieces,
 		reservation: preloadReservation{
-			bytes:            boundaryBytes + int64(windowPieces)*info.PieceLength,
-			coversBoundaries: preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
+			bytes: boundaryBytes + int64(windowPieces)*info.PieceLength,
+			// A resume preload's single head and tail pieces are smaller than
+			// the boundaries playback readers protect, so readers keep theirs.
+			coversBoundaries: !resume && preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
 			headStart:        headStart,
 			headEnd:          headEndPiece,
 			tailStart:        tailStartPiece,

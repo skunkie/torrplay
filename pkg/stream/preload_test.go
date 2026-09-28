@@ -958,7 +958,7 @@ func TestPool_PlanPreloadLocked(t *testing.T) {
 			wantTarget   int64
 			windowPieces int
 		}{
-			{name: "quarter boundaries", length: 1 << 30, pieceLength: mib, wantHeadEnd: 8 * mib, wantPosition: time.Minute, wantTarget: 32 * mib, windowPieces: 16},
+			{name: "one-piece boundaries", length: 1 << 30, pieceLength: mib, wantHeadEnd: mib, wantPosition: time.Minute, wantTarget: 32 * mib, windowPieces: 30},
 			// A one-piece head and tail take the whole budget, so the preload
 			// falls back to its ordinary head and tail.
 			{name: "no room for a window", length: 1 << 30, pieceLength: 16 * mib, wantHeadEnd: 16 * mib, wantTarget: 32 * mib},
@@ -1326,24 +1326,25 @@ func TestPool_PreloadAt(t *testing.T) {
 		to, _ := addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
 		file := to.Files()[1]
 		reg := newProtectionRegistry()
-		// File offset 320 is torrent offset 420; the window of two pieces
-		// starts 16 bytes earlier, in piece 6.
+		// A 1 KiB budget leaves a 512-byte preload: the movie's first piece 1,
+		// which it shares with the other file, its short last piece 11, and
+		// six window pieces. File offset 320 would start the window 48 bytes
+		// earlier, but the window must end where the tail starts, at file
+		// offset 604, so it starts at file offset 220, in piece 5.
 		pool, _ := newPool(t, reg, 320, true)
-		// A 1 KiB budget leaves a 512-byte preload: a 128-byte head in pieces
-		// 1 to 3, a 128-byte tail in pieces 9 to 11, and two window pieces.
 		pool.SetReadaheadBudget(1 << 10)
 
 		_, err = pool.PreloadAt(file, MemoryStorage, position)
 		require.NoError(t, err)
-		assert.Equal(t, []int{1, 2, 3, 9, 10, 11}, claimed(pool, to))
+		assert.Equal(t, []int{1, 11}, claimed(pool, to))
 
-		writePieces(t, to, data, 1, 2, 3, 9, 10, 11)
+		writePieces(t, to, data, 1)
 		require.Eventually(t, func() bool {
-			return slices.Equal(claimed(pool, to), []int{1, 2, 3, 6, 7, 9, 10, 11})
+			return slices.Equal(claimed(pool, to), []int{1, 5, 6, 7, 8, 9, 10, 11})
 		}, 5*time.Second, time.Millisecond)
-		assert.Equal(t, []int{1, 2, 3, 6, 7, 9, 10, 11}, protected(reg))
+		assert.Equal(t, []int{1, 5, 6, 7, 8, 9, 10, 11}, protected(reg))
 
-		writePieces(t, to, data, 6, 7)
+		writePieces(t, to, data, 5, 6, 7, 8, 9, 10, 11)
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
 	})
 
