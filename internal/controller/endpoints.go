@@ -1955,11 +1955,15 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 		}
 	}
 
-	to, _, err := client.AddTorrentSpec(spec)
+	to, added, err := client.AddTorrentSpec(spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add torrent spec to client: %w", err)
 	}
-	c.watchStorageWrites(to, spec.Storage != nil)
+	// A torrent already in the client keeps its storage, and the handler of
+	// whoever added it.
+	if added {
+		c.watchStorageWrites(to, spec.Storage != nil)
+	}
 
 	c.torrentTracker.mu.Lock()
 	c.torrentTracker.torrents[to.InfoHash()] = torrentInfo{

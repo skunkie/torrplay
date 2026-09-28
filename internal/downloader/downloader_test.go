@@ -210,9 +210,8 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		downloader.processTorrents()
 		assert.False(t, downloader.IsDownloading(testHash), "a later pass must not resume the download")
 
-		// A restart tries the torrent again.
-		downloader.Start()
-		downloader.Stop()
+		// Starting the downloader, here for the first time, tries the torrent
+		// again.
 		downloader.Start()
 		defer downloader.Stop()
 		require.Eventually(t, func() bool { return downloader.IsDownloading(testHash) }, time.Second, time.Millisecond)

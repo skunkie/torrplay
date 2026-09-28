@@ -17,15 +17,18 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -725,6 +728,12 @@ func saveWebseedTorrent(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo,
 	t.Helper()
 	_, err := ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), storageType)
 	require.NoError(t, err)
+	return saveTorrentRecord(t, ctrl, meta, size, storageType)
+}
+
+// saveTorrentRecord saves meta to ctrl's database with the storage type.
+func saveTorrentRecord(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, size int, storageType api.TorrentStorage) metainfo.Hash {
+	t.Helper()
 	ih := meta.HashInfoBytes()
 	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{
 		InfoBytes: meta.InfoBytes,
@@ -791,44 +800,82 @@ func TestIntegrationStreamOutlastsFailedMemoryWrites(t *testing.T) {
 // A full disk fails every file-storage write. The background download must stop
 // instead of requesting the same data forever, until the downloader restarts.
 func TestIntegrationFileStorageWriteFailureStopsBackgroundDownload(t *testing.T) {
-	payload := bytes.Repeat([]byte("torrplay-file-write\n"), 4096)
-	meta, requests := countingWebseed(t, payload)
-	ctrl := newIntegrationTestController(t)
-	storagePath := t.TempDir()
-	// Unwritable, like a full disk.
-	require.NoError(t, os.Chmod(storagePath, 0o555))
-	t.Cleanup(func() { _ = os.Chmod(storagePath, 0o755) })
-	ctrl.mu.Lock()
-	settings := ctrl.settings.Load()
-	settings.EnableDownloader = utils.Ptr(true)
-	settings.FileStoragePath = utils.Ptr(storagePath)
-	ctrl.mu.Unlock()
-	require.NoError(t, ctrl.db.UpdateSettings(database.FromAPISettings(settings)))
-	ih := saveWebseedTorrent(t, ctrl, meta, len(payload), api.File)
-
-	downloader := ctrl.downloader.Load()
-	// Start runs a pass at once instead of after the one-minute interval.
-	restart := func() {
-		downloader.Stop()
-		downloader.Start()
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test cannot write to")
 	}
-	stopsRequesting := func(msg string) {
-		t.Helper()
-		require.Eventually(t, func() bool { return requests.Load() > 0 && !downloader.IsDownloading(ih) }, 10*time.Second, time.Millisecond, msg)
-		// Requests already in flight may still arrive.
-		time.Sleep(500 * time.Millisecond)
-		settled := requests.Load()
-		assert.Never(t, func() bool { return requests.Load() != settled }, 2*time.Second, 50*time.Millisecond,
-			"a torrent whose writes fail must not be requested again")
-	}
+	for _, tc := range []struct {
+		name string
+		load func(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, storagePath string, size int) metainfo.Hash
+	}{
+		{
+			name: "loaded for file storage",
+			load: func(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, _ string, size int) metainfo.Hash {
+				t.Helper()
+				return saveWebseedTorrent(t, ctrl, meta, size, api.File)
+			},
+		},
+		{
+			name: "added by the downloader and loaded for memory playback",
+			load: func(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, storagePath string, size int) metainfo.Hash {
+				t.Helper()
+				spec := torrent.TorrentSpecFromMetaInfo(meta)
+				spec.Storage = storage.NewFileOpts(storage.NewFileClientOpts{
+					ClientBaseDir:   storagePath,
+					PieceCompletion: ctrl.pieceCompletion,
+					UsePartFiles:    generics.Option[bool]{Value: false, Ok: true},
+				})
+				to, _, err := ctrl.client.AddTorrentSpec(spec)
+				require.NoError(t, err)
+				ctrl.downloader.Load().WatchStorageWrites(to)
+				// The torrent is already in the client, so it keeps its file
+				// storage and the downloader's handling of failed writes.
+				_, err = ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), api.Memory)
+				require.NoError(t, err)
+				return saveTorrentRecord(t, ctrl, meta, size, api.File)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte("torrplay-file-write\n"), 4096)
+			meta, requests := countingWebseed(t, payload)
+			ctrl := newIntegrationTestController(t)
+			storagePath := t.TempDir()
+			// Unwritable, like a full disk.
+			require.NoError(t, os.Chmod(storagePath, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(storagePath, 0o755) })
+			ctrl.mu.Lock()
+			settings := ctrl.settings.Load()
+			settings.EnableDownloader = utils.Ptr(true)
+			settings.FileStoragePath = utils.Ptr(storagePath)
+			ctrl.mu.Unlock()
+			require.NoError(t, ctrl.db.UpdateSettings(database.FromAPISettings(settings)))
+			ih := tc.load(t, ctrl, meta, storagePath, len(payload))
 
-	restart()
-	stopsRequesting("the downloader must stop a download whose writes fail")
-	before := requests.Load()
-	restart()
-	require.Eventually(t, func() bool { return requests.Load() > before }, 10*time.Second, time.Millisecond, "a restart must try again")
-	stopsRequesting("the retried download must stop again")
-	downloader.Stop()
+			downloader := ctrl.downloader.Load()
+			// Start runs a pass at once instead of after the one-minute interval.
+			restart := func() {
+				downloader.Stop()
+				downloader.Start()
+			}
+			stopsRequesting := func(msg string) {
+				t.Helper()
+				require.Eventually(t, func() bool { return requests.Load() > 0 && !downloader.IsDownloading(ih) }, 10*time.Second, time.Millisecond, msg)
+				// Requests already in flight may still arrive.
+				time.Sleep(500 * time.Millisecond)
+				settled := requests.Load()
+				assert.Never(t, func() bool { return requests.Load() != settled }, 2*time.Second, 50*time.Millisecond,
+					"a torrent whose writes fail must not be requested again")
+			}
+
+			restart()
+			stopsRequesting("the downloader must stop a download whose writes fail")
+			before := requests.Load()
+			restart()
+			require.Eventually(t, func() bool { return requests.Load() > before }, 10*time.Second, time.Millisecond, "a restart must try again")
+			stopsRequesting("the retried download must stop again")
+			downloader.Stop()
+		})
+	}
 }
 
 // Background downloads pause as soon as a stream starts and resume as soon as

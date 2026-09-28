@@ -46,7 +46,7 @@ type Downloader struct {
 	// wake requests a pass before the next interval.
 	wake chan struct{}
 	// writeFailed holds the torrents whose file storage writes failed. Their
-	// background downloads stay stopped until the downloader stops.
+	// background downloads stay stopped until the downloader starts again.
 	writeFailed map[metainfo.Hash]struct{}
 }
 
@@ -88,6 +88,8 @@ func (d *Downloader) Start() {
 	}
 
 	d.logger.Info("starting background downloader")
+	// A start tries torrents whose writes failed again.
+	clear(d.writeFailed)
 	stop := make(chan struct{})
 	d.stop = stop
 	go d.run(stop)
@@ -121,9 +123,8 @@ func (d *Downloader) Stop() {
 		}
 	}
 
-	// Clear the state. A restart tries torrents whose writes failed again.
+	// Clear the state.
 	d.downloading = make(map[metainfo.Hash]struct{})
-	clear(d.writeFailed)
 	d.metrics.SetDownloadingTorrents(0)
 }
 
@@ -305,7 +306,8 @@ func (d *Downloader) processTorrents() {
 // WatchStorageWrites stops downloading a file-storage torrent when writing its
 // data fails, such as on a full disk, instead of requesting the data again
 // forever. The torrent's background download stays stopped until the
-// downloader stops, and a stream of the torrent allows its downloads again.
+// downloader starts again, and a stream of the torrent allows its downloads
+// again.
 func (d *Downloader) WatchStorageWrites(to *torrent.Torrent) {
 	to.SetOnWriteChunkError(func(err error) { d.storageWriteFailed(to, err) })
 }
