@@ -1730,7 +1730,7 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 			storageType: api.Memory,
 		}
 		ctrl.torrentTracker.mu.Unlock()
-		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 		defer ctrl.cancelPreload(ih)
 
 		ctrl.cleanupExpiredTorrents()
@@ -1753,7 +1753,7 @@ func TestController_CleanupExpiredTorrents(t *testing.T) {
 			storageType: api.Memory,
 		}
 		ctrl.torrentTracker.mu.Unlock()
-		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 		// A smaller budget evicts the preload, which then only reports its
 		// final state.
 		pool := ctrl.streamPool.Load()

@@ -84,6 +84,15 @@
 // PiecePriorityHigh, and a watcher marks them ready once every piece is
 // complete. At most two preloads download at a time, in request order.
 //
+// PreloadAt preloads for playback that resumes at a position. It shrinks the
+// head and tail to a quarter of the preload's size each at most and keeps the
+// rest, in whole pieces, for a window at the position. Once the head and tail
+// are cached, which usually hold the container's seek index, Config.SeekIndex
+// resolves the position to a byte offset, and the window is placed there,
+// starting an eighth of its size before the offset, and joins the preload's
+// pieces before it can become ready. When the position cannot be resolved,
+// the preload is ready with its head and tail.
+//
 // A memory-storage preload reserves its whole pieces in the preload share of
 // the readahead budget, reported by PreloadCapacity, and protects them from
 // eviction until it is removed. The rest of the budget is always kept for

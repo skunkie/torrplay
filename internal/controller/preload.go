@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"path/filepath"
+	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -89,7 +90,7 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 		}
 	}
 
-	c.startPreload(to, files[targetIdx])
+	c.startPreload(to, files[targetIdx], playbackPosition(utils.Val(req.PlaybackPositionSeconds)))
 
 	resp := c.preloadResponse(ih)
 	w.Header().Set("Content-Type", "application/json")
@@ -218,10 +219,12 @@ func (c *Controller) preloadActive(ih metainfo.Hash) bool {
 	return ok && (status.State == stream.PreloadQueued || status.State == stream.PreloadRunning)
 }
 
-// startPreload preloads file in the current stream pool. It does nothing while
-// the torrent client is reconfiguring or when to is not the current client's
-// instance of its torrent. It reports whether the torrent now has a preload.
-func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool {
+// startPreload preloads file in the current stream pool for playback that
+// resumes at position, or from the start when position is zero. It does
+// nothing while the torrent client is reconfiguring or when to is not the
+// current client's instance of its torrent. It reports whether the torrent now
+// has a preload.
+func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, position time.Duration) bool {
 	if to == nil || to.Info() == nil || file == nil {
 		return false
 	}
@@ -231,13 +234,27 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File) bool 
 	}
 	ih := to.InfoHash()
 	mode, _ := c.torrentStorageMode(ih)
-	if _, err := pool.Preload(file, mode); err != nil {
+	if _, err := pool.PreloadAt(file, mode, position); err != nil {
 		if !errors.Is(err, stream.ErrPreloadDoesNotFit) {
 			c.logger.Load().Warn("failed to start preload", "hash", ih, "file", file.Path(), "error", err)
 		}
 		return false
 	}
 	return true
+}
+
+// playbackPosition converts a playback position in seconds to a duration,
+// saturating positions too large for one. A position that is not positive,
+// including NaN, is zero.
+func playbackPosition(seconds float64) time.Duration {
+	switch {
+	case !(seconds > 0):
+		return 0
+	case seconds >= float64(math.MaxInt64)/float64(time.Second):
+		return math.MaxInt64
+	default:
+		return time.Duration(seconds * float64(time.Second))
+	}
 }
 
 // torrentStorageMode returns the storage a torrent's streams, preload, and

@@ -39,6 +39,7 @@ import (
 	"github.com/torrplay/torrplay/internal/httpserver"
 	"github.com/torrplay/torrplay/internal/images"
 	"github.com/torrplay/torrplay/internal/logging"
+	"github.com/torrplay/torrplay/internal/media"
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	"github.com/torrplay/torrplay/internal/settings"
@@ -1038,6 +1039,9 @@ func (c *Controller) configureTorrentClient() error {
 			observeMemoryRead(duration)
 		},
 		Registry: storageClient,
+		SeekIndex: func(r io.ReaderAt, file *torrent.File, position time.Duration) (int64, bool, error) {
+			return media.ResolvePlaybackOffset(r, file.Length(), file.Path(), position.Seconds())
+		},
 	})
 	pool.SetReadaheadBudget(readaheadBudget(*currentSettings.MaxMemory))
 	// Evicted pieces must stop counting as downloaded, or a torrent read in
