@@ -5,6 +5,7 @@
 package downloader
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -43,6 +44,8 @@ type Downloader struct {
 	// downloads pause while it does, so playback keeps the bandwidth.
 	streaming func() bool
 	trackers  [][]string
+	// waitForInfo waits for a torrent's metadata.
+	waitForInfo func(*torrent.Torrent) error
 	// wake requests a pass before the next interval.
 	wake chan struct{}
 	// writeFailed holds the torrents whose file storage writes failed. Their
@@ -51,8 +54,13 @@ type Downloader struct {
 }
 
 // New creates a new Downloader. streaming reports whether any file is being
-// streamed, which pauses background downloads; nil means never.
-func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, streaming func() bool) *Downloader {
+// streamed, which pauses background downloads; nil means never. waitForInfo
+// waits for a torrent's metadata, so the caller can count the wait as one that
+// needs the torrent loaded; nil waits up to gotInfoTimeout.
+func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metrics.Metrics, pc storage.PieceCompletion, fsp string, trackers [][]string, streaming func() bool, waitForInfo func(*torrent.Torrent) error) *Downloader {
+	if waitForInfo == nil {
+		waitForInfo = waitForInfoTimeout
+	}
 	return &Downloader{
 		client:          client,
 		db:              db,
@@ -63,6 +71,7 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		pieceCompletion: pc,
 		streaming:       streaming,
 		trackers:        trackers,
+		waitForInfo:     waitForInfo,
 		wake:            make(chan struct{}, 1),
 		writeFailed:     make(map[metainfo.Hash]struct{}),
 	}
@@ -90,6 +99,12 @@ func (d *Downloader) Start() {
 	d.logger.Info("starting background downloader")
 	// A start tries torrents whose writes failed again.
 	clear(d.writeFailed)
+	// The start runs a pass at once, so a wake requested while stopped is
+	// already served.
+	select {
+	case <-d.wake:
+	default:
+	}
 	stop := make(chan struct{})
 	d.stop = stop
 	go d.run(stop)
@@ -126,6 +141,18 @@ func (d *Downloader) Stop() {
 	// Clear the state.
 	d.downloading = make(map[metainfo.Hash]struct{})
 	d.metrics.SetDownloadingTorrents(0)
+}
+
+// waitForInfoTimeout waits up to gotInfoTimeout for the metadata of to.
+func waitForInfoTimeout(to *torrent.Torrent) error {
+	select {
+	case <-to.GotInfo():
+		return nil
+	case <-to.Closed():
+		return errors.New("torrent closed")
+	case <-time.After(gotInfoTimeout):
+		return errors.New("timed out")
+	}
 }
 
 // Wake makes the downloader run a pass at once instead of at its next
@@ -239,10 +266,8 @@ func (d *Downloader) processTorrents() {
 			d.WatchStorageWrites(to)
 		}
 
-		select {
-		case <-to.GotInfo():
-		case <-time.After(gotInfoTimeout):
-			d.logger.Warn("timeout getting info for torrent", "hash", t.Hash)
+		if err := d.waitForInfo(to); err != nil {
+			d.logger.Warn("failed to get info for torrent", "hash", t.Hash, "error", err)
 			continue
 		}
 

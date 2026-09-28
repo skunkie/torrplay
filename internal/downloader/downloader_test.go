@@ -37,10 +37,13 @@ func TestMain(m *testing.M) {
 type MockDB struct {
 	err      error
 	settings *database.Settings
-	torrents []*database.Torrent
+	// settingsReads counts GetSettings calls, one per processing pass.
+	settingsReads atomic.Int32
+	torrents      []*database.Torrent
 }
 
 func (m *MockDB) GetSettings() (*database.Settings, error) {
+	m.settingsReads.Add(1)
 	return m.settings, m.err
 }
 
@@ -123,7 +126,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		client := newTestTorrentClient(t, td)
 
 		// Create the downloader instance.
-		downloader := New(client, db, logger, m, pc, td, nil, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil, nil)
 		originalGotInfoTimeout := gotInfoTimeout
 		gotInfoTimeout = 1 * time.Millisecond
 		defer func() {
@@ -163,7 +166,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		}
 		client := newTestTorrentClient(t, td)
 		streaming := false
-		downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, func() bool { return streaming })
+		downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, func() bool { return streaming }, nil)
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
 		verifyData(t, to)
@@ -180,6 +183,33 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		assertNothingWanted(t, to)
 	})
 
+	t.Run("waits for metadata through its waiter", func(t *testing.T) {
+		testMetaInfo := newTestTorrent(t, 1024)
+		testHash := testMetaInfo.HashInfoBytes()
+		storageType := api.File
+		td := t.TempDir()
+		pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+		require.NoError(t, err)
+		defer pc.Close()
+		db := &MockDB{
+			settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
+			torrents: []*database.Torrent{{Torrent: api.Torrent{Hash: testHash, Magnet: utils.MagnetURIFromHash(testHash), Storage: &storageType}}},
+		}
+		client := newTestTorrentClient(t, td)
+		var waited []metainfo.Hash
+		waitForInfo := func(to *torrent.Torrent) error {
+			waited = append(waited, to.InfoHash())
+			return errors.New("no metadata")
+		}
+		downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, nil, waitForInfo)
+		_, err = client.AddTorrent(testMetaInfo)
+		require.NoError(t, err)
+
+		downloader.processTorrents()
+		assert.Equal(t, []metainfo.Hash{testHash}, waited, "the caller must count the wait")
+		assert.False(t, downloader.IsDownloading(testHash), "a torrent without metadata must not start")
+	})
+
 	t.Run("stops a download whose storage write failed", func(t *testing.T) {
 		testMetaInfo := newTestTorrent(t, 1024)
 		testHash := testMetaInfo.HashInfoBytes()
@@ -194,7 +224,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		}
 		client := newTestTorrentClient(t, td)
 		m := metrics.New()
-		downloader := New(client, db, slog.New(slog.DiscardHandler), m, pc, td, nil, nil)
+		downloader := New(client, db, slog.New(slog.DiscardHandler), m, pc, td, nil, nil, nil)
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
 		verifyData(t, to)
@@ -245,7 +275,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 
 		client := newTestTorrentClient(t, td)
 
-		downloader := New(client, db, logger, m, pc, td, nil, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil, nil)
 		downloader.downloading[testHash] = struct{}{}
 
 		to, err := client.AddTorrent(testMetaInfo)
@@ -288,7 +318,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 
 		client := newTestTorrentClient(t, td)
 
-		downloader := New(client, db, logger, m, pc, td, nil, func() bool { return true })
+		downloader := New(client, db, logger, m, pc, td, nil, func() bool { return true }, nil)
 		downloader.downloading[testHash] = struct{}{}
 
 		to, err := client.AddTorrent(testMetaInfo)
@@ -327,7 +357,7 @@ func TestDownloader_Wake(t *testing.T) {
 	}
 	client := newTestTorrentClient(t, td)
 	var streaming atomic.Bool
-	downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, streaming.Load)
+	downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, streaming.Load, nil)
 	to, err := client.AddTorrent(testMetaInfo)
 	require.NoError(t, err)
 	verifyData(t, to)
@@ -344,6 +374,24 @@ func TestDownloader_Wake(t *testing.T) {
 	streaming.Store(false)
 	downloader.Wake()
 	require.Eventually(t, downloading, time.Second, time.Millisecond, "waking must resume after streaming at once")
+}
+
+func TestDownloader_Start(t *testing.T) {
+	t.Run("serves a wake requested while stopped with its first pass", func(t *testing.T) {
+		td := t.TempDir()
+		pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+		require.NoError(t, err)
+		defer pc.Close()
+		db := &MockDB{settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}}}
+		downloader := New(newTestTorrentClient(t, td), db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, nil, nil)
+
+		downloader.Wake()
+		downloader.Start()
+		defer downloader.Stop()
+		require.Eventually(t, func() bool { return db.settingsReads.Load() == 1 }, time.Second, time.Millisecond)
+		assert.Never(t, func() bool { return db.settingsReads.Load() > 1 }, 200*time.Millisecond, 10*time.Millisecond,
+			"a wake requested while stopped must not add a second pass")
+	})
 }
 
 func TestDownloader_Stop(t *testing.T) {
@@ -364,7 +412,7 @@ func TestDownloader_Stop(t *testing.T) {
 		db := &MockDB{
 			settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
 		}
-		downloader := New(client, db, logger, m, pc, td, nil, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil, nil)
 		downloader.downloading[testHash] = struct{}{}
 
 		to, err := client.AddTorrent(testMetaInfo)
@@ -396,7 +444,7 @@ func TestDownloader_Stop(t *testing.T) {
 
 		client := newTestTorrentClient(t, td)
 
-		downloader := New(client, db, logger, m, pc, td, nil, nil)
+		downloader := New(client, db, logger, m, pc, td, nil, nil, nil)
 
 		// Start and stop multiple times in quick succession
 		for range 5 {

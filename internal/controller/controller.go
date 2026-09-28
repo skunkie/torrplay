@@ -283,7 +283,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		return nil, err
 	}
 
-	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers, c.isStreaming))
+	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers, c.isStreaming, c.waitForInfo))
 
 	if *appSettings.EnableDlna {
 		err = c.dlna.Start(*appSettings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
@@ -1037,7 +1037,7 @@ func (c *Controller) configureTorrentClient() error {
 	if isReconfiguring {
 		c.downloader.Load().Stop()
 		c.trackers = newTrackers
-		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers, c.isStreaming)
+		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers, c.isStreaming, c.waitForInfo)
 		c.downloader.Store(newDownloader)
 		if utils.Val(currentSettings.EnableDownloader) {
 			newDownloader.Start()
