@@ -63,8 +63,8 @@ type PreloadStatus struct {
 	FileIndex int
 	// FilePath is the preloaded file's path within its torrent.
 	FilePath string
-	// Position is the playback position the preload was requested at, or
-	// zero for a preload of the head and tail only.
+	// Position is the playback position whose data the preload's resume
+	// window caches, or zero for a preload without one.
 	Position time.Duration
 	// State is the preload's lifecycle state.
 	State PreloadState
@@ -131,8 +131,8 @@ type preload struct {
 	mode                        StorageMode
 	// pieces holds the preload's pieces in ascending order.
 	pieces []int
-	// position is the playback position the preload was requested at; zero
-	// requests the head and tail only.
+	// position is the playback position the resume window is planned at, or
+	// zero for a preload without one.
 	position time.Duration
 	// progressAt is when a running preload started running, last completed a
 	// piece, or last saw its torrent complete more data. The stall timeout
@@ -211,8 +211,9 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 // offset, and the window is placed there, starting an eighth of its size
 // before the offset. When position cannot be resolved, the preload is ready
 // with its head and tail. A non-positive position, or a file the preload
-// covers whole, preloads as Preload does. A request at another position
-// replaces the torrent's preload.
+// covers whole or leaves no piece of a window for, preloads as Preload does.
+// A request whose plan has a window at another position, or none where the
+// torrent's preload has one, replaces the preload.
 func (p *Pool) PreloadAt(file *torrent.File, mode StorageMode, position time.Duration) (PreloadStatus, error) {
 	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil {
 		return PreloadStatus{}, ErrInvalidFile
@@ -229,11 +230,19 @@ func (p *Pool) PreloadAt(file *torrent.File, mode StorageMode, position time.Dur
 		return PreloadStatus{}, ErrPoolClosed
 	}
 	position = max(position, 0)
-	if current := p.preloads[infoHash]; current != nil && current.file == file && current.mode == mode && current.position == position && current.state <= PreloadReady {
+	current := p.preloads[infoHash]
+	holds := func(position time.Duration) bool {
+		return current != nil && current.file == file && current.mode == mode && current.position == position && current.state <= PreloadReady
+	}
+	if holds(position) {
 		return current.status(), nil
 	}
 
 	pl, ok := p.planPreloadLocked(file, mode, position)
+	// A position that plans no window preloads as a request without one.
+	if ok && holds(pl.position) {
+		return current.status(), nil
+	}
 	p.removePreloadLocked(infoHash)
 	if !ok {
 		p.dispatchPreloadsLocked()
@@ -395,6 +404,9 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position 
 
 	startend := max(int64(defaultFileBoundaryBytes), info.PieceLength)
 	resume := position > 0 && file.Length() > budget && budget/4 > 0
+	if !resume {
+		position = 0
+	}
 	var headEnd, tailStart, tailEnd int64
 	switch {
 	case resume:
@@ -422,11 +434,7 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position 
 	if resume {
 		windowPieces = int(max(limit-boundaryBytes, 0) / max(info.PieceLength, 1))
 		if windowPieces == 0 {
-			pl, ok := p.planPreloadLocked(file, mode, 0)
-			if ok {
-				pl.position = position
-			}
-			return pl, ok
+			return p.planPreloadLocked(file, mode, 0)
 		}
 	}
 	pl := &preload{

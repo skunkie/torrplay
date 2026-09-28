@@ -113,11 +113,17 @@ func TestTorrentPreloadEndpoints(t *testing.T) {
 	require.Equal(t, http.StatusOK, repeated.Code)
 	assert.Equal(t, startedStatus.TargetBytes, decodeStatus(repeated).TargetBytes)
 
-	resumed := doRequest(http.MethodPut, preloadURL, `{"file_index":0,"playback_position_seconds":900.5}`)
+	// The movie is larger than a preload, so its preload plans a window at
+	// the position; a subtitle file is preloaded whole.
+	resumed := doRequest(http.MethodPut, preloadURL, `{"file_index":5,"playback_position_seconds":900.5}`)
 	require.Equal(t, http.StatusOK, resumed.Code)
 	poolStatus, ok := ctrl.streamPool.Load().PreloadStatus(ih)
 	require.True(t, ok)
 	assert.Equal(t, 900500*time.Millisecond, poolStatus.Position, "the preload must resume at the requested position")
+	require.Equal(t, http.StatusOK, doRequest(http.MethodPut, preloadURL, `{"file_index":0,"playback_position_seconds":900.5}`).Code)
+	poolStatus, ok = ctrl.streamPool.Load().PreloadStatus(ih)
+	require.True(t, ok)
+	assert.Zero(t, poolStatus.Position, "a file preloaded whole needs no window")
 	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"playback_position_seconds":-1}`).Code)
 
 	require.Equal(t, http.StatusNoContent, doRequest(http.MethodDelete, preloadURL, "").Code)

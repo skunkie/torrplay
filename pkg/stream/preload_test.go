@@ -954,10 +954,11 @@ func TestPool_PlanPreloadLocked(t *testing.T) {
 			length       int64
 			pieceLength  int64
 			wantHeadEnd  int64
+			wantPosition time.Duration
 			wantTarget   int64
 			windowPieces int
 		}{
-			{name: "quarter boundaries", length: 1 << 30, pieceLength: mib, wantHeadEnd: 8 * mib, wantTarget: 32 * mib, windowPieces: 16},
+			{name: "quarter boundaries", length: 1 << 30, pieceLength: mib, wantHeadEnd: 8 * mib, wantPosition: time.Minute, wantTarget: 32 * mib, windowPieces: 16},
 			// A one-piece head and tail take the whole budget, so the preload
 			// falls back to its ordinary head and tail.
 			{name: "no room for a window", length: 1 << 30, pieceLength: 16 * mib, wantHeadEnd: 16 * mib, wantTarget: 32 * mib},
@@ -972,7 +973,7 @@ func TestPool_PlanPreloadLocked(t *testing.T) {
 				pl, ok := pool.planPreloadLocked(file, FileStorage, time.Minute)
 				pool.mu.Unlock()
 				require.True(t, ok)
-				assert.Equal(t, time.Minute, pl.position)
+				assert.Equal(t, tt.wantPosition, pl.position)
 				assert.Equal(t, tt.windowPieces, pl.windowPieces)
 				assert.Equal(t, tt.wantHeadEnd, pl.headEnd)
 				assert.Equal(t, tt.wantTarget, pl.targetBytes)
@@ -1369,6 +1370,26 @@ func TestPool_PreloadAt(t *testing.T) {
 				assert.Equal(t, []int{0, 9}, protected(reg))
 			})
 		}
+	})
+
+	t.Run("keeps a preload that a position without a window would plan the same", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		// A 200-byte file fits the 256-byte preload whole.
+		to, file := addSizedTorrent(t, c, "small", 64, 200)
+		pool, _ := newPool(t, nil, 0, false)
+
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		first := pool.preloads[to.InfoHash()]
+		pool.mu.Unlock()
+
+		status, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		assert.Zero(t, status.Position)
+		pool.mu.Lock()
+		assert.Same(t, first, pool.preloads[to.InfoHash()])
+		pool.mu.Unlock()
 	})
 
 	t.Run("replaces a preload at another position", func(t *testing.T) {
