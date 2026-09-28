@@ -600,6 +600,24 @@ func TestController_WaitForInfo(t *testing.T) {
 		<-to.Closed()
 	})
 
+	t.Run("ends at once when the torrent closes", func(t *testing.T) {
+		timeout := ctrl.runtimeConfig.gotInfoTimeout
+		ctrl.runtimeConfig.gotInfoTimeout = time.Minute
+		defer func() { ctrl.runtimeConfig.gotInfoTimeout = timeout }()
+		to := withoutInfo(t, metainfo.Hash{10})
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			to.Drop()
+		}()
+
+		start := time.Now()
+		err := ctrl.waitForInfo(to)
+		var apiErr api.Error
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusServiceUnavailable, apiErr.Code)
+		assert.Less(t, time.Since(start), 10*time.Second, "the wait must not run to the metadata timeout")
+	})
+
 	t.Run("forgets waiters once they return", func(t *testing.T) {
 		ctrl.infoWaitersMu.Lock()
 		defer ctrl.infoWaitersMu.Unlock()
