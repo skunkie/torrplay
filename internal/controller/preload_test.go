@@ -301,24 +301,26 @@ func TestStartPreloadRejectsTorrentFromPreviousClientGeneration(t *testing.T) {
 	assert.False(t, preloading)
 }
 
-func TestStartPreloadWithoutClient(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
+func TestController_StartPreload(t *testing.T) {
+	t.Run("does nothing without a client", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
 
-	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
-	ctrl.mu.Lock()
-	client := ctrl.client
-	ctrl.client = nil
-	ctrl.mu.Unlock()
-	defer func() {
+		to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
 		ctrl.mu.Lock()
-		ctrl.client = client
+		client := ctrl.client
+		ctrl.client = nil
 		ctrl.mu.Unlock()
-	}()
+		defer func() {
+			ctrl.mu.Lock()
+			ctrl.client = client
+			ctrl.mu.Unlock()
+		}()
 
-	assert.False(t, ctrl.startPreload(to, to.Files()[0]))
-	_, preloading := ctrl.preloadStatus(to.InfoHash())
-	assert.False(t, preloading)
+		assert.False(t, ctrl.startPreload(to, to.Files()[0]))
+		_, preloading := ctrl.preloadStatus(to.InfoHash())
+		assert.False(t, preloading)
+	})
 }
 
 func TestStreamPoolRejectsReplacedTorrentInSameGeneration(t *testing.T) {
@@ -402,32 +404,34 @@ func TestStreamDoesNotPausePreloads(t *testing.T) {
 	}
 }
 
-// TestPreloadResponseReportsQueuedPreload verifies that a preload waiting for
-// a preload slot reports that it is queued rather than downloading.
-func TestPreloadResponseReportsQueuedPreload(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
-	setTestMemoryLimit(t, ctrl, 512<<20)
+func TestController_PreloadResponse(t *testing.T) {
+	// A preload waiting for a preload slot reports that it is queued rather
+	// than downloading.
+	t.Run("reports a queued preload", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+		setTestMemoryLimit(t, ctrl, 512<<20)
 
-	// At most two preloads download at a time.
-	hashes := make([]metainfo.Hash, 0, 3)
-	for i := range 3 {
-		to := addSyntheticTorrent(t, ctrl, 1<<30+int64(i), 1<<20)
-		require.True(t, ctrl.startPreload(to, to.Files()[0]))
-		hashes = append(hashes, to.InfoHash())
-	}
-	defer func() {
-		for _, ih := range hashes {
-			ctrl.cancelPreload(ih)
+		// At most two preloads download at a time.
+		hashes := make([]metainfo.Hash, 0, 3)
+		for i := range 3 {
+			to := addSyntheticTorrent(t, ctrl, 1<<30+int64(i), 1<<20)
+			require.True(t, ctrl.startPreload(to, to.Files()[0]))
+			hashes = append(hashes, to.InfoHash())
 		}
-	}()
+		defer func() {
+			for _, ih := range hashes {
+				ctrl.cancelPreload(ih)
+			}
+		}()
 
-	assert.Equal(t, api.Preloading, ctrl.preloadResponse(hashes[0]).Status)
-	assert.Equal(t, api.Preloading, ctrl.preloadResponse(hashes[1]).Status)
-	queued := ctrl.preloadResponse(hashes[2])
-	assert.Equal(t, api.Queued, queued.Status)
-	assert.Equal(t, 0, queued.FileIndex)
-	assert.Positive(t, queued.TargetBytes)
+		assert.Equal(t, api.Preloading, ctrl.preloadResponse(hashes[0]).Status)
+		assert.Equal(t, api.Preloading, ctrl.preloadResponse(hashes[1]).Status)
+		queued := ctrl.preloadResponse(hashes[2])
+		assert.Equal(t, api.Queued, queued.Status)
+		assert.Equal(t, 0, queued.FileIndex)
+		assert.Positive(t, queued.TargetBytes)
+	})
 }
 
 // TestPreloadKeepsTorrentActive verifies that a running preload counts as

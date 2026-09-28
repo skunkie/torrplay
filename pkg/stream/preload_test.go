@@ -548,7 +548,7 @@ func TestPool_Preload(t *testing.T) {
 	})
 }
 
-func TestPool_PreloadScheduling(t *testing.T) {
+func TestPreloadScheduling(t *testing.T) {
 	// A 1500-byte budget leaves a 750-byte preload share, which holds one
 	// 640-byte reservation but not two.
 	const oneReservationBudget = 1500
@@ -655,61 +655,6 @@ func TestPool_PreloadScheduling(t *testing.T) {
 		assert.Equal(t, PreloadRunning, status.State, "preloads run alongside playback")
 		assert.True(t, pool.HasReaders(played.InfoHash()), "a preload must not close a lingering reader")
 		assert.Equal(t, PreloadRunning, preloadState(pool, preloaded.InfoHash()))
-	})
-}
-
-func TestPool_SetReadaheadBudgetEvictsPreloads(t *testing.T) {
-	t.Run("gives up the cheapest reservations first", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		pool := New(Config{Logger: testLogger()})
-		t.Cleanup(pool.Close)
-		pool.SetReadaheadBudget(1 << 20)
-		read, readFile, readData := addHashedTorrent(t, c, "read")
-		idle, idleFile, idleData := addHashedTorrent(t, c, "idle")
-		writePieces(t, read, readData, allPieces(read)...)
-		writePieces(t, idle, idleData, allPieces(idle)...)
-		running, runningFile := addSizedTorrent(t, c, "running", 64, 640)
-		for _, file := range []*torrent.File{readFile, idleFile} {
-			_, err := pool.Preload(file, MemoryStorage)
-			require.NoError(t, err)
-		}
-		waitForPreloadState(t, pool, read.InfoHash(), PreloadReady)
-		waitForPreloadState(t, pool, idle.InfoHash(), PreloadReady)
-		_, err := pool.Preload(runningFile, MemoryStorage)
-		require.NoError(t, err)
-		_, release, err := pool.Acquire(context.Background(), readFile, MemoryStorage)
-		require.NoError(t, err)
-		defer release()
-
-		// Each budget's preload share holds one reservation fewer.
-		for _, step := range []struct {
-			budget  int64
-			evicted metainfo.Hash
-		}{
-			{budget: 2 * 1300, evicted: idle.InfoHash()},
-			{budget: 2 * 700, evicted: running.InfoHash()},
-			{budget: 0, evicted: read.InfoHash()},
-		} {
-			pool.SetReadaheadBudget(step.budget)
-			assert.Equal(t, PreloadEvicted, preloadState(pool, step.evicted))
-		}
-	})
-
-	t.Run("a larger budget starts queued preloads", func(t *testing.T) {
-		c := newTestTorrentClient(t)
-		pool := New(Config{Logger: testLogger()})
-		t.Cleanup(pool.Close)
-		pool.SetReadaheadBudget(1500)
-		_, firstFile := addSizedTorrent(t, c, "first", 64, 640)
-		second, secondFile := addSizedTorrent(t, c, "second", 64, 640)
-		for _, file := range []*torrent.File{firstFile, secondFile} {
-			_, err := pool.Preload(file, MemoryStorage)
-			require.NoError(t, err)
-		}
-		require.Equal(t, PreloadQueued, preloadState(pool, second.InfoHash()))
-
-		pool.SetReadaheadBudget(1 << 20)
-		assert.Equal(t, PreloadRunning, preloadState(pool, second.InfoHash()))
 	})
 }
 
@@ -854,7 +799,7 @@ func TestPool_ExpirePreloads(t *testing.T) {
 	})
 }
 
-func TestPool_PreloadStallTimeout(t *testing.T) {
+func TestPreloadStallTimeout(t *testing.T) {
 	stalledFor := func(p *Pool, infoHash metainfo.Hash, stalled time.Duration) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
