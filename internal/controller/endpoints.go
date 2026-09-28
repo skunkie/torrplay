@@ -1479,11 +1479,11 @@ func (c *Controller) waitForInfoOrDrop(to *torrent.Torrent) error {
 	}
 	c.infoWaitersMu.Lock()
 	awaited := c.infoWaiters[to.InfoHash()] > 0
+	c.infoWaitersMu.Unlock()
+	// A request that starts waiting after this check ends its wait as soon
+	// as the torrent closes, so the drop needs no lock.
 	if !awaited {
 		to.Drop()
-	}
-	c.infoWaitersMu.Unlock()
-	if !awaited {
 		<-to.Closed()
 	}
 	return err
