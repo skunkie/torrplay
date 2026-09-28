@@ -190,6 +190,8 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 	}
 	pl.completedBytes, _ = pl.progress(completedPieces(to, pl.pieces))
 	pl.fileRead = p.fileHasReadersLocked(file)
+	// The torrent client stops a torrent's downloads after a storage error,
+	// so each preload tries again.
 	to.AllowDataDownload()
 	p.preloads[infoHash] = pl
 	p.preloadQueue = append(p.preloadQueue, pl)

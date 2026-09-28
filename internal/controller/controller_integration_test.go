@@ -19,6 +19,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -704,4 +705,128 @@ func TestIntegrationResolveURLThenStreamUsesMemory(t *testing.T) {
 	entries, err = os.ReadDir(storageDir)
 	require.NoError(t, err)
 	assert.Empty(t, entries, "temporary streaming must not create torrent files")
+}
+
+// countingWebseed serves payload and counts the requests it receives.
+func countingWebseed(t *testing.T, payload []byte) (*metainfo.MetaInfo, *atomic.Int64) {
+	t.Helper()
+	requests := new(atomic.Int64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.ServeContent(w, r, "video.mp4", time.Time{}, bytes.NewReader(payload))
+	}))
+	t.Cleanup(server.Close)
+	return localWebseedMetaInfo(t, payload, server.URL), requests
+}
+
+// saveWebseedTorrent loads meta into ctrl the way requests do, keeping its web
+// seed, and saves it with the storage type.
+func saveWebseedTorrent(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, size int, storageType api.TorrentStorage) metainfo.Hash {
+	t.Helper()
+	_, err := ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), storageType)
+	require.NoError(t, err)
+	ih := meta.HashInfoBytes()
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{
+		InfoBytes: meta.InfoBytes,
+		Torrent: api.Torrent{
+			Hash:      ih,
+			Magnet:    utils.MagnetURIFromHash(ih),
+			Name:      "Sintel",
+			Storage:   &storageType,
+			TotalSize: int64(size),
+		},
+	}))
+	return ih
+}
+
+// Memory storage fails a write while it cannot free room. The torrent must keep
+// downloading, so a stream waiting for the data finishes once room frees up.
+func TestIntegrationStreamOutlastsFailedMemoryWrites(t *testing.T) {
+	payload := bytes.Repeat([]byte("torrplay-memory-write\n"), 4096)
+	meta, requests := countingWebseed(t, payload)
+	ctrl := newIntegrationTestController(t)
+	ih := saveWebseedTorrent(t, ctrl, meta, len(payload), api.Memory)
+	storageClient := ctrl.storageClient.Load()
+	// No piece fits, so every write fails.
+	require.NoError(t, storageClient.SetMaxMemory(localWebseedPieceLength/2))
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	done := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, ih), http.NoBody)
+		if err != nil {
+			done <- err
+			return
+		}
+		req.Header.Set("Range", "bytes=0-1023")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err == nil && !bytes.Equal(payload[:1024], body) {
+			err = fmt.Errorf("wrong bytes, status %s", resp.Status)
+		}
+		done <- err
+	}()
+
+	require.Eventually(t, func() bool { return requests.Load() > 0 }, 10*time.Second, time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("stream ended while no write could succeed: %v", err)
+	case <-time.After(time.Second):
+	}
+	require.NoError(t, storageClient.SetMaxMemory(4<<20))
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("stream did not finish after memory storage had room again")
+	}
+}
+
+// A full disk fails every file-storage write. The background download must stop
+// instead of requesting the same data forever, until the downloader restarts.
+func TestIntegrationFileStorageWriteFailureStopsBackgroundDownload(t *testing.T) {
+	payload := bytes.Repeat([]byte("torrplay-file-write\n"), 4096)
+	meta, requests := countingWebseed(t, payload)
+	ctrl := newIntegrationTestController(t)
+	storagePath := t.TempDir()
+	// Unwritable, like a full disk.
+	require.NoError(t, os.Chmod(storagePath, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(storagePath, 0o755) })
+	ctrl.mu.Lock()
+	settings := ctrl.settings.Load()
+	settings.EnableDownloader = utils.Ptr(true)
+	settings.FileStoragePath = utils.Ptr(storagePath)
+	ctrl.mu.Unlock()
+	require.NoError(t, ctrl.db.UpdateSettings(database.FromAPISettings(settings)))
+	ih := saveWebseedTorrent(t, ctrl, meta, len(payload), api.File)
+
+	downloader := ctrl.downloader.Load()
+	// Start runs a pass at once instead of after the one-minute interval.
+	restart := func() {
+		downloader.Stop()
+		downloader.Start()
+	}
+	stopsRequesting := func(msg string) {
+		t.Helper()
+		require.Eventually(t, func() bool { return requests.Load() > 0 && !downloader.IsDownloading(ih) }, 10*time.Second, time.Millisecond, msg)
+		// Requests already in flight may still arrive.
+		time.Sleep(500 * time.Millisecond)
+		settled := requests.Load()
+		assert.Never(t, func() bool { return requests.Load() != settled }, 2*time.Second, 50*time.Millisecond,
+			"a torrent whose writes fail must not be requested again")
+	}
+
+	restart()
+	stopsRequesting("the downloader must stop a download whose writes fail")
+	before := requests.Load()
+	restart()
+	require.Eventually(t, func() bool { return requests.Load() > before }, 10*time.Second, time.Millisecond, "a restart must try again")
+	stopsRequesting("the retried download must stop again")
+	downloader.Stop()
 }

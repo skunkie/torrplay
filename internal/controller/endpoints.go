@@ -1959,6 +1959,7 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	if err != nil {
 		return nil, fmt.Errorf("failed to add torrent spec to client: %w", err)
 	}
+	c.watchStorageWrites(to, spec.Storage != nil)
 
 	c.torrentTracker.mu.Lock()
 	c.torrentTracker.torrents[to.InfoHash()] = torrentInfo{
@@ -1968,6 +1969,21 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	c.torrentTracker.mu.Unlock()
 
 	return to, nil
+}
+
+// watchStorageWrites sets how to handle a failed storage write of to. The
+// torrent client logs the failure and requests the data again. Memory storage
+// fails a write only while it cannot free room, so the torrent keeps
+// downloading. A file-storage write failure, such as a full disk, would repeat,
+// so it stops the torrent's downloads and its background download.
+func (c *Controller) watchStorageWrites(to *torrent.Torrent, fileStorage bool) {
+	if !fileStorage {
+		to.SetOnWriteChunkError(func(error) {})
+		return
+	}
+	if d := c.downloader.Load(); d != nil {
+		d.WatchStorageWrites(to)
+	}
 }
 
 // loadTorrent is the single entry point for adding a torrent to the client.
@@ -2022,8 +2038,9 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	// Ensure data downloading is permitted for this torrent (e.g. if it was previously
-	// paused or recovering from a transient state).
+	// The torrent client stops a torrent's downloads after a storage error, such
+	// as a failed file-storage write or piece completion read, so each stream
+	// tries again.
 	to.AllowDataDownload()
 
 	if err := c.waitForInfo(to); err != nil {

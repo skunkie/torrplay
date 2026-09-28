@@ -6,7 +6,9 @@ package downloader
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"testing"
@@ -178,6 +180,45 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		assertNothingWanted(t, to)
 	})
 
+	t.Run("stops a download whose storage write failed", func(t *testing.T) {
+		testMetaInfo := newTestTorrent(t, 1024)
+		testHash := testMetaInfo.HashInfoBytes()
+		storageType := api.File
+		td := t.TempDir()
+		pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+		require.NoError(t, err)
+		defer pc.Close()
+		db := &MockDB{
+			settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
+			torrents: []*database.Torrent{{Torrent: api.Torrent{Hash: testHash, Magnet: utils.MagnetURIFromHash(testHash), Storage: &storageType}}},
+		}
+		client := newTestTorrentClient(t, td)
+		m := metrics.New()
+		downloader := New(client, db, slog.New(slog.DiscardHandler), m, pc, td, nil, nil)
+		to, err := client.AddTorrent(testMetaInfo)
+		require.NoError(t, err)
+		require.NoError(t, to.VerifyDataContext(t.Context()))
+		downloader.processTorrents()
+		require.True(t, downloader.IsDownloading(testHash))
+
+		downloader.storageWriteFailed(to, errors.New("no space left on device"))
+		assert.False(t, downloader.IsDownloading(testHash))
+		assertNothingWanted(t, to)
+		assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
+		assert.ErrorContains(t, readFirstByte(t, to), "downloading disabled", "the torrent must stop downloading")
+
+		downloader.processTorrents()
+		assert.False(t, downloader.IsDownloading(testHash), "a later pass must not resume the download")
+
+		// A restart tries the torrent again.
+		downloader.Start()
+		downloader.Stop()
+		downloader.Start()
+		defer downloader.Stop()
+		require.Eventually(t, func() bool { return downloader.IsDownloading(testHash) }, time.Second, time.Millisecond)
+		assert.ErrorIs(t, readFirstByte(t, to), context.DeadlineExceeded, "the torrent must download again")
+	})
+
 	t.Run("clears priorities when disabled", func(t *testing.T) {
 		testMetaInfo := newTestTorrent(t, 1024)
 		testHash := testMetaInfo.HashInfoBytes()
@@ -343,4 +384,16 @@ func assertNothingWanted(t *testing.T, to *torrent.Torrent) {
 	for index := range to.NumPieces() {
 		assert.Equal(t, torrent.PiecePriorityNone, to.PieceState(index).Priority, "piece %d is still wanted", index)
 	}
+}
+
+// readFirstByte reads the first byte of to, waiting briefly for its data.
+func readFirstByte(t *testing.T, to *torrent.Torrent) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	r := to.NewReader()
+	defer r.Close()
+	r.SetContext(ctx)
+	_, err := r.Read(make([]byte, 1))
+	return err
 }
