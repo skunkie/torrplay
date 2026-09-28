@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -38,6 +39,7 @@ import (
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
 	"github.com/torrplay/torrplay/pkg/stream"
+	"golang.org/x/time/rate"
 )
 
 type localWebseedFixture struct {
@@ -1030,4 +1032,116 @@ func TestIntegrationPreloadAtPlaybackPosition(t *testing.T) {
 	assert.True(t, cached(clusterOffsets[30]), "the cluster at the position must be cached")
 	assert.True(t, cached(clusterOffsets[32]), "the window must extend past the position")
 	assert.False(t, cached(clusterOffsets[10]), "data away from the position must not be cached")
+}
+
+// newRateLimitedSeeder returns a torrent client listening on loopback TCP that
+// seeds payload, the single file of meta, uploading at most bytesPerSecond, as
+// a slow swarm does.
+func newRateLimitedSeeder(t *testing.T, meta *metainfo.MetaInfo, payload []byte, bytesPerSecond int) *torrent.Client {
+	t.Helper()
+	info, err := meta.UnmarshalInfo()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	path := filepath.Join(append([]string{dir, info.Name}, info.Files[0].Path...)...)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, payload, 0o600))
+
+	config := torrent.NewDefaultClientConfig()
+	config.DataDir = dir
+	config.Seed = true
+	config.NoDHT = true
+	config.DisablePEX = true
+	config.DisableTrackers = true
+	config.DisableWebtorrent = true
+	config.DisableWebseeds = true
+	config.NoDefaultPortForwarding = true
+	config.DisableUTP = true
+	config.DisableIPv6 = true
+	config.SetListenAddr("127.0.0.1:0")
+	config.UploadRateLimiter = rate.NewLimiter(rate.Limit(bytesPerSecond), 32<<10)
+	seeder, err := torrent.NewClient(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { seeder.Close() })
+	to, err := seeder.AddTorrent(meta)
+	require.NoError(t, err)
+	require.NoError(t, to.VerifyDataContext(t.Context()))
+	// Verified pieces are marked complete asynchronously.
+	require.Eventually(t, to.Complete().Bool, 10*time.Second, 10*time.Millisecond, "the seeder must hold the whole file")
+	return seeder
+}
+
+// A preload at a playback position fetched from a slow peer downloads its
+// resume window with its head and tail rather than after them, so a player
+// that stops waiting for the preload still finds the data it resumes from.
+func TestIntegrationPreloadAtPlaybackPositionFromSlowPeer(t *testing.T) {
+	payload, clusterOffsets := matroskaFixture(128, 64<<10)
+	meta := webseedMetaInfo(t, payload, "", "Sintel.mkv")
+	meta.UrlList = nil
+	seeder := newRateLimitedSeeder(t, meta, payload, 256<<10)
+
+	runtimeConfig := testControllerRuntimeConfig()
+	runtimeConfig.configureClient = func(config *torrent.ClientConfig) {
+		config.NoDHT = true
+		config.DisablePEX = true
+		config.DisableTrackers = true
+		config.DisableWebtorrent = true
+		config.DisableWebseeds = true
+		config.NoDefaultPortForwarding = true
+		config.DisableUTP = true
+		config.DisableIPv6 = true
+		config.SetListenAddr("127.0.0.1:0")
+	}
+	ctrl, _ := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+	ctrl.Start()
+	_, err := ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), api.Memory)
+	require.NoError(t, err)
+	ih := saveTorrentRecord(t, ctrl, meta, len(payload), api.Memory)
+	pool := ctrl.streamPool.Load()
+	// A 1 MiB budget leaves a 512 KiB preload: a head and tail of 128 KiB
+	// and a window of the remaining whole pieces, about two seconds of the
+	// seeder's upload.
+	pool.SetReadaheadBudget(1 << 20)
+	to, ok := ctrl.clientTorrent(ih)
+	require.True(t, ok)
+	sub := to.SubscribePieceStateChanges()
+	defer sub.Close()
+
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 60*time.Second))
+	to.AddClientPeer(seeder)
+
+	completedAt := make(map[int]time.Time)
+	ready := time.NewTicker(10 * time.Millisecond)
+	defer ready.Stop()
+	timeout := time.After(30 * time.Second)
+wait:
+	for {
+		select {
+		case change := <-sub.Values:
+			if _, seen := completedAt[change.Index]; change.Complete && !seen {
+				completedAt[change.Index] = time.Now()
+			}
+		case <-ready.C:
+			if status, ok := pool.PreloadStatus(ih); ok && status.State == stream.PreloadReady {
+				break wait
+			}
+		case <-timeout:
+			require.FailNow(t, "the preload did not become ready")
+		}
+	}
+
+	piece := func(offset int64) int { return int(offset / localWebseedPieceLength) }
+	// The head and tail each take the 128 KiB at their end of the file.
+	var boundaryDone time.Time
+	for index := range to.NumPieces() {
+		inHead := index < piece(128<<10)
+		inTail := index >= piece(int64(len(payload))-128<<10)
+		if (inHead || inTail) && completedAt[index].After(boundaryDone) {
+			boundaryDone = completedAt[index]
+		}
+	}
+	windowStart, ok := completedAt[piece(clusterOffsets[60])]
+	require.True(t, ok, "the cluster at the position must be preloaded")
+	assert.True(t, windowStart.Before(boundaryDone),
+		"the window must download with the head and tail, not after them: window piece at %v, head and tail done at %v",
+		windowStart.Sub(boundaryDone), boundaryDone)
 }
