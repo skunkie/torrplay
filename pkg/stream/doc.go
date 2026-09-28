@@ -32,7 +32,9 @@
 // most one lingering reader. Other viewers' readers never close it, because
 // the engine is shared; readers still lingering after LingerTimeout are
 // closed. Readers of a dropped torrent close on release, or within a second
-// when the torrent is dropped while they linger.
+// when the torrent is dropped while they linger. OnStreamingChange reports when
+// the pool gains its first reader and when its last reader, lingering ones
+// included, closes.
 //
 // # Eviction Protection
 //

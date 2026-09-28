@@ -830,3 +830,48 @@ func TestIntegrationFileStorageWriteFailureStopsBackgroundDownload(t *testing.T)
 	stopsRequesting("the retried download must stop again")
 	downloader.Stop()
 }
+
+// Background downloads pause as soon as a stream starts and resume as soon as
+// its last reader closes, without waiting for the downloader's interval.
+func TestIntegrationDownloaderFollowsStreaming(t *testing.T) {
+	// The background torrent's web seed never answers, so its download runs
+	// for the whole test.
+	payload := bytes.Repeat([]byte("torrplay-background\n"), 4096)
+	unblock := make(chan struct{})
+	seed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(seed.Close)
+	t.Cleanup(func() { close(unblock) })
+	streamed := newLocalWebseedFixture(t, true)
+	defer streamed.release()
+
+	ctrl := newIntegrationTestController(t)
+	ctrl.mu.Lock()
+	settings := ctrl.settings.Load()
+	settings.EnableDownloader = utils.Ptr(true)
+	settings.FileStoragePath = utils.Ptr(t.TempDir())
+	ctrl.mu.Unlock()
+	require.NoError(t, ctrl.db.UpdateSettings(database.FromAPISettings(settings)))
+	background := saveWebseedTorrent(t, ctrl, localWebseedMetaInfo(t, payload, seed.URL), len(payload), api.File)
+	streamedHash := addLocalWebseedTorrent(t, ctrl, streamed)
+
+	downloader := ctrl.downloader.Load()
+	downloader.Stop()
+	downloader.Start()
+	defer downloader.Stop()
+	downloading := func() bool { return downloader.IsDownloading(background) }
+	require.Eventually(t, downloading, 5*time.Second, time.Millisecond, "the downloader must download the saved file-storage torrent")
+
+	// Each change must show well within the downloader's one-minute interval.
+	done, to := startBlockedIntegrationStream(t, ctrl, streamed, fmt.Sprintf("/api/v1/stream/%s?index=0", streamedHash))
+	require.Eventually(t, func() bool { return !downloading() }, 2*time.Second, time.Millisecond, "a stream must pause the background download at once")
+	finishBlockedIntegrationStream(t, streamed, done)
+	assert.Never(t, downloading, time.Second, 10*time.Millisecond, "a lingering reader keeps the background download paused")
+	// Dropping the torrent closes its lingering reader within a second.
+	to.Drop()
+	require.Eventually(t, downloading, 3*time.Second, time.Millisecond, "closing the last reader must resume the background download at once")
+}

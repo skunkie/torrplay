@@ -91,6 +91,11 @@ type Config struct {
 	// LingerTimeout is how long a released reader stays open, still reading
 	// ahead, for its player's next request. Zero defaults to 30 seconds.
 	LingerTimeout time.Duration
+	// OnStreamingChange, when set, is called with true when the pool gains its
+	// first reader, active or lingering, and with false when its last reader
+	// closes. It runs with the pool locked, so it must return quickly and must
+	// not call the pool.
+	OnStreamingChange func(streaming bool)
 	// PriorityWindowFraction, when > 0, raises the pieces just ahead of a
 	// playback reader to PiecePriorityNow. The fraction applies to the
 	// readahead window size in pieces, and at least one piece is claimed. The
@@ -335,6 +340,9 @@ type Pool struct {
 	preloads        map[metainfo.Hash]*preload
 	readaheadBudget int64 // current total readahead budget, updated by SetReadaheadBudget
 	readers         map[uint64]*streamReader
+	// streaming is whether OnStreamingChange last reported that the pool has
+	// readers.
+	streaming bool
 }
 
 // New creates a new stream pool and starts a background goroutine that closes
@@ -426,6 +434,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		stream:        stream,
 	}
 	p.readers[readerID] = sr
+	p.noteStreamingLocked()
 	p.wakeExpireLoop()
 	if pl := p.preloads[infoHash]; pl != nil && pl.file == file {
 		pl.fileRead = true
@@ -572,6 +581,20 @@ func (p *Pool) removeReaderLocked(sr *streamReader) {
 	p.clearReaderClaimsLocked(sr)
 	closeStreamReaderLocked(sr)
 	delete(p.readers, sr.readerID)
+	p.noteStreamingLocked()
+}
+
+// noteStreamingLocked reports to OnStreamingChange when the pool goes from
+// having no readers to having some, or back. Must be called with p.mu held.
+func (p *Pool) noteStreamingLocked() {
+	streaming := len(p.readers) > 0
+	if streaming == p.streaming {
+		return
+	}
+	p.streaming = streaming
+	if p.cfg.OnStreamingChange != nil {
+		p.cfg.OnStreamingChange(streaming)
+	}
 }
 
 // refreshReadaheadLocked recalculates and applies readahead for all active readers.

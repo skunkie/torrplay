@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -502,6 +503,46 @@ func TestPoolStaleReaderCannotMoveLingeringReader(t *testing.T) {
 	pool.mu.Lock()
 	assert.Zero(t, sr.lastOffset)
 	pool.mu.Unlock()
+}
+
+// The pool reports when it gains its first reader and when its last reader,
+// lingering ones included, closes, so the background downloader can pause and
+// resume at once.
+func TestPoolReportsStreamingChanges(t *testing.T) {
+	c := newTestTorrentClient(t)
+	to, f := addTestTorrent(t, c)
+	otherTorrent, other, _ := addHashedTorrent(t, c, "other")
+	var mu sync.Mutex
+	var changes []bool
+	reported := func() []bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(changes)
+	}
+	pool := New(Config{
+		Logger:        testLogger(),
+		LingerTimeout: time.Hour,
+		OnStreamingChange: func(streaming bool) {
+			mu.Lock()
+			changes = append(changes, streaming)
+			mu.Unlock()
+		},
+	})
+	t.Cleanup(pool.Close)
+
+	_, release := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
+	assert.Equal(t, []bool{true}, reported(), "the first reader starts streaming")
+	_, releaseOther := acquireTestReader(t, pool, other, MemoryStorage, 1024*1024)
+	releaseOther()
+	release()
+	assert.Equal(t, []bool{true}, reported(), "lingering readers keep streaming")
+
+	to.Drop()
+	pool.closeExpiredLingeringReaders()
+	assert.Equal(t, []bool{true}, reported(), "a lingering reader of another torrent keeps streaming")
+	otherTorrent.Drop()
+	pool.closeExpiredLingeringReaders()
+	assert.Equal(t, []bool{true, false}, reported(), "closing the last reader stops streaming")
 }
 
 func TestPool_ReaderPositions(t *testing.T) {

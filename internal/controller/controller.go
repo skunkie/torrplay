@@ -998,9 +998,16 @@ func (c *Controller) configureTorrentClient() error {
 	// Registry: storageClient protects actively-read pieces from eviction
 	// by registering readahead windows with the storage layer.
 	pool := stream.New(stream.Config{
-		FileReadaheadBytes:     fileStorageReadahead,
-		LingerTimeout:          30 * time.Second,
-		Logger:                 logger,
+		FileReadaheadBytes: fileStorageReadahead,
+		LingerTimeout:      30 * time.Second,
+		Logger:             logger,
+		// Background downloads pause while anything streams, so the
+		// downloader checks at once instead of at its next interval.
+		OnStreamingChange: func(bool) {
+			if d := c.downloader.Load(); d != nil {
+				d.Wake()
+			}
+		},
 		PriorityWindowFraction: 0.15,
 		ReadObserver: func(mode stream.StorageMode, duration time.Duration) {
 			if mode == stream.FileStorage {

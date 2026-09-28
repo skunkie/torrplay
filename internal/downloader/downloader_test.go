@@ -11,6 +11,7 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -312,6 +313,39 @@ func TestDownloader_IsDownloading(t *testing.T) {
 	assert.False(t, d.IsDownloading(hash))
 	d.downloading[hash] = struct{}{}
 	assert.True(t, d.IsDownloading(hash))
+}
+
+func TestDownloader_Wake(t *testing.T) {
+	testMetaInfo := newTestTorrent(t, 1024)
+	testHash := testMetaInfo.HashInfoBytes()
+	storageType := api.File
+	td := t.TempDir()
+	pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+	require.NoError(t, err)
+	defer pc.Close()
+	db := &MockDB{
+		settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}},
+		torrents: []*database.Torrent{{Torrent: api.Torrent{Hash: testHash, Magnet: utils.MagnetURIFromHash(testHash), Storage: &storageType}}},
+	}
+	client := newTestTorrentClient(t, td)
+	var streaming atomic.Bool
+	downloader := New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, streaming.Load)
+	to, err := client.AddTorrent(testMetaInfo)
+	require.NoError(t, err)
+	require.NoError(t, to.VerifyDataContext(t.Context()))
+	downloading := func() bool { return downloader.IsDownloading(testHash) }
+
+	downloader.Start()
+	defer downloader.Stop()
+	require.Eventually(t, downloading, time.Second, time.Millisecond)
+
+	// Each change must show well within the one-minute interval.
+	streaming.Store(true)
+	downloader.Wake()
+	require.Eventually(t, func() bool { return !downloading() }, time.Second, time.Millisecond, "waking must pause for streaming at once")
+	streaming.Store(false)
+	downloader.Wake()
+	require.Eventually(t, downloading, time.Second, time.Millisecond, "waking must resume after streaming at once")
 }
 
 func TestDownloader_Stop(t *testing.T) {

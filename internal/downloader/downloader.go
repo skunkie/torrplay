@@ -43,6 +43,8 @@ type Downloader struct {
 	// downloads pause while it does, so playback keeps the bandwidth.
 	streaming func() bool
 	trackers  [][]string
+	// wake requests a pass before the next interval.
+	wake chan struct{}
 	// writeFailed holds the torrents whose file storage writes failed. Their
 	// background downloads stay stopped until the downloader stops.
 	writeFailed map[metainfo.Hash]struct{}
@@ -61,6 +63,7 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		pieceCompletion: pc,
 		streaming:       streaming,
 		trackers:        trackers,
+		wake:            make(chan struct{}, 1),
 		writeFailed:     make(map[metainfo.Hash]struct{}),
 	}
 }
@@ -124,6 +127,15 @@ func (d *Downloader) Stop() {
 	d.metrics.SetDownloadingTorrents(0)
 }
 
+// Wake makes the downloader run a pass at once instead of at its next
+// interval, such as when streaming starts or stops. It never blocks.
+func (d *Downloader) Wake() {
+	select {
+	case d.wake <- struct{}{}:
+	default:
+	}
+}
+
 func (d *Downloader) run(stop <-chan struct{}) {
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
@@ -136,6 +148,8 @@ func (d *Downloader) run(stop <-chan struct{}) {
 	for {
 		select {
 		case <-ticker.C:
+			d.processTorrents()
+		case <-d.wake:
 			d.processTorrents()
 		case <-stop:
 			d.logger.Info("background downloader stopped")
