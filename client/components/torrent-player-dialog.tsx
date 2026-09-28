@@ -22,7 +22,8 @@ interface TorrentPlayerDialogProps {
 // isInactivePreloadStatus reports whether the server is not preloading now, so
 // the player should stop polling and play without waiting. A queued preload
 // may wait for other torrents' preloads, while playback outranks preloads, so
-// the player plays at once and leaves the preload queued.
+// the player plays at once and leaves the preload queued, still cancelling it
+// on close.
 function isInactivePreloadStatus(status: PreloadResponse['status']): boolean {
   return status === 'evicted' || status === 'failed' || status === 'idle' || status === 'queued';
 }
@@ -82,9 +83,12 @@ export const TorrentPlayerDialog = ({
     }
   }, [stopPreloadPolling]);
 
-  const finishInactivePreload = useCallback(() => {
+  const finishInactivePreload = useCallback((status: PreloadResponse['status']) => {
     stopPreloadPolling();
-    activePreloadHashRef.current = null;
+    // A queued preload is still the player's, so closing the player cancels it.
+    if (status !== 'queued') {
+      activePreloadHashRef.current = null;
+    }
   }, [stopPreloadPolling]);
 
   if (open && !prevOpenRef.current) {
@@ -167,7 +171,7 @@ export const TorrentPlayerDialog = ({
         setTotalPeers(resp.totalPeers || 0);
 
         if (isInactivePreloadStatus(resp.status)) {
-          finishInactivePreload();
+          finishInactivePreload(resp.status);
           preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
           return;
@@ -202,7 +206,7 @@ export const TorrentPlayerDialog = ({
             setTotalPeers(statusResp.totalPeers || 0);
 
             if (isInactivePreloadStatus(statusResp.status)) {
-              finishInactivePreload();
+              finishInactivePreload(statusResp.status);
               preloadedFileRef.current = currentSelectedFile.path;
               setIsPreloading(false);
               return;
