@@ -10,7 +10,11 @@ import (
 	"math"
 )
 
-const maxMP4TableEntries = 16 << 20
+// maxMP4TableBytes bounds the size of one sample table read from a file, so a
+// crafted file cannot make the resolver allocate and download more. It holds
+// the sample sizes of 4M samples, over 18 hours of video at 60 frames per
+// second.
+const maxMP4TableBytes = 16 << 20
 
 type mp4Box struct {
 	dataEnd   int64
@@ -296,36 +300,52 @@ func (table mp4SampleTable) sampleSize(sample uint64) (uint32, bool) {
 	return table.sampleSizes[sample], true
 }
 
+// findMP4Box returns the first box of type typ in [start, end), reading box
+// headers only up to it. It stops at a movie fragment, whose samples follow
+// the fragments' own indexes rather than moov's sample tables, so a fragmented
+// file is not walked fragment by fragment.
 func findMP4Box(reader io.ReaderAt, start, end int64, typ string) (mp4Box, bool, error) {
-	boxes, err := listMP4Boxes(reader, start, end)
-	if err != nil {
-		return mp4Box{}, false, err
-	}
-	for _, box := range boxes {
+	var found mp4Box
+	ok := false
+	err := walkMP4Boxes(reader, start, end, func(box mp4Box) bool {
 		if box.typ == typ {
-			return box, true, nil
+			found, ok = box, true
 		}
-	}
-	return mp4Box{}, false, nil
+		return !ok && box.typ != "moof"
+	})
+	return found, ok, err
 }
 
 func listMP4Boxes(reader io.ReaderAt, start, end int64) ([]mp4Box, error) {
 	boxes := make([]mp4Box, 0, 8)
+	err := walkMP4Boxes(reader, start, end, func(box mp4Box) bool {
+		boxes = append(boxes, box)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return boxes, nil
+}
+
+// walkMP4Boxes calls visit with each box in [start, end) in order until visit
+// returns false.
+func walkMP4Boxes(reader io.ReaderAt, start, end int64, visit func(mp4Box) bool) error {
 	for offset := start; offset+8 <= end; {
 		header := make([]byte, 16)
 		if err := readAtFull(reader, header[:8], offset); err != nil {
-			return nil, err
+			return err
 		}
 		boxSize := int64(binary.BigEndian.Uint32(header[:4]))
 		headerSize := int64(8)
 		switch boxSize {
 		case 1:
 			if err := readAtFull(reader, header[8:16], offset+8); err != nil {
-				return nil, err
+				return err
 			}
 			largeSize := binary.BigEndian.Uint64(header[8:16])
 			if largeSize > math.MaxInt64 {
-				return nil, errInvalidContainer
+				return errInvalidContainer
 			}
 			boxSize = int64(largeSize)
 			headerSize = 16
@@ -334,16 +354,18 @@ func listMP4Boxes(reader io.ReaderAt, start, end int64) ([]mp4Box, error) {
 		}
 		boxEnd, valid := checkedEnd(offset, boxSize, end)
 		if !valid || boxSize < headerSize {
-			return nil, errInvalidContainer
+			return errInvalidContainer
 		}
-		boxes = append(boxes, mp4Box{
+		if !visit(mp4Box{
 			dataEnd:   boxEnd,
 			dataStart: offset + headerSize,
 			typ:       string(header[4:8]),
-		})
+		}) {
+			return nil
+		}
 		offset = boxEnd
 	}
-	return boxes, nil
+	return nil
 }
 
 func readMP4EntryCount(reader io.ReaderAt, box mp4Box, entrySize int64) (uint32, int64, error) {
@@ -352,10 +374,10 @@ func readMP4EntryCount(reader io.ReaderAt, box mp4Box, entrySize int64) (uint32,
 		return 0, 0, err
 	}
 	count := binary.BigEndian.Uint32(header[4:8])
-	if count > maxMP4TableEntries {
+	bytes := int64(count) * entrySize
+	if bytes > maxMP4TableBytes {
 		return 0, 0, errInvalidContainer
 	}
-	bytes := int64(count) * entrySize
 	if _, valid := checkedEnd(box.dataStart+8, bytes, box.dataEnd); !valid {
 		return 0, 0, errInvalidContainer
 	}
@@ -447,11 +469,11 @@ func readMP4SampleSizes(reader io.ReaderAt, box mp4Box) (uint32, []uint32, error
 	}
 	uniform := binary.BigEndian.Uint32(header[4:8])
 	count := binary.BigEndian.Uint32(header[8:12])
-	if count > maxMP4TableEntries {
-		return 0, nil, errInvalidContainer
-	}
 	if uniform > 0 {
 		return uniform, nil, nil
+	}
+	if int64(count)*4 > maxMP4TableBytes {
+		return 0, nil, errInvalidContainer
 	}
 	if _, valid := checkedEnd(box.dataStart+12, int64(count)*4, box.dataEnd); !valid {
 		return 0, nil, errInvalidContainer
@@ -478,7 +500,7 @@ func readMP4EditList(reader io.ReaderAt, box mp4Box) ([]mp4Edit, error) {
 	if version == 1 {
 		entrySize = 20
 	}
-	if count > maxMP4TableEntries {
+	if int64(count)*entrySize > maxMP4TableBytes {
 		return nil, errInvalidContainer
 	}
 	if _, valid := checkedEnd(box.dataStart+8, int64(count)*entrySize, box.dataEnd); !valid {

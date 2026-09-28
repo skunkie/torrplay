@@ -25,26 +25,71 @@ func ResolvePlaybackOffset(reader io.ReaderAt, size int64, filePath string, posi
 		return 0, false, nil
 	}
 
-	extension := strings.ToLower(filepath.Ext(filePath))
-	switch extension {
-	case ".m4v", ".mov", ".mp4":
-		return resolveMP4Offset(reader, size, positionSeconds)
-	case ".mkv", ".webm":
-		return resolveMatroskaOffset(reader, size, positionSeconds)
+	// The extension picks the likely container, and the header identifies the
+	// real one when that container's parser finds nothing, as in a Matroska
+	// file named .mp4.
+	tried := containerByExtension(filePath)
+	if tried != unknownContainer {
+		offset, ok, err := tried.resolve(reader, size, positionSeconds)
+		if ok || (err != nil && !errors.Is(err, errInvalidContainer)) {
+			return offset, ok, err
+		}
 	}
 
 	header := make([]byte, 12)
 	if _, err := reader.ReadAt(header, 0); err != nil && !errors.Is(err, io.EOF) {
 		return 0, false, err
 	}
-	if binary.BigEndian.Uint32(header[:4]) == matroskaEBMLID {
-		return resolveMatroskaOffset(reader, size, positionSeconds)
+	sniffed := containerByHeader(header)
+	if sniffed == unknownContainer || sniffed == tried {
+		return 0, false, nil
 	}
-	if string(header[4:8]) == "ftyp" {
-		return resolveMP4Offset(reader, size, positionSeconds)
-	}
+	return sniffed.resolve(reader, size, positionSeconds)
+}
 
-	return 0, false, nil
+// container is a media container format with a seek index the package reads.
+type container int
+
+const (
+	unknownContainer container = iota
+	matroskaContainer
+	mp4Container
+)
+
+// containerByExtension returns the container a file name's extension names.
+func containerByExtension(filePath string) container {
+	switch strings.ToLower(filepath.Ext(filePath)) {
+	case ".m4v", ".mov", ".mp4":
+		return mp4Container
+	case ".mkv", ".webm":
+		return matroskaContainer
+	default:
+		return unknownContainer
+	}
+}
+
+// containerByHeader returns the container a file's first 12 bytes identify.
+func containerByHeader(header []byte) container {
+	switch {
+	case binary.BigEndian.Uint32(header[:4]) == matroskaEBMLID:
+		return matroskaContainer
+	case string(header[4:8]) == "ftyp":
+		return mp4Container
+	default:
+		return unknownContainer
+	}
+}
+
+// resolve resolves a playback position through the container's seek index.
+func (c container) resolve(reader io.ReaderAt, size int64, positionSeconds float64) (int64, bool, error) {
+	switch c {
+	case matroskaContainer:
+		return resolveMatroskaOffset(reader, size, positionSeconds)
+	case mp4Container:
+		return resolveMP4Offset(reader, size, positionSeconds)
+	default:
+		return 0, false, nil
+	}
 }
 
 func scaleSeconds(positionSeconds, unitsPerSecond float64) uint64 {

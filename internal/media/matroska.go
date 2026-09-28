@@ -5,6 +5,7 @@
 package media
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -34,6 +35,13 @@ const (
 	matroskaCueRelativePositionID = 0xF0
 	matroskaClusterID             = 0x1F43B675
 )
+
+// maxMatroskaCuesBytes bounds the Cues element read into memory. Cues take a
+// few megabytes even for long films.
+const maxMatroskaCuesBytes = 32 << 20
+
+// maxMatroskaSeekHeads bounds the chain of SeekHeads followed from the first.
+const maxMatroskaSeekHeads = 4
 
 type matroskaElement struct {
 	dataEnd   int64
@@ -97,8 +105,18 @@ func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float
 	if err != nil || !ok {
 		return 0, false, err
 	}
+	// Cue points are parsed from many small elements, so the Cues are read
+	// in one piece rather than element by element through reader.
+	cuesSize := cues.dataEnd - cues.dataStart
+	if cuesSize > maxMatroskaCuesBytes {
+		return 0, false, nil
+	}
+	cuesData := make([]byte, cuesSize)
+	if err := readAtFull(reader, cuesData, cues.dataStart); err != nil {
+		return 0, false, err
+	}
 	target := scaleSeconds(positionSeconds, 1_000_000_000/float64(timestampScale))
-	cue, found, err := findMatroskaCue(reader, cues, videoTrack, target)
+	cue, found, err := findMatroskaCue(bytes.NewReader(cuesData), matroskaElement{dataEnd: cuesSize, id: cues.id}, videoTrack, target)
 	if err != nil || !found {
 		return 0, false, err
 	}
@@ -155,6 +173,34 @@ func scanMatroskaSegment(reader io.ReaderAt, segment matroskaElement) (map[uint6
 			return nil, nil, errInvalidContainer
 		}
 		offset = element.dataEnd
+	}
+	// A SeekHead may list another SeekHead, typically placed after the
+	// clusters, which lists the elements the first one does not.
+	for range maxMatroskaSeekHeads {
+		position, ok := seekTargets[matroskaSeekHeadID]
+		if !ok {
+			break
+		}
+		delete(seekTargets, matroskaSeekHeadID)
+		if position > math.MaxInt64 {
+			break
+		}
+		seekHead, found, err := readMatroskaElement(reader, segment.dataStart+int64(position), segment.dataEnd)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !found || seekHead.id != matroskaSeekHeadID {
+			break
+		}
+		targets, err := readMatroskaSeekHead(reader, seekHead)
+		if err != nil {
+			return nil, nil, err
+		}
+		for id, target := range targets {
+			if _, exists := seekTargets[id]; !exists {
+				seekTargets[id] = target
+			}
+		}
 	}
 	return elements, seekTargets, nil
 }

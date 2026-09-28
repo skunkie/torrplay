@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"io"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -34,7 +35,7 @@ func TestResolvePlaybackOffset(t *testing.T) {
 	})
 
 	t.Run("matroska", func(t *testing.T) {
-		file, secondClusterOffset, _ := buildIndexedMatroska(t, true)
+		file, secondClusterOffset, _ := buildIndexedMatroska(t, 1)
 		for _, position := range []float64{12, math.MaxFloat64} {
 			offset, ok, err := ResolvePlaybackOffset(bytes.NewReader(file), int64(len(file)), "movie.mkv", position)
 			require.NoError(t, err)
@@ -44,7 +45,7 @@ func TestResolvePlaybackOffset(t *testing.T) {
 	})
 
 	t.Run("matroska cues past clusters without a seekhead", func(t *testing.T) {
-		file, _, firstClusterOffset := buildIndexedMatroska(t, false)
+		file, _, firstClusterOffset := buildIndexedMatroska(t, 0)
 		reader := &furthestReader{ReaderAt: bytes.NewReader(file)}
 
 		_, ok, err := ResolvePlaybackOffset(reader, int64(len(file)), "movie.mkv", 12)
@@ -53,12 +54,74 @@ func TestResolvePlaybackOffset(t *testing.T) {
 		assert.LessOrEqual(t, reader.furthest, firstClusterOffset+16, "the clusters must not be walked")
 	})
 
+	t.Run("matroska cues listed by a second seekhead", func(t *testing.T) {
+		file, secondClusterOffset, _ := buildIndexedMatroska(t, 2)
+
+		offset, ok, err := ResolvePlaybackOffset(bytes.NewReader(file), int64(len(file)), "movie.mkv", 12)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, secondClusterOffset, offset)
+	})
+
+	t.Run("container mislabeled by its extension", func(t *testing.T) {
+		mkv, secondClusterOffset, _ := buildIndexedMatroska(t, 1)
+		offset, ok, err := ResolvePlaybackOffset(bytes.NewReader(mkv), int64(len(mkv)), "movie.mp4", 12)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, secondClusterOffset, offset)
+
+		mp4 := buildIndexedMP4(t)
+		offset, ok, err = ResolvePlaybackOffset(bytes.NewReader(mp4), int64(len(mp4)), "movie.mkv", 4)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, int64(1000), offset)
+	})
+
+	t.Run("fragmented mp4", func(t *testing.T) {
+		mvhd := mp4TestBox("mvhd", append(make([]byte, 12), uint32Bytes(1000)...))
+		file := slices.Concat(mp4TestBox("ftyp", []byte("isom0000")), mp4TestBox("moov", mvhd))
+		firstFragment := int64(len(file))
+		for range 16 {
+			file = slices.Concat(file, mp4TestBox("moof", nil), mp4TestBox("mdat", make([]byte, 1024)))
+		}
+		reader := &furthestReader{ReaderAt: bytes.NewReader(file)}
+
+		_, ok, err := ResolvePlaybackOffset(reader, int64(len(file)), "movie.mp4", 4)
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.LessOrEqual(t, reader.furthest, firstFragment+16, "the fragments must not be walked")
+	})
+
+	t.Run("mp4 table too large", func(t *testing.T) {
+		// An stsz box that really holds 8M sample sizes is refused before its
+		// table is allocated or read.
+		const count = 8 << 20
+		header := slices.Concat(uint32Bytes(0), uint32Bytes(0), uint32Bytes(count))
+		reader := &furthestReader{ReaderAt: zeroPaddedReader(header)}
+		box := mp4Box{dataStart: 0, dataEnd: int64(len(header)) + count*4, typ: "stsz"}
+
+		_, _, err := readMP4SampleSizes(reader, box)
+		assert.ErrorIs(t, err, errInvalidContainer)
+		assert.Equal(t, int64(len(header)), reader.furthest, "the table must not be read")
+	})
+
 	t.Run("unsupported container", func(t *testing.T) {
 		offset, ok, err := ResolvePlaybackOffset(bytes.NewReader([]byte("not media data")), 14, "movie.avi", 30)
 		require.NoError(t, err)
 		assert.False(t, ok)
 		assert.Zero(t, offset)
 	})
+}
+
+// zeroPaddedReader reads prefix followed by zeros without end.
+type zeroPaddedReader []byte
+
+func (r zeroPaddedReader) ReadAt(b []byte, off int64) (int, error) {
+	clear(b)
+	if off < int64(len(r)) {
+		copy(b, r[off:])
+	}
+	return len(b), nil
 }
 
 // furthestReader records the furthest offset read through it.
@@ -122,9 +185,10 @@ func uint32Bytes(value uint32) []byte {
 }
 
 // buildIndexedMatroska returns a Matroska file with two clusters followed by
-// Cues, and the file offsets of its second and first clusters. With seekHead,
-// a SeekHead before the clusters locates the Cues.
-func buildIndexedMatroska(t *testing.T, seekHead bool) (file []byte, secondCluster, firstCluster int64) {
+// Cues, and the file offsets of its second and first clusters. With one
+// SeekHead, a SeekHead before the clusters locates the Cues; with two, it
+// locates a second SeekHead after the clusters, which locates the Cues.
+func buildIndexedMatroska(t *testing.T, seekHeads int) (file []byte, secondCluster, firstCluster int64) {
 	t.Helper()
 	info := matroskaTestElement([]byte{0x15, 0x49, 0xA9, 0x66},
 		matroskaTestElement([]byte{0x2A, 0xD7, 0xB1}, uintBytes(1_000_000)))
@@ -135,30 +199,44 @@ func buildIndexedMatroska(t *testing.T, seekHead bool) (file []byte, secondClust
 	tracks := matroskaTestElement([]byte{0x16, 0x54, 0xAE, 0x6B}, trackEntry)
 	clusterOne := matroskaTestElement([]byte{0x1F, 0x43, 0xB6, 0x75}, []byte{0})
 	clusterTwo := matroskaTestElement([]byte{0x1F, 0x43, 0xB6, 0x75}, []byte{0})
-	// The SeekPosition is fixed-width, so the SeekHead's size does not depend
+	// The SeekPosition is fixed-width, so a SeekHead's size does not depend
 	// on the position it holds.
-	seekHeadFor := func(cuesPosition uint64) []byte {
-		if !seekHead {
-			return nil
-		}
-		position := make([]byte, 8)
-		binary.BigEndian.PutUint64(position, cuesPosition)
+	seekHeadFor := func(id []byte, position uint64) []byte {
+		fixed := make([]byte, 8)
+		binary.BigEndian.PutUint64(fixed, position)
 		seek := matroskaTestElement([]byte{0x4D, 0xBB}, append(
-			matroskaTestElement([]byte{0x53, 0xAB}, []byte{0x1C, 0x53, 0xBB, 0x6B}),
-			matroskaTestElement([]byte{0x53, 0xAC}, position)...,
+			matroskaTestElement([]byte{0x53, 0xAB}, id),
+			matroskaTestElement([]byte{0x53, 0xAC}, fixed)...,
 		))
 		return matroskaTestElement([]byte{0x11, 0x4D, 0x9B, 0x74}, seek)
 	}
-	headerLength := uint64(len(seekHeadFor(0)) + len(info) + len(tracks))
-	clusterOnePosition := headerLength
+	cuesID := []byte{0x1C, 0x53, 0xBB, 0x6B}
+	seekHeadID := []byte{0x11, 0x4D, 0x9B, 0x74}
+	var firstSeekHeadLength, secondSeekHeadLength uint64
+	if seekHeads > 0 {
+		firstSeekHeadLength = uint64(len(seekHeadFor(cuesID, 0)))
+	}
+	if seekHeads > 1 {
+		secondSeekHeadLength = firstSeekHeadLength
+	}
+	clusterOnePosition := firstSeekHeadLength + uint64(len(info)+len(tracks))
 	clusterTwoPosition := clusterOnePosition + uint64(len(clusterOne))
-	cuesPosition := clusterTwoPosition + uint64(len(clusterTwo))
-	cues := matroskaTestElement([]byte{0x1C, 0x53, 0xBB, 0x6B}, append(
+	secondSeekHeadPosition := clusterTwoPosition + uint64(len(clusterTwo))
+	cuesPosition := secondSeekHeadPosition + secondSeekHeadLength
+	cues := matroskaTestElement(cuesID, append(
 		matroskaCuePoint(0, clusterOnePosition),
 		matroskaCuePoint(10_000, clusterTwoPosition)...,
 	))
+	var firstSeekHead, secondSeekHead []byte
+	switch seekHeads {
+	case 1:
+		firstSeekHead = seekHeadFor(cuesID, cuesPosition)
+	case 2:
+		firstSeekHead = seekHeadFor(seekHeadID, secondSeekHeadPosition)
+		secondSeekHead = seekHeadFor(cuesID, cuesPosition)
+	}
 	var segmentPayload []byte
-	for _, element := range [][]byte{seekHeadFor(cuesPosition), info, tracks, clusterOne, clusterTwo, cues} {
+	for _, element := range [][]byte{firstSeekHead, info, tracks, clusterOne, clusterTwo, secondSeekHead, cues} {
 		segmentPayload = append(segmentPayload, element...)
 	}
 	segment := matroskaTestElement([]byte{0x18, 0x53, 0x80, 0x67}, segmentPayload)
