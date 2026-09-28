@@ -20,6 +20,13 @@ interface TorrentPlayerDialogProps {
   enablePreload?: boolean
 }
 
+// The player stops waiting for a preload that has completed no more data for
+// PRELOAD_STALL_MS, and for any preload after PRELOAD_MAX_WAIT_MS, and plays.
+// The preload keeps downloading what playback is about to request, such as a
+// resume window, and closing the player still cancels it.
+const PRELOAD_STALL_MS = 10_000;
+const PRELOAD_MAX_WAIT_MS = 60_000;
+
 // isInactivePreloadStatus reports whether the server holds no preload for the
 // player to cancel later.
 function isInactivePreloadStatus(status: PreloadResponse['status']): boolean {
@@ -201,6 +208,14 @@ export const TorrentPlayerDialog = ({
           return;
         }
 
+        const playWithoutWaiting = () => {
+          stopPreloadPolling();
+          preloadedFileRef.current = currentSelectedFile.path;
+          setIsPreloading(false);
+        };
+        let lastCompletedBytes = resp.completedBytes || 0;
+        let lastProgressAt = Date.now();
+
         // Start polling for preload progress. Each poll is scheduled only after the
         // previous one settles (rather than a fixed-cadence setInterval), so at most one
         // getPreload request is ever in flight - a slow response can't land after and
@@ -235,6 +250,15 @@ export const TorrentPlayerDialog = ({
               return;
             }
 
+            const completed = statusResp.completedBytes || 0;
+            if (completed > lastCompletedBytes) {
+              lastCompletedBytes = completed;
+              lastProgressAt = Date.now();
+            } else if (Date.now() - lastProgressAt >= PRELOAD_STALL_MS) {
+              playWithoutWaiting();
+              return;
+            }
+
             if (!isMounted) return;
             pollTimerRef.current = setTimeout(poll, 400);
           } catch {
@@ -246,15 +270,10 @@ export const TorrentPlayerDialog = ({
         };
         pollTimerRef.current = setTimeout(poll, 400);
 
-        // Play after 15 seconds even if the preload is not ready. The preload
-        // keeps downloading what playback is about to request, such as a
-        // resume window, and closing the player still cancels it.
         timeoutTimerRef.current = setTimeout(() => {
           if (!isMounted) return;
-          stopPreloadPolling();
-          preloadedFileRef.current = currentSelectedFile.path;
-          setIsPreloading(false);
-        }, 15000);
+          playWithoutWaiting();
+        }, PRELOAD_MAX_WAIT_MS);
       })
       .catch(() => {
         if (!isMounted) return;

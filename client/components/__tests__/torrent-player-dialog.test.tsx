@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TorrentPlayerDialog } from '@/components/torrent-player-dialog';
 import * as torrentsApi from '@/lib/api/torrents';
@@ -792,31 +792,22 @@ describe('TorrentPlayerDialog', () => {
       cancelSpy.mockClear();
     });
 
-    it('plays after 15 seconds without cancelling a preload that is not ready', async () => {
-      vi.useFakeTimers();
-      try {
-        vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce({
-          fileIndex: 0,
-          targetBytes: 1000,
-          completedBytes: 100,
-          progress: 0.1,
-          status: 'preloading',
-          activePeers: 1,
-          downloadRate: 10,
-          totalPeers: 1,
-        });
-        vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue({
-          fileIndex: 0,
-          targetBytes: 1000,
-          completedBytes: 100,
-          progress: 0.1,
-          status: 'preloading',
-          activePeers: 1,
-          downloadRate: 10,
-          totalPeers: 1,
-        });
-        const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
+    describe('stops waiting without cancelling the preload', () => {
+      const preloading = (completedBytes: number) => ({
+        fileIndex: 0,
+        targetBytes: 100000,
+        completedBytes,
+        progress: completedBytes / 100000,
+        status: 'preloading' as const,
+        activePeers: 1,
+        downloadRate: 10,
+        totalPeers: 1,
+      });
 
+      // waitsUntil reports that the player waits for the preload through
+      // waitMs and plays within a poll after it.
+      async function waitsUntil(waitMs: number) {
+        const cancelSpy = vi.spyOn(torrentsApi, 'cancelPreload').mockResolvedValue();
         const { unmount } = render(
           <TorrentPlayerDialog
             torrent={mockTorrentSingleVideo}
@@ -826,7 +817,7 @@ describe('TorrentPlayerDialog', () => {
           />,
         );
         await act(async () => {
-          await vi.advanceTimersByTimeAsync(14000);
+          await vi.advanceTimersByTimeAsync(waitMs - 500);
         });
         expect(screen.getByTestId('player-preload-badge')).toBeInTheDocument();
 
@@ -840,9 +831,27 @@ describe('TorrentPlayerDialog', () => {
         unmount();
         expect(cancelSpy).toHaveBeenCalledWith('1234567890');
         cancelSpy.mockClear();
-      } finally {
-        vi.useRealTimers();
       }
+
+      beforeEach(() => {
+        vi.useFakeTimers();
+        vi.spyOn(torrentsApi, 'startPreload').mockResolvedValueOnce(preloading(100));
+      });
+
+      afterEach(() => {
+        vi.useRealTimers();
+      });
+
+      it('when the preload stops making progress', async () => {
+        vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue(preloading(100));
+        await waitsUntil(10000);
+      });
+
+      it('after a minute of a preload that keeps making progress', async () => {
+        let completed = 100;
+        vi.spyOn(torrentsApi, 'getPreload').mockImplementation(async () => preloading(++completed));
+        await waitsUntil(60000);
+      });
     });
 
     it('stops polling without clearing status when the preload is evicted', async () => {
