@@ -1,0 +1,250 @@
+//go:build integration && stress
+
+// SPDX-FileCopyrightText: 2026 TorrPlay
+//
+// SPDX-License-Identifier: MIT
+
+package controller
+
+import (
+	"bytes"
+	"crypto/sha1"
+	"fmt"
+	"io"
+	"math/rand/v2"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/bencode"
+	"github.com/anacrolix/torrent/metainfo"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/torrplay/torrplay/internal/api"
+	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/utils"
+)
+
+const (
+	stressFileSize    = 64 << 20
+	stressPieceLength = 256 << 10
+	stressMemoryLimit = 128 << 20
+	// stressSeedRate is each webseed's upload rate, standing in for a swarm.
+	stressSeedRate = 16 << 20
+)
+
+// throttledReadSeeker limits reads to rate bytes per second.
+type throttledReadSeeker struct {
+	*bytes.Reader
+	rate int64
+}
+
+func (r *throttledReadSeeker) Read(p []byte) (int, error) {
+	p = p[:min(len(p), 64<<10)]
+	n, err := r.Reader.Read(p)
+	time.Sleep(time.Duration(int64(n) * int64(time.Second) / r.rate))
+	return n, err
+}
+
+// stressTorrent is a torrent served by its own throttled webseed.
+type stressTorrent struct {
+	hash    metainfo.Hash
+	name    string
+	payload []byte
+}
+
+func addStressTorrent(t *testing.T, ctrl *Controller, name string, seed uint64) stressTorrent {
+	t.Helper()
+	payload := make([]byte, stressFileSize)
+	rng := rand.New(rand.NewPCG(seed, seed)) //nolint:gosec // Seeded, reproducible test data.
+	for i := 0; i < len(payload); i += 8 {
+		v := rng.Uint64()
+		for j := 0; j < 8 && i+j < len(payload); j++ {
+			payload[i+j] = byte(v >> (8 * j))
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, name, time.Time{}, &throttledReadSeeker{Reader: bytes.NewReader(payload), rate: stressSeedRate})
+	}))
+	t.Cleanup(server.Close)
+
+	pieces := make([]byte, 0, stressFileSize/stressPieceLength*sha1.Size)
+	for offset := 0; offset < len(payload); offset += stressPieceLength {
+		sum := sha1.Sum(payload[offset:min(offset+stressPieceLength, len(payload))])
+		pieces = append(pieces, sum[:]...)
+	}
+	infoBytes, err := bencode.Marshal(metainfo.Info{
+		Name:        name,
+		PieceLength: stressPieceLength,
+		Pieces:      pieces,
+		Files:       []metainfo.FileInfo{{Length: stressFileSize, Path: []string{name + ".mkv"}}},
+	})
+	require.NoError(t, err)
+	meta := &metainfo.MetaInfo{InfoBytes: infoBytes, UrlList: metainfo.UrlList{server.URL + "/"}}
+	_, _, err = ctrl.currentClient().AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta))
+	require.NoError(t, err)
+
+	ih := meta.HashInfoBytes()
+	storage := api.Memory
+	require.NoError(t, ctrl.db.CreateTorrent(&database.Torrent{Torrent: api.Torrent{
+		Hash:      ih,
+		Magnet:    utils.MagnetURIFromHash(ih),
+		Name:      name,
+		Title:     &name,
+		Storage:   &storage,
+		TotalSize: stressFileSize,
+	}}))
+	return stressTorrent{hash: ih, name: name, payload: payload}
+}
+
+// TestStreamingEngineUnderLoad streams a file while two other torrents
+// preload, all competing for one memory limit smaller than their files, and
+// compares the stream with one that runs alone.
+func TestStreamingEngineUnderLoad(t *testing.T) {
+	alone := runStressScenario(t, "streaming alone", false)
+	loaded := runStressScenario(t, "streaming beside two preloads", true)
+	t.Logf("preloads slowed the stream by %.0f%% (%v vs %v)",
+		100*(loaded.Seconds()/alone.Seconds()-1), loaded.Round(time.Millisecond), alone.Round(time.Millisecond))
+}
+
+// runStressScenario streams a file like a player, with or without two other
+// torrents preloading meanwhile, verifies every byte read, the preloads, and
+// the memory limit, and returns how long the stream took.
+func runStressScenario(t *testing.T, name string, withPreloads bool) time.Duration {
+	t.Helper()
+	var streamTime time.Duration
+	t.Run(name, func(t *testing.T) {
+		ctrl := newIntegrationTestController(t)
+		setTestMemoryLimit(t, ctrl, stressMemoryLimit)
+		server := httptest.NewServer(ctrl.router)
+		defer server.Close()
+
+		var preloaded []stressTorrent
+		if withPreloads {
+			preloaded = []stressTorrent{
+				addStressTorrent(t, ctrl, "preloaded-a", 1),
+				addStressTorrent(t, ctrl, "preloaded-b", 2),
+			}
+		}
+		streamed := addStressTorrent(t, ctrl, "streamed", 3)
+		start := time.Now()
+
+		// Sample memory use and preload states throughout the run.
+		var peakUsed atomic.Int64
+		var mu sync.Mutex
+		readyAt := make(map[metainfo.Hash]time.Duration)
+		final := make(map[metainfo.Hash]api.PreloadResponse)
+		sampling := make(chan struct{})
+		var sampler sync.WaitGroup
+		sampler.Go(func() {
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-sampling:
+					return
+				case <-ticker.C:
+				}
+				used := ctrl.storageClient.Load().MemoryStats().UsedBytes
+				for {
+					peak := peakUsed.Load()
+					if used <= peak || peakUsed.CompareAndSwap(peak, used) {
+						break
+					}
+				}
+				for _, st := range preloaded {
+					status := ctrl.preloadResponse(st.hash)
+					mu.Lock()
+					final[st.hash] = status
+					if _, seen := readyAt[st.hash]; !seen && status.Status == api.Ready {
+						readyAt[st.hash] = time.Since(start)
+					}
+					mu.Unlock()
+				}
+			}
+		})
+
+		for _, st := range preloaded {
+			req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, st.hash), bytes.NewBufferString(`{"file_index":0}`))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+		}
+
+		// The player reads the file in consecutive ranges, seeks near the end
+		// for the container index, and back, as players do on open and on
+		// seeking.
+		type rangeRead struct{ start, end int64 }
+		reads := []rangeRead{{0, 1 << 20}, {stressFileSize - 1<<20, stressFileSize}}
+		for offset := int64(0); offset < stressFileSize; offset += 4 << 20 {
+			reads = append(reads, rangeRead{offset, min(offset+4<<20, stressFileSize)})
+			if offset == 16<<20 {
+				reads = append(reads, rangeRead{48 << 20, 52 << 20}, rangeRead{20 << 20, 24 << 20})
+			}
+		}
+
+		var firstRange, slowest time.Duration
+		var slowestAt int64
+		streamStart := time.Now()
+		for i, rr := range reads {
+			req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, streamed.hash), http.NoBody)
+			require.NoError(t, err)
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", rr.start, rr.end-1))
+			readStart := time.Now()
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusPartialContent, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, resp.Body.Close())
+			require.NoError(t, err)
+			latency := time.Since(readStart)
+			if testing.Verbose() {
+				t.Logf("range %d-%d MiB: %v", rr.start>>20, rr.end>>20, latency.Round(time.Millisecond))
+			}
+			if i == 0 {
+				firstRange = latency
+			}
+			if latency > slowest {
+				slowest, slowestAt = latency, rr.start
+			}
+			require.True(t, bytes.Equal(streamed.payload[rr.start:rr.end], body), "range %d-%d must match the file", rr.start, rr.end)
+		}
+		streamTime = time.Since(streamStart)
+
+		for _, st := range preloaded {
+			require.Eventually(t, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				status := final[st.hash].Status
+				return status != api.Preloading && status != api.Queued && status != ""
+			}, 60*time.Second, 50*time.Millisecond, "preload %s must finish", st.name)
+		}
+		close(sampling)
+		sampler.Wait()
+
+		counters := ctrl.storageClient.Load().Counters()
+		t.Logf("stream: %d ranges, %d MiB in %v (%.1f MiB/s), first range %v, slowest range at %d MiB %v",
+			len(reads), stressFileSize>>20, streamTime.Round(time.Millisecond),
+			float64(stressFileSize)/float64(1<<20)/streamTime.Seconds(), firstRange.Round(time.Millisecond),
+			slowestAt>>20, slowest.Round(time.Millisecond))
+		for _, st := range preloaded {
+			status := final[st.hash]
+			t.Logf("preload %s: %s, %d of %d MiB, ready %v after start",
+				st.name, status.Status, status.CompletedBytes>>20, status.TargetBytes>>20, readyAt[st.hash].Round(time.Millisecond))
+			assert.Equal(t, api.Ready, status.Status, "preload %s must become ready, not give up", st.name)
+		}
+		t.Logf("memory: peak %d MiB of %d MiB; evicted %d complete and %d incomplete pieces, %d from active ranges, %d from boundaries; %d read misses",
+			peakUsed.Load()>>20, stressMemoryLimit>>20, counters.EvictedCompletePieces, counters.EvictedIncompletePieces,
+			counters.ActiveRangeEvictions, counters.BoundaryEvictions, counters.ReadMisses)
+		assert.LessOrEqual(t, peakUsed.Load(), int64(stressMemoryLimit), "storage must stay within the memory limit")
+	})
+	return streamTime
+}
