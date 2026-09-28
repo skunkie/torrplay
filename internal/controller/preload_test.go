@@ -579,6 +579,36 @@ func TestController_WaitForInfo(t *testing.T) {
 			t.Fatal("the torrent was not dropped")
 		}
 	})
+
+	t.Run("keeps a torrent another request still awaits", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{9})
+		ctrl.infoWaitersMu.Lock()
+		ctrl.infoWaiters[to.InfoHash()]++ // a stream request still waiting
+		ctrl.infoWaitersMu.Unlock()
+
+		require.Error(t, ctrl.waitForInfoOrDrop(to))
+		select {
+		case <-to.Closed():
+			t.Fatal("the torrent another request awaits was dropped")
+		default:
+		}
+
+		ctrl.infoWaitersMu.Lock()
+		ctrl.infoWaiters[to.InfoHash()]--
+		ctrl.infoWaitersMu.Unlock()
+		require.Error(t, ctrl.waitForInfoOrDrop(to))
+		<-to.Closed()
+	})
+
+	t.Run("forgets waiters once they return", func(t *testing.T) {
+		ctrl.infoWaitersMu.Lock()
+		defer ctrl.infoWaitersMu.Unlock()
+		for ih, count := range ctrl.infoWaiters {
+			assert.Positive(t, count, "hash %s", ih)
+		}
+		assert.NotContains(t, ctrl.infoWaiters, metainfo.Hash{7})
+		assert.NotContains(t, ctrl.infoWaiters, metainfo.Hash{8})
+	})
 }
 
 func TestController_TorrentStorageMode(t *testing.T) {

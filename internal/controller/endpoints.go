@@ -1444,6 +1444,19 @@ func (c *Controller) addTorrentByMagnetWithStorage(uri string, defaultStorage ap
 // waitForInfo waits at most the metadata timeout for a torrent's metadata. It
 // returns a gateway-timeout error when the metadata does not arrive in time.
 func (c *Controller) waitForInfo(to *torrent.Torrent) error {
+	ih := to.InfoHash()
+	c.infoWaitersMu.Lock()
+	c.infoWaiters[ih]++
+	c.infoWaitersMu.Unlock()
+	defer func() {
+		c.infoWaitersMu.Lock()
+		defer c.infoWaitersMu.Unlock()
+		c.infoWaiters[ih]--
+		if c.infoWaiters[ih] <= 0 {
+			delete(c.infoWaiters, ih)
+		}
+	}()
+
 	select {
 	case <-to.GotInfo():
 		return nil
@@ -1454,11 +1467,20 @@ func (c *Controller) waitForInfo(to *torrent.Torrent) error {
 
 // waitForInfoOrDrop is waitForInfo for a torrent loaded only to serve the
 // request: when the metadata does not arrive in time, it also drops the torrent
-// so it does not stay loaded without metadata.
+// so it does not stay loaded without metadata. A torrent another request is
+// still waiting on stays loaded for that request.
 func (c *Controller) waitForInfoOrDrop(to *torrent.Torrent) error {
 	err := c.waitForInfo(to)
-	if err != nil {
+	if err == nil {
+		return nil
+	}
+	c.infoWaitersMu.Lock()
+	awaited := c.infoWaiters[to.InfoHash()] > 0
+	if !awaited {
 		to.Drop()
+	}
+	c.infoWaitersMu.Unlock()
+	if !awaited {
 		<-to.Closed()
 	}
 	return err

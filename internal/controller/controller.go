@@ -110,17 +110,21 @@ type torrentTracker struct {
 }
 
 type Controller struct {
-	client               *torrent.Client
-	dataDir              string
-	db                   database.DatabaseInterface
-	dlna                 *dlna.Service
-	dlnaPath             string
-	downloader           atomic.Pointer[downloader.Downloader]
-	engineTotals         engineTotals
-	httpAddr             string
-	httpClient           *httpclient.Client
-	httpServer           *httpserver.Server
-	images               images.ServiceInterface
+	client       *torrent.Client
+	dataDir      string
+	db           database.DatabaseInterface
+	dlna         *dlna.Service
+	dlnaPath     string
+	downloader   atomic.Pointer[downloader.Downloader]
+	engineTotals engineTotals
+	httpAddr     string
+	httpClient   *httpclient.Client
+	httpServer   *httpserver.Server
+	images       images.ServiceInterface
+	// infoWaiters counts the requests waiting for each torrent's metadata.
+	// Guarded by infoWaitersMu.
+	infoWaiters          map[metainfo.Hash]int
+	infoWaitersMu        sync.Mutex
 	logFile              io.Closer
 	logger               atomic.Pointer[slog.Logger]
 	metrics              *metrics.Metrics
@@ -207,6 +211,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		images:            imgService,
 		httpAddr:          ipAddr,
 		httpClient:        httpclient.New(),
+		infoWaiters:       make(map[metainfo.Hash]int),
 		metrics:           metricsRegistry,
 		port:              port,
 		posterCleanupDone: make(chan struct{}),
