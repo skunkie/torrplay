@@ -1294,6 +1294,54 @@ func TestPool_PreloadAt(t *testing.T) {
 		require.Eventually(t, func() bool { return slices.Equal(claimed(pool, to), []int{0, 7, 8, 9}) }, 5*time.Second, time.Millisecond)
 	})
 
+	t.Run("places its window in its own file's pieces in a multi-file torrent", func(t *testing.T) {
+		// The movie follows a 100-byte file, so its byte offsets are 100 bytes
+		// short of the torrent's.
+		const pieceLength, firstLength, movieLength = 64, 100, 640
+		data := make([]byte, firstLength+movieLength)
+		for i := range data {
+			data[i] = byte(i * 7)
+		}
+		var pieces []byte
+		for start := 0; start < len(data); start += pieceLength {
+			sum := sha1.Sum(data[start:min(start+pieceLength, len(data))])
+			pieces = append(pieces, sum[:]...)
+		}
+		infoBytes, err := bencode.Marshal(metainfo.Info{
+			Name:        "season",
+			PieceLength: pieceLength,
+			Pieces:      pieces,
+			Files: []metainfo.FileInfo{
+				{Length: firstLength, Path: []string{"extras.srt"}},
+				{Length: movieLength, Path: []string{"movie.mkv"}},
+			},
+		})
+		require.NoError(t, err)
+		c := newTestTorrentClient(t)
+		to, _ := addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
+		file := to.Files()[1]
+		reg := newProtectionRegistry()
+		// File offset 320 is torrent offset 420; the window of two pieces
+		// starts 16 bytes earlier, in piece 6.
+		pool, _ := newPool(t, reg, 320, true)
+		// A 1 KiB budget leaves a 512-byte preload: a 128-byte head in pieces
+		// 1 to 3, a 128-byte tail in pieces 9 to 11, and two window pieces.
+		pool.SetReadaheadBudget(1 << 10)
+
+		_, err = pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 2, 3, 9, 10, 11}, claimed(pool, to))
+
+		writePieces(t, to, data, 1, 2, 3, 9, 10, 11)
+		require.Eventually(t, func() bool {
+			return slices.Equal(claimed(pool, to), []int{1, 2, 3, 6, 7, 9, 10, 11})
+		}, 5*time.Second, time.Millisecond)
+		assert.Equal(t, []int{1, 2, 3, 6, 7, 9, 10, 11}, protected(reg))
+
+		writePieces(t, to, data, 6, 7)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+	})
+
 	t.Run("is ready with its head and tail when the position cannot be resolved", func(t *testing.T) {
 		for _, tt := range []struct {
 			name      string
