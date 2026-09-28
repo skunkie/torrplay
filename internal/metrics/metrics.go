@@ -73,8 +73,9 @@ func New() *Metrics {
 	reg := prometheus.NewRegistry()
 
 	reg.MustRegister(collectors.NewGoCollector(
-		// The limiter's last enabled cycle advances while the heap runs over
-		// its soft memory limit and the garbage collector is capped.
+		// The limiter's last enabled cycle keeps up with the garbage
+		// collection count, go_gc_duration_seconds_count, while the soft
+		// memory limit keeps the collector capped at its CPU limit.
 		collectors.WithGoCollectorRuntimeMetrics(collectors.GoRuntimeMetricsRule{
 			Matcher: regexp.MustCompile(`^/gc/limiter/last-enabled:gc-cycle$`),
 		}),
