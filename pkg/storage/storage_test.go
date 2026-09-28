@@ -836,7 +836,7 @@ func TestClient_Counters(t *testing.T) {
 				_, err = pieces[0].(storage.SelfHashing).SelfHash()
 				require.ErrorIs(t, err, ErrPieceIncomplete)
 			},
-			want: Counters{IncompleteHashes: 1, IncompleteReads: 1},
+			want: Counters{IncompleteReads: 1, RefusedHashes: 1},
 		},
 		{
 			name:      "boundary piece evicted",
@@ -883,9 +883,9 @@ func TestClient_Counters(t *testing.T) {
 }
 
 func TestCounters_Add(t *testing.T) {
-	a := Counters{ActiveRangeEvictions: 1, BoundaryEvictions: 2, CompletionMisses: 3, EvictedCompletePieces: 4, EvictedIncompleteBytes: 5, EvictedIncompletePieces: 6, IncompleteHashes: 7, IncompleteReads: 8, ReadMisses: 9}
-	b := Counters{ActiveRangeEvictions: 10, BoundaryEvictions: 20, CompletionMisses: 30, EvictedCompletePieces: 40, EvictedIncompleteBytes: 50, EvictedIncompletePieces: 60, IncompleteHashes: 70, IncompleteReads: 80, ReadMisses: 90}
-	assert.Equal(t, Counters{ActiveRangeEvictions: 11, BoundaryEvictions: 22, CompletionMisses: 33, EvictedCompletePieces: 44, EvictedIncompleteBytes: 55, EvictedIncompletePieces: 66, IncompleteHashes: 77, IncompleteReads: 88, ReadMisses: 99}, a.Add(b))
+	a := Counters{ActiveRangeEvictions: 1, BoundaryEvictions: 2, CompletionMisses: 3, EvictedCompletePieces: 4, EvictedIncompleteBytes: 5, EvictedIncompletePieces: 6, IncompleteReads: 8, ReadMisses: 9, RefusedHashes: 7}
+	b := Counters{ActiveRangeEvictions: 10, BoundaryEvictions: 20, CompletionMisses: 30, EvictedCompletePieces: 40, EvictedIncompleteBytes: 50, EvictedIncompletePieces: 60, IncompleteReads: 80, ReadMisses: 90, RefusedHashes: 70}
+	assert.Equal(t, Counters{ActiveRangeEvictions: 11, BoundaryEvictions: 22, CompletionMisses: 33, EvictedCompletePieces: 44, EvictedIncompleteBytes: 55, EvictedIncompletePieces: 66, IncompleteReads: 88, ReadMisses: 99, RefusedHashes: 77}, a.Add(b))
 }
 
 func TestClientPieceBufferReuse(t *testing.T) {

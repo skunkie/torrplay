@@ -112,14 +112,14 @@ type Counters struct {
 	// EvictedIncompletePieces counts evicted pieces not yet marked complete,
 	// including fully written pieces still awaiting their hash check.
 	EvictedIncompletePieces int64
-	// IncompleteHashes counts self-hashes refused because chunks were lost to
-	// eviction.
-	IncompleteHashes int64
 	// IncompleteReads counts reads refused because they covered bytes that
 	// were never written.
 	IncompleteReads int64
 	// ReadMisses counts reads of pieces that were no longer in memory.
 	ReadMisses int64
+	// RefusedHashes counts self-hashes refused because chunks were lost to
+	// eviction.
+	RefusedHashes int64
 }
 
 // Add returns the field-wise sum of c and other.
@@ -131,9 +131,9 @@ func (c Counters) Add(other Counters) Counters {
 		EvictedCompletePieces:   c.EvictedCompletePieces + other.EvictedCompletePieces,
 		EvictedIncompleteBytes:  c.EvictedIncompleteBytes + other.EvictedIncompleteBytes,
 		EvictedIncompletePieces: c.EvictedIncompletePieces + other.EvictedIncompletePieces,
-		IncompleteHashes:        c.IncompleteHashes + other.IncompleteHashes,
 		IncompleteReads:         c.IncompleteReads + other.IncompleteReads,
 		ReadMisses:              c.ReadMisses + other.ReadMisses,
+		RefusedHashes:           c.RefusedHashes + other.RefusedHashes,
 	}
 }
 
@@ -145,9 +145,9 @@ type clientCounters struct {
 	evictedCompletePieces   atomic.Int64
 	evictedIncompleteBytes  atomic.Int64
 	evictedIncompletePieces atomic.Int64
-	incompleteHashes        atomic.Int64
 	incompleteReads         atomic.Int64
 	readMisses              atomic.Int64
+	refusedHashes           atomic.Int64
 }
 
 // MemoryStats contains global storage memory statistics.
@@ -441,9 +441,9 @@ func (c *Client) Counters() Counters {
 		EvictedCompletePieces:   c.counters.evictedCompletePieces.Load(),
 		EvictedIncompleteBytes:  c.counters.evictedIncompleteBytes.Load(),
 		EvictedIncompletePieces: c.counters.evictedIncompletePieces.Load(),
-		IncompleteHashes:        c.counters.incompleteHashes.Load(),
 		IncompleteReads:         c.counters.incompleteReads.Load(),
 		ReadMisses:              c.counters.readMisses.Load(),
+		RefusedHashes:           c.counters.refusedHashes.Load(),
 	}
 }
 
@@ -1227,7 +1227,7 @@ func (p *pieceImpl) SelfHash() (metainfo.Hash, error) {
 	// data. anacrolix bans the sole contributor of a piece that fails its
 	// hash without a storage error, so report the gap as one instead.
 	if pd.writtenBytes < int64(len(pd.data)) {
-		p.client.counters.incompleteHashes.Add(1)
+		p.client.counters.refusedHashes.Add(1)
 		return metainfo.Hash{}, ErrPieceIncomplete
 	}
 

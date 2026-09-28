@@ -182,13 +182,13 @@ type engineCollector struct {
 	dataBytes              *prometheus.Desc
 	evictedIncompleteBytes *prometheus.Desc
 	evictedPieces          *prometheus.Desc
-	incompleteHashes       *prometheus.Desc
 	loadedTorrents         *prometheus.Desc
 	memoryLimitBytes       *prometheus.Desc
 	memoryUsedBytes        *prometheus.Desc
 	peers                  *prometheus.Desc
 	piecesHashed           *prometheus.Desc
 	protectedEvictions     *prometheus.Desc
+	refusedHashes          *prometheus.Desc
 	storageReadFailures    *prometheus.Desc
 	streamingTorrents      *prometheus.Desc
 }
@@ -205,9 +205,7 @@ func newEngineCollector() *engineCollector {
 			"Bytes already downloaded into incomplete pieces when they were evicted, which must be downloaded again.", nil, nil),
 		evictedPieces: prometheus.NewDesc("torrplay_storage_evicted_pieces_total",
 			"Pieces evicted from memory storage, either complete or incomplete. Incomplete pieces, including fully downloaded ones awaiting their hash check, must be downloaded again.", []string{"state"}, nil),
-		incompleteHashes: prometheus.NewDesc("torrplay_storage_incomplete_hashes_total",
-			"Piece hashes refused because chunks were lost to eviction.", nil, nil),
-		loadedTorrents: prometheus.NewDesc("torrplay_torrents_loaded",
+		loadedTorrents: prometheus.NewDesc("torrplay_loaded_torrents",
 			"Number of torrents loaded in the torrent client, by reason: on_demand torrents were loaded by requests and are dropped once unused, background torrents are kept loaded by the background downloader.", []string{"reason"}, nil),
 		memoryLimitBytes: prometheus.NewDesc("torrplay_storage_memory_limit_bytes",
 			"Memory storage limit.", nil, nil),
@@ -216,9 +214,11 @@ func newEngineCollector() *engineCollector {
 		peers: prometheus.NewDesc("torrplay_torrent_peers",
 			"Peer connections and addresses summed across loaded torrents: active and half_open are established and connecting connections, pending are known addresses not yet connected. A peer shared by several torrents counts once per torrent.", []string{"state"}, nil),
 		piecesHashed: prometheus.NewDesc("torrplay_torrent_pieces_hashed_total",
-			"Pieces downloaded from peers and checked against their hash, counted once per piece. Bad results are bad peer data; failures caused by storage are counted by torrplay_storage_incomplete_hashes_total.", []string{"result"}, nil),
+			"Pieces downloaded from peers and checked against their hash, counted once per piece. Bad results are bad peer data; failures caused by storage are counted by torrplay_storage_refused_hashes_total.", []string{"result"}, nil),
 		protectedEvictions: prometheus.NewDesc("torrplay_storage_protected_evictions_total",
 			"Pieces evicted despite protection, as a last resort under memory pressure.", []string{"protection"}, nil),
+		refusedHashes: prometheus.NewDesc("torrplay_storage_refused_hashes_total",
+			"Piece hashes refused because chunks were lost to eviction.", nil, nil),
 		storageReadFailures: prometheus.NewDesc("torrplay_storage_read_failures_total",
 			"Piece reads memory storage could not serve, for playback and for uploads to peers.", []string{"reason"}, nil),
 		streamingTorrents: prometheus.NewDesc("torrplay_streaming_torrents",
@@ -230,8 +230,8 @@ func newEngineCollector() *engineCollector {
 func (c *engineCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{
 		c.bannedPeers, c.completionMisses, c.dataBytes, c.evictedIncompleteBytes, c.evictedPieces,
-		c.incompleteHashes, c.loadedTorrents, c.memoryLimitBytes, c.memoryUsedBytes, c.peers,
-		c.piecesHashed, c.protectedEvictions, c.storageReadFailures, c.streamingTorrents,
+		c.loadedTorrents, c.memoryLimitBytes, c.memoryUsedBytes, c.peers, c.piecesHashed,
+		c.protectedEvictions, c.refusedHashes, c.storageReadFailures, c.streamingTorrents,
 	} {
 		ch <- desc
 	}
@@ -270,7 +270,7 @@ func (c *engineCollector) Collect(ch chan<- prometheus.Metric) {
 	counter(c.evictedIncompleteBytes, counters.EvictedIncompleteBytes)
 	counter(c.evictedPieces, counters.EvictedCompletePieces, "complete")
 	counter(c.evictedPieces, counters.EvictedIncompletePieces, "incomplete")
-	counter(c.incompleteHashes, counters.IncompleteHashes)
+	counter(c.refusedHashes, counters.RefusedHashes)
 	counter(c.protectedEvictions, counters.BoundaryEvictions, "boundary")
 	counter(c.protectedEvictions, counters.ActiveRangeEvictions, "active_range")
 	counter(c.storageReadFailures, counters.ReadMisses, "evicted")
