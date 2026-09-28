@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	_ "modernc.org/sqlite"
@@ -189,7 +190,11 @@ func (pc *PieceCompletion) Get(pk metainfo.PieceKey) (storage.Completion, error)
 	return storage.Completion{Complete: count > 0, Ok: true}, nil
 }
 
-func (pc *PieceCompletion) Set(pk metainfo.PieceKey, complete bool) error {
+// Set records whether a piece is complete. The store keeps only complete
+// pieces, so an unknown state is recorded as incomplete. The torrent client
+// sets unknown only for part files, which TorrPlay does not use.
+func (pc *PieceCompletion) Set(pk metainfo.PieceKey, state generics.Option[bool]) error {
+	complete := state.Ok && state.Value
 	pc.batchMu.Lock()
 	pc.batch[pk] = complete
 	pc.batchMu.Unlock()

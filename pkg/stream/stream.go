@@ -978,10 +978,7 @@ func (p *Pool) applyPriorityClaimLocked(key priorityPieceKey) {
 	if key.torrent == nil {
 		return
 	}
-	piece := key.torrent.Piece(key.index)
-	if piece != nil {
-		piece.SetPriority(priority)
-	}
+	key.torrent.Piece(key.index).SetPriority(priority)
 }
 
 // updateReaderPosition records a reader's new read offset and, when it
