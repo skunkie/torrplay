@@ -320,9 +320,12 @@ type Pool struct {
 	closeCh chan struct{}
 	closed  bool
 	cfg     Config
-	logger  *slog.Logger
-	mu      sync.Mutex
-	nextID  uint64
+	// expireWake wakes expireLoop from its idle interval when the pool gains
+	// a reader or preload.
+	expireWake chan struct{}
+	logger     *slog.Logger
+	mu         sync.Mutex
+	nextID     uint64
 	// priorityClaims holds every piece priority claimed by readers and
 	// preloads, keyed by piece.
 	priorityClaims map[priorityPieceKey]priorityClaim
@@ -363,6 +366,7 @@ func New(cfg Config) *Pool {
 
 	p := &Pool{
 		closeCh:        make(chan struct{}),
+		expireWake:     make(chan struct{}, 1),
 		cfg:            cfg,
 		logger:         logger,
 		priorityClaims: make(map[priorityPieceKey]priorityClaim),
@@ -427,6 +431,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		stream:        stream,
 	}
 	p.readers[readerID] = sr
+	p.wakeExpireLoop()
 	if pl := p.preloads[infoHash]; pl != nil && pl.file == file {
 		pl.fileRead = true
 	}
@@ -1135,25 +1140,61 @@ func (p *Pool) Close() {
 	p.logger.Debug("stream pool closed")
 }
 
-// expireInterval is how often expireLoop runs. It matches the shortest linger
-// timeout memory pressure selects, so that timeout holds.
-const expireInterval = time.Second
+const (
+	// minLingerTimeout is the shortest linger timeout memory pressure
+	// selects. expireLoop runs this often while the pool has readers or
+	// preloads, so that timeout holds.
+	minLingerTimeout = time.Second
+	// idleExpireInterval is how often expireLoop runs while the pool has no
+	// readers or preloads, so an idle pool rarely wakes.
+	idleExpireInterval = 5 * time.Second
+)
 
 // expireLoop periodically closes readers that have lingered past the
 // effective linger timeout and expires preloads.
 func (p *Pool) expireLoop() {
-	ticker := time.NewTicker(expireInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(idleExpireInterval)
+	defer timer.Stop()
+	idle := true
 
 	for {
 		select {
 		case <-p.closeCh:
 			return
-		case <-ticker.C:
+		case <-p.expireWake:
+			// Only an idle wait is shortened; resetting a busy one on every
+			// new reader would keep postponing the next run.
+			if idle {
+				timer.Reset(minLingerTimeout)
+				idle = false
+			}
+		case <-timer.C:
 			p.closeExpiredLingeringReaders()
 			p.expirePreloads()
+			interval := p.expireInterval()
+			idle = interval == idleExpireInterval
+			timer.Reset(interval)
 		}
 	}
+}
+
+// wakeExpireLoop makes expireLoop switch to its busy interval. It never
+// blocks.
+func (p *Pool) wakeExpireLoop() {
+	select {
+	case p.expireWake <- struct{}{}:
+	default:
+	}
+}
+
+// expireInterval returns how long expireLoop waits before its next run.
+func (p *Pool) expireInterval() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.readers) == 0 && len(p.preloads) == 0 {
+		return idleExpireInterval
+	}
+	return minLingerTimeout
 }
 
 // effectiveLingerTimeout returns the linger timeout for the given memory
@@ -1162,7 +1203,7 @@ func (p *Pool) expireLoop() {
 func (p *Pool) effectiveLingerTimeout(usage float64) time.Duration {
 	switch {
 	case usage >= 0.90:
-		return min(p.cfg.LingerTimeout, 1*time.Second)
+		return min(p.cfg.LingerTimeout, minLingerTimeout)
 	case usage >= 0.75:
 		return min(p.cfg.LingerTimeout, 5*time.Second)
 	case usage >= 0.50:

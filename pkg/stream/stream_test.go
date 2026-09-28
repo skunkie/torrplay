@@ -424,6 +424,25 @@ func TestPool_Close(t *testing.T) {
 	})
 }
 
+func TestPool_ExpireInterval(t *testing.T) {
+	p := newTestPool(t, Config{Logger: testLogger()})
+	assert.Equal(t, idleExpireInterval, p.expireInterval(), "an idle pool checks rarely")
+
+	p.mu.Lock()
+	p.readers[1] = &streamReader{readerID: 1}
+	p.mu.Unlock()
+	assert.Equal(t, minLingerTimeout, p.expireInterval(), "a pool with readers checks as often as the shortest linger timeout")
+
+	p.mu.Lock()
+	delete(p.readers, 1)
+	p.preloads[metainfo.Hash{1}] = &preload{}
+	p.mu.Unlock()
+	assert.Equal(t, minLingerTimeout, p.expireInterval(), "a pool with preloads checks often")
+	p.mu.Lock()
+	delete(p.preloads, metainfo.Hash{1})
+	p.mu.Unlock()
+}
+
 func TestPool_EffectiveLingerTimeout(t *testing.T) {
 	t.Run("no pressure", func(t *testing.T) {
 		p := newTestPool(t, Config{
@@ -745,6 +764,26 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 		require.True(t, pool.HasReaders(to.InfoHash()), "a released reader lingers")
 		assert.Eventually(t, func() bool { return !pool.HasReaders(to.InfoHash()) }, 3*time.Second, 10*time.Millisecond,
 			"the expiry loop must close a reader lingering past the 1 s pressure timeout")
+	})
+
+	t.Run("steady new readers do not postpone it", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, f := addTestTorrent(t, c)
+		_, other, _ := addHashedTorrent(t, c, "other")
+		pool := New(Config{Logger: testLogger(), LingerTimeout: time.Hour, MemoryUsage: func() float64 { return 0.95 }})
+		defer pool.Close()
+
+		_, release := acquireTestReader(t, pool, f, MemoryStorage, 1024*1024)
+		release()
+		deadline := time.Now().Add(3 * time.Second)
+		for pool.HasReaders(to.InfoHash()) && time.Now().Before(deadline) {
+			// Another viewer's player keeps issuing range requests.
+			_, releaseOther, err := pool.Acquire(context.Background(), other, MemoryStorage)
+			require.NoError(t, err)
+			releaseOther()
+			time.Sleep(100 * time.Millisecond)
+		}
+		assert.False(t, pool.HasReaders(to.InfoHash()), "readers acquired meanwhile must not postpone closing a lingering reader")
 	})
 
 	lingering := func(p *Pool, lingered time.Duration) uint64 {

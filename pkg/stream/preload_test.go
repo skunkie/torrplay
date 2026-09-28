@@ -227,15 +227,15 @@ func TestPool_Preload(t *testing.T) {
 		_, err := pool.Preload(file, MemoryStorage)
 		require.NoError(t, err)
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+		// Expire the preload and report the lost piece under one lock, so
+		// the pool's expiry loop cannot remove it first.
 		pool.mu.Lock()
-		pool.preloads[to.InfoHash()].readyAt = time.Now().Add(-2 * defaultPreloadReadyTTL)
+		pl := pool.preloads[to.InfoHash()]
+		pl.readyAt = time.Now().Add(-2 * defaultPreloadReadyTTL)
+		pool.updatePreloadLocked(pl, pl.completedBytes-64, false)
 		pool.mu.Unlock()
 
-		corrupt := slices.Clone(data)
-		corrupt[3*64] ^= 0xff
-		writePieces(t, to, corrupt, 3)
-		require.Eventually(t, func() bool { return preloadState(pool, to.InfoHash()) == 0 }, 5*time.Second, time.Millisecond,
-			"an expired unread preload must be removed")
+		assert.Zero(t, preloadState(pool, to.InfoHash()), "an expired unread preload must be removed")
 		assert.Empty(t, preloadClaims(pool, to), "it must not claim its pieces again")
 	})
 

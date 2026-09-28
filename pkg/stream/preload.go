@@ -193,6 +193,7 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 	to.AllowDataDownload()
 	p.preloads[infoHash] = pl
 	p.preloadQueue = append(p.preloadQueue, pl)
+	p.wakeExpireLoop()
 	p.dispatchPreloadsLocked()
 	p.logger.Debug("queued preload",
 		slog.String("hash", infoHash.HexString()),
