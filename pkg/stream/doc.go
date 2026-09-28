@@ -92,7 +92,8 @@
 // it cannot hold its slot forever. A preload waiting behind other viewers'
 // playback of its torrent does not stall. A smaller SetReadaheadBudget evicts
 // preloads until they fit, cheapest first. A ready preload that loses a piece
-// to eviction downloads it again.
+// to eviction downloads it again, reporting queued while both preload slots
+// are busy, unless it is due for removal anyway, in which case it is removed.
 //
 // A ready preload serves one playback of its file: once the file has been read
 // and has no reader left, including a lingering one, the preload is released,

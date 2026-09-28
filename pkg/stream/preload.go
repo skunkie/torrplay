@@ -583,9 +583,11 @@ func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan
 }
 
 // updatePreloadLocked records a preload's progress. A running preload whose
-// pieces are all complete becomes ready and gives up its priority claims; a
-// ready preload that lost a piece runs again, or waits first in the queue
-// while every preload slot is taken. Must be called with p.mu held.
+// pieces are all complete becomes ready and gives up its priority claims. A
+// ready preload that lost a piece is removed when it is due for removal
+// anyway; otherwise it runs again, or waits first in the queue, keeping its
+// reservation, while every preload slot is taken. Must be called with p.mu
+// held.
 func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete bool) {
 	if p.closed || p.preloads[pl.infoHash] != pl {
 		return
@@ -604,13 +606,13 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 			slog.String("file", pl.file.Path()))
 		// Playback that started and ended while the preload ran no longer
 		// needs its cache.
-		if pl.fileRead && !p.fileHasReadersLocked(pl.file) {
+		if p.cachedPreloadExpiredLocked(pl, pl.readyAt) {
 			p.removePreloadLocked(pl.infoHash)
 		}
 		p.dispatchPreloadsLocked()
 	case pl.state == PreloadReady && !complete:
 		// A preload that is due for removal is not worth downloading again.
-		if p.readyPreloadExpiredLocked(pl, time.Now()) {
+		if p.cachedPreloadExpiredLocked(pl, time.Now()) {
 			p.removePreloadLocked(pl.infoHash)
 			p.dispatchPreloadsLocked()
 			return
@@ -752,15 +754,15 @@ func (p *Pool) shrinkPreloadsLocked() {
 	}
 }
 
-// releaseReadPreloadsLocked releases the ready preloads, and the queued ones
-// still holding a reservation after losing a piece, whose file was read
-// and has no reader left, including a lingering one: playback of the file has
-// ended, so its cache has served its purpose. Must be called with p.mu held.
+// releaseReadPreloadsLocked releases the preloads holding a cache that is due
+// for removal, such as one whose file was read and has no reader left,
+// including a lingering one: playback of the file has ended, so its cache has
+// served its purpose. Must be called with p.mu held.
 func (p *Pool) releaseReadPreloadsLocked() {
 	released := false
+	now := time.Now()
 	for infoHash, pl := range p.preloads {
-		holdsCache := pl.state == PreloadReady || (pl.state == PreloadQueued && pl.reserved)
-		if holdsCache && pl.fileRead && !p.fileHasReadersLocked(pl.file) {
+		if p.cachedPreloadExpiredLocked(pl, now) {
 			p.removePreloadLocked(infoHash)
 			released = true
 		}
@@ -824,20 +826,22 @@ func (p *Pool) stopPreloadLocked(pl *preload) {
 	p.releasePreloadReservationLocked(pl)
 }
 
-// readyPreloadExpiredLocked reports whether a ready preload is due for
+// cachedPreloadExpiredLocked reports whether a preload holding its cache,
+// ready or queued with its reservation after losing a piece, is due for
 // removal at now: its file has no reader, and it was read or has stayed unread
-// for the ready TTL. Must be called with p.mu held.
-func (p *Pool) readyPreloadExpiredLocked(pl *preload, now time.Time) bool {
-	if p.fileHasReadersLocked(pl.file) {
+// for the ready TTL since it became ready. Must be called with p.mu held.
+func (p *Pool) cachedPreloadExpiredLocked(pl *preload, now time.Time) bool {
+	holdsCache := pl.state == PreloadReady || (pl.state == PreloadQueued && pl.reserved)
+	if !holdsCache || p.fileHasReadersLocked(pl.file) {
 		return false
 	}
 	ttl := p.cfg.PreloadReadyTTL
 	return pl.fileRead || (ttl > 0 && now.Sub(pl.readyAt) >= ttl)
 }
 
-// expirePreloads removes preloads whose torrent closed, ready preloads whose
-// file has not been read within the ready TTL, read preloads whose file has no
-// reader left, and failed or evicted preloads that have reported their final
+// expirePreloads removes preloads whose torrent closed, preloads holding a
+// cache whose file has not been read within the ready TTL, read preloads whose
+// file has no reader left, and failed or evicted preloads that have reported their final
 // state for the ready TTL. It fails running preloads whose torrent completed
 // no data within the stall timeout. A preload whose own pieces wait behind
 // other viewers' playback of the torrent is not stalled, because the engine is
@@ -854,11 +858,9 @@ func (p *Pool) expirePreloads() {
 		case torrentClosed(pl.file):
 			p.removePreloadLocked(infoHash)
 			removed = true
-		case pl.state == PreloadReady:
-			if p.readyPreloadExpiredLocked(pl, now) {
-				p.removePreloadLocked(infoHash)
-				removed = true
-			}
+		case p.cachedPreloadExpiredLocked(pl, now):
+			p.removePreloadLocked(infoHash)
+			removed = true
 		case pl.state == PreloadRunning:
 			stall := p.cfg.PreloadStallTimeout
 			if stall <= 0 {

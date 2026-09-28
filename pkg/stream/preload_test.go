@@ -313,6 +313,35 @@ func TestPool_Preload(t *testing.T) {
 		assert.Less(t, reservedPreloadBytes(pool), reserved, "its reservation must return to playback")
 	})
 
+	t.Run("expires while waiting for a slot once its ready TTL runs out", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
+		writePieces(t, ready, readyData, allPieces(ready)...)
+		pool := newPool(t, nil)
+		_, err := pool.Preload(readyFile, MemoryStorage)
+		require.NoError(t, err)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadReady)
+		for i := range maxConcurrentPreloads {
+			_, file, _ := addHashedTorrent(t, c, fmt.Sprintf("running%d", i))
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+		corrupt := slices.Clone(readyData)
+		corrupt[3*64] ^= 0xff
+		writePieces(t, ready, corrupt, 3)
+		waitForPreloadState(t, pool, ready.InfoHash(), PreloadQueued)
+		reserved := reservedPreloadBytes(pool)
+
+		pool.expirePreloads()
+		require.Equal(t, PreloadQueued, preloadState(pool, ready.InfoHash()), "it keeps waiting within its ready TTL")
+		pool.mu.Lock()
+		pool.preloads[ready.InfoHash()].readyAt = time.Now().Add(-2 * defaultPreloadReadyTTL)
+		pool.mu.Unlock()
+		pool.expirePreloads()
+		assert.Zero(t, preloadState(pool, ready.InfoHash()), "an unread preload past its ready TTL must not wait to download again")
+		assert.Less(t, reservedPreloadBytes(pool), reserved, "its reservation must return to playback")
+	})
+
 	t.Run("becomes ready again while waiting when its piece returns", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		ready, readyFile, readyData := addHashedTorrent(t, c, "ready")
