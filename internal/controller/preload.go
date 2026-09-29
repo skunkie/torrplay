@@ -261,10 +261,10 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, posit
 // stats use: memory storage for a torrent loaded for file storage whose data
 // fell back to memory, otherwise the storage a saved torrent was stored with,
 // otherwise the storage a loaded one was loaded into, and memory storage by
-// default. Only saved torrents are loaded into file storage, so a torrent that
-// was never saved streams from memory; one removed from the database while
-// loaded keeps streaming from file storage, where its data still is, until it
-// is dropped. It also reports whether the torrent is saved.
+// default. Only saved torrents stay in file storage: a torrent being added for
+// file storage is loaded before its record is saved, and a torrent whose record
+// cannot be read keeps the storage it was loaded into. It also reports whether
+// the torrent is saved.
 func (c *Controller) torrentStorageMode(ih metainfo.Hash) (mode stream.StorageMode, saved bool) {
 	c.torrentTracker.mu.RLock()
 	info, loaded := c.torrentTracker.torrents[ih]
