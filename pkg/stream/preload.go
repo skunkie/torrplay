@@ -145,6 +145,8 @@ type preload struct {
 	readyAt     time.Time
 	reservation preloadReservation
 	reserved    bool
+	// resolving reports that the playback position is being resolved.
+	resolving   bool
 	state       PreloadState
 	targetBytes int64
 	// torrentCompleted is the torrent's completed bytes when progressAt was
@@ -159,8 +161,6 @@ type preload struct {
 	// position could not be resolved.
 	windowPlaced           bool
 	windowStart, windowEnd int64
-	// resolving reports that the playback position is being resolved.
-	resolving bool
 }
 
 // preloadReservation is the protection budget held by a memory-storage
@@ -173,13 +173,13 @@ type preloadReservation struct {
 	// head and tail are the inclusive piece ranges protected from eviction
 	// while the reservation is held.
 	head, tail storage.PieceRange
+	// id identifies the reservation's protection in the registry. It is drawn
+	// from the reader ID sequence, so it never collides with a reader's.
+	id uint64
 	// placed holds the inclusive piece ranges protected as well once the
 	// resume window is placed: the window and the seek index pieces outside
 	// the head and tail it was resolved from.
 	placed []storage.PieceRange
-	// id identifies the reservation's protection in the registry. It is drawn
-	// from the reader ID sequence, so it never collides with a reader's.
-	id uint64
 }
 
 // protection returns the piece ranges the reservation protects.

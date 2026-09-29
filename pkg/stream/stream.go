@@ -86,26 +86,18 @@ type Config struct {
 	// FileReadaheadBytes is the fixed readahead in bytes for file-storage readers.
 	// Zero defaults to 50 MiB.
 	FileReadaheadBytes int64
-	// Logger receives pool lifecycle and diagnostic messages. Nil uses slog.Default.
-	Logger *slog.Logger
 	// LingerTimeout is how long a released reader stays open, still reading
 	// ahead, for its player's next request, and how long its reading is
 	// remembered for the readahead ramp of the next reader of its file. Zero
 	// defaults to 30 seconds.
 	LingerTimeout time.Duration
+	// Logger receives pool lifecycle and diagnostic messages. Nil uses slog.Default.
+	Logger *slog.Logger
 	// OnStreamingChange, when set, is called with true when the pool gains its
 	// first reader, active or lingering, and with false when its last reader
 	// closes. It runs with the pool locked, so it must return quickly and must
 	// not call the pool.
 	OnStreamingChange func(streaming bool)
-	// PriorityWindowFraction, when > 0, raises the pieces just ahead of a
-	// playback reader to PiecePriorityNow. The fraction applies to the
-	// readahead window size in pieces, and at least one piece is claimed. The
-	// torrent client already gives the whole readahead window
-	// PiecePriorityReadahead but orders those pieces by rarity, so the claim
-	// makes the nearest pieces download first. Values above 1 are clamped to 1.
-	// A non-positive value disables prioritization.
-	PriorityWindowFraction float64
 	// PreloadReadyTTL is how long a preload whose file has not been read stays
 	// cached after it first became ready, including while it waits to download
 	// a lost piece again, and how long a failed or evicted preload keeps
@@ -121,6 +113,14 @@ type Config struct {
 	// stall. Zero defaults to 2 minutes.
 	// Negative values let preloads run until they complete or are removed.
 	PreloadStallTimeout time.Duration
+	// PriorityWindowFraction, when > 0, raises the pieces just ahead of a
+	// playback reader to PiecePriorityNow. The fraction applies to the
+	// readahead window size in pieces, and at least one piece is claimed. The
+	// torrent client already gives the whole readahead window
+	// PiecePriorityReadahead but orders those pieces by rarity, so the claim
+	// makes the nearest pieces download first. Values above 1 are clamped to 1.
+	// A non-positive value disables prioritization.
+	PriorityWindowFraction float64
 	// ReadaheadRampBytes, when positive, ramps up the readahead of a new
 	// reader, and of one after a seek: it reads ahead at most twice the bytes
 	// it has read since, and at least ReadaheadRampBytes or one piece, until
@@ -185,10 +185,10 @@ type streamReadSeeker struct {
 	buf    *bufio.Reader
 	closed bool
 	length int64
-	mu     sync.Mutex
 	// moved reports that the caller's position no longer matches the torrent
 	// reader's, which moves on the next read.
 	moved bool
+	mu    sync.Mutex
 	// observeRead, when set, receives the duration of each Read.
 	observeRead func(time.Duration)
 	// onPosition receives the caller's position after a seek and after each
@@ -319,22 +319,22 @@ type streamReader struct {
 	file          *torrent.File
 	infoHash      metainfo.Hash
 	isFileStorage bool
-	// lingerSince is when a released reader started lingering.
-	lingerSince time.Time
 	// lastOffset is the last byte offset the reader's stream reported.
 	// Updated under pool.mu only, so code holding pool.mu can read it without
 	// acquiring the stream's lock.
 	lastOffset int64
 	lastPiece  int64
-	readahead  int64 // current readahead in bytes (updated by Acquire, refreshReadaheadLocked, and the ramp in updateReaderPosition)
+	// lingerSince is when a released reader started lingering.
+	lingerSince time.Time
+	readahead   int64 // current readahead in bytes (updated by Acquire, refreshReadaheadLocked, and the ramp in updateReaderPosition)
+	reader      torrent.Reader
+	readerID    uint64
 	// runStart is the offset where the reader's current sequential reading
 	// began, at its first read or its last seek, or -1 before its first read.
 	runStart int64
 	// shareReadahead is the readahead the reader's share of the budget, or
 	// FileReadaheadBytes for file storage, allows once ramped up.
 	shareReadahead int64
-	reader         torrent.Reader
-	readerID       uint64
 	// stream is the caller's view of reader.
 	stream *streamReadSeeker
 }
@@ -357,27 +357,27 @@ const maxRecentRuns = 4
 // Callers must call Close() when the pool is no longer needed to stop the background
 // lingering-reader goroutine and release reader resources.
 type Pool struct {
+	cfg     Config
 	closeCh chan struct{}
 	closed  bool
-	cfg     Config
 	// expireWake wakes expireLoop from its idle interval when the pool gains
 	// a reader or preload.
 	expireWake chan struct{}
 	logger     *slog.Logger
 	mu         sync.Mutex
 	nextID     uint64
-	// priorityClaims holds every piece priority claimed by readers and
-	// preloads, keyed by piece.
-	priorityClaims map[priorityPieceKey]priorityClaim
 	// preloadQueue holds queued preloads in request order. Entries that are
 	// no longer queued are skipped on dispatch.
 	preloadQueue []*preload
+	// preloads holds each torrent's preload, including a failed or evicted
+	// one that still reports its final state.
+	preloads map[metainfo.Hash]*preload
 	// preloadWatchers tracks the goroutines that follow running and ready
 	// preloads, so Close can wait for them.
 	preloadWatchers sync.WaitGroup
-	// preloads holds each torrent's preload, including a failed or evicted
-	// one that still reports its final state.
-	preloads        map[metainfo.Hash]*preload
+	// priorityClaims holds every piece priority claimed by readers and
+	// preloads, keyed by piece.
+	priorityClaims  map[priorityPieceKey]priorityClaim
 	readaheadBudget int64 // current total readahead budget, updated by SetReadaheadBudget
 	readers         map[uint64]*streamReader
 	// recentRuns holds the runs of each file's recently released readers,
