@@ -404,8 +404,8 @@ describe('mkv-audio utilities', () => {
       const mockInput = { dispose: vi.fn() } as unknown as Input;
       const engine = new MkvAudioSyncEngine(mockInput, [mockRawTracks[0] as unknown as InputAudioTrack]);
 
-      // Observing frames before a resume seek makes Chromium reach the seek
-      // target by reading the file from its start.
+      // Observing frames before the resume seek made Chromium reach the seek
+      // target by reading the file from its start; see ensureVideoFrameSync.
       expect(engine.attachMediaElement(videoEl)).toBe(true);
       expect(videoEl.requestVideoFrameCallback).not.toHaveBeenCalled();
 
