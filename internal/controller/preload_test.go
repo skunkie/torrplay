@@ -629,6 +629,16 @@ func TestController_WaitForInfo(t *testing.T) {
 		assert.True(t, loaded)
 	})
 
+	t.Run("returns once its context ends", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{10})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.ErrorIs(t, ctrl.waitForInfoContext(ctx, to), context.Canceled)
+		ctrl.infoWaitersMu.Lock()
+		defer ctrl.infoWaitersMu.Unlock()
+		assert.Zero(t, ctrl.infoWaiters[to.InfoHash()], "the wait must no longer count")
+	})
+
 	t.Run("times out and drops the torrent", func(t *testing.T) {
 		to := withoutInfo(t, metainfo.Hash{8})
 		require.Error(t, ctrl.waitForInfoOrDrop(to))

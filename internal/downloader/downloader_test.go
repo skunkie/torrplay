@@ -97,6 +97,31 @@ func newTestTorrentClient(t *testing.T, dataDir string) *torrent.Client {
 	return c
 }
 
+// newStreamingTestDownloader returns a downloader of saved file-storage
+// torrents with the given hashes, where a zero hash stands for the returned
+// torrent, which is loaded with all its data and can start downloading.
+func newStreamingTestDownloader(t *testing.T, hooks Hooks, hashes ...metainfo.Hash) (*Downloader, *torrent.Torrent) {
+	t.Helper()
+	testMetaInfo := newTestTorrent(t, 1024)
+	td := t.TempDir()
+	pc, err := storage.NewBoltPieceCompletion(filepath.Join(td, "pieces.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pc.Close() })
+	db := &MockDB{settings: &database.Settings{Settings: api.Settings{EnableDownloader: new(true)}}}
+	storageType := api.File
+	for _, hash := range hashes {
+		if hash.IsZero() {
+			hash = testMetaInfo.HashInfoBytes()
+		}
+		db.torrents = append(db.torrents, &database.Torrent{Torrent: api.Torrent{Hash: hash, Magnet: utils.MagnetURIFromHash(hash), Storage: &storageType}})
+	}
+	client := newTestTorrentClient(t, td)
+	to, err := client.AddTorrent(testMetaInfo)
+	require.NoError(t, err)
+	verifyData(t, to)
+	return New(client, db, slog.New(slog.DiscardHandler), metrics.New(), pc, td, nil, hooks), to
+}
+
 func TestDownloader_ProcessTorrents(t *testing.T) {
 	t.Run("updates downloading metric", func(t *testing.T) {
 		testMetaInfo := newTestTorrent(t, 1024)
@@ -133,7 +158,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 			gotInfoTimeout = originalGotInfoTimeout
 		}()
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 
 		// Check that the metric was updated to 0, since we have one torrent that will fail to get info.
 		require.Eventually(t, func() bool {
@@ -141,12 +166,12 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		}, time.Second, 10*time.Millisecond, "DownloadingTorrents metric should be 0")
 
 		// Verify that if we run it again, it's still 0 (not incremented).
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents), "DownloadingTorrents metric should remain 0")
 
 		// Now, let's simulate the torrent completing by having the DB return no torrents.
 		db.torrents = []*database.Torrent{}
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		require.Eventually(t, func() bool {
 			return testutil.ToFloat64(m.DownloadingTorrents) == 0
 		}, time.Second, 10*time.Millisecond, "DownloadingTorrents metric should be 0 after torrent is removed")
@@ -171,15 +196,60 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		require.NoError(t, err)
 		verifyData(t, to)
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		require.True(t, downloader.IsDownloading(testHash))
 		for index := range to.NumPieces() {
 			require.Equal(t, torrent.PiecePriorityNormal, to.PieceState(index).Priority, "piece %d must be wanted", index)
 		}
 
 		streaming = true
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		assert.False(t, downloader.IsDownloading(testHash))
+		assertNothingWanted(t, to)
+	})
+
+	t.Run("pauses at once when a stream starts during a metadata wait", func(t *testing.T) {
+		// The second torrent's metadata never comes.
+		unresolved := newTestTorrent(t, 2048).HashInfoBytes()
+		var streaming atomic.Bool
+		waiting := make(chan struct{})
+		waitForInfo := func(ctx context.Context, to *torrent.Torrent) error {
+			if to.InfoHash() != unresolved {
+				return nil
+			}
+			select {
+			case waiting <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		downloader, to := newStreamingTestDownloader(t, Hooks{Streaming: streaming.Load, WaitForInfo: waitForInfo}, metainfo.Hash{}, unresolved)
+		downloader.Start()
+		defer downloader.Stop()
+		<-waiting
+		require.True(t, downloader.IsDownloading(to.InfoHash()))
+
+		streaming.Store(true)
+		downloader.Wake()
+		require.Eventually(t, func() bool { return !downloader.IsDownloading(to.InfoHash()) }, time.Second, time.Millisecond,
+			"a stream must pause background downloads without waiting for another torrent's metadata")
+		assertNothingWanted(t, to)
+	})
+
+	t.Run("starts nothing once a stream starts during the pass", func(t *testing.T) {
+		unresolved := newTestTorrent(t, 2048).HashInfoBytes()
+		streaming := false
+		waitForInfo := func(_ context.Context, to *torrent.Torrent) error {
+			if to.InfoHash() != unresolved {
+				return nil
+			}
+			streaming = true
+			return errors.New("no metadata")
+		}
+		downloader, to := newStreamingTestDownloader(t, Hooks{Streaming: func() bool { return streaming }, WaitForInfo: waitForInfo}, unresolved, metainfo.Hash{})
+		downloader.processTorrents(nil)
+		assert.False(t, downloader.IsDownloading(to.InfoHash()), "a stream that started during the pass must keep the download from starting")
 		assertNothingWanted(t, to)
 	})
 
@@ -197,7 +267,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		}
 		client := newTestTorrentClient(t, td)
 		var waited []metainfo.Hash
-		waitForInfo := func(to *torrent.Torrent) error {
+		waitForInfo := func(_ context.Context, to *torrent.Torrent) error {
 			waited = append(waited, to.InfoHash())
 			return errors.New("no metadata")
 		}
@@ -205,7 +275,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		_, err = client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		assert.Equal(t, []metainfo.Hash{testHash}, waited, "the caller must count the wait")
 		assert.False(t, downloader.IsDownloading(testHash), "a torrent without metadata must not start")
 	})
@@ -229,7 +299,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		require.NoError(t, err)
 		verifyData(t, to)
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		assert.False(t, downloader.IsDownloading(testHash), "a background download would only churn memory storage")
 		assertNothingWanted(t, to)
 	})
@@ -252,7 +322,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		to, err := client.AddTorrent(testMetaInfo)
 		require.NoError(t, err)
 		verifyData(t, to)
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		require.True(t, downloader.IsDownloading(testHash))
 
 		downloader.storageWriteFailed(to, errors.New("no space left on device"))
@@ -261,7 +331,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		assert.Equal(t, float64(0), testutil.ToFloat64(m.DownloadingTorrents))
 		assert.ErrorContains(t, readFirstByte(t, to), "downloading disabled", "the torrent must stop downloading")
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 		assert.False(t, downloader.IsDownloading(testHash), "a later pass must not resume the download")
 
 		// Starting the downloader, here for the first time, tries the torrent
@@ -308,7 +378,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 			f.SetPriority(torrent.PiecePriorityNormal)
 		}
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 
 		assertNothingWanted(t, to)
 		assert.Empty(t, downloader.downloading)
@@ -351,7 +421,7 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 			f.SetPriority(torrent.PiecePriorityNormal)
 		}
 
-		downloader.processTorrents()
+		downloader.processTorrents(nil)
 
 		assertNothingWanted(t, to)
 		assert.Empty(t, downloader.downloading)

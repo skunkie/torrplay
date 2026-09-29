@@ -1591,6 +1591,12 @@ func (c *Controller) addTorrentByMagnetWithStorage(uri string, defaultStorage ap
 // returns a gateway-timeout error when the metadata does not arrive in time,
 // and a service-unavailable error at once when the torrent closes meanwhile.
 func (c *Controller) waitForInfo(to *torrent.Torrent) error {
+	return c.waitForInfoContext(context.Background(), to)
+}
+
+// waitForInfoContext is waitForInfo that also returns ctx's error once ctx
+// ends.
+func (c *Controller) waitForInfoContext(ctx context.Context, to *torrent.Torrent) error {
 	ih := to.InfoHash()
 	c.infoWaitersMu.Lock()
 	c.infoWaiters[ih]++
@@ -1609,6 +1615,8 @@ func (c *Controller) waitForInfo(to *torrent.Torrent) error {
 		return nil
 	case <-to.Closed():
 		return api.NewError("torrent closed while waiting for its metadata", http.StatusServiceUnavailable)
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(c.runtimeConfig.gotInfoTimeout):
 		return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 	}

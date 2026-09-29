@@ -5,6 +5,7 @@
 package downloader
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"sync"
@@ -47,8 +48,8 @@ type Downloader struct {
 	// downloads pause while it does, so playback keeps the bandwidth.
 	streaming func() bool
 	trackers  [][]string
-	// waitForInfo waits for a torrent's metadata.
-	waitForInfo func(*torrent.Torrent) error
+	// waitForInfo waits for a torrent's metadata until ctx ends.
+	waitForInfo func(ctx context.Context, to *torrent.Torrent) error
 	// wake requests a pass before the next interval.
 	wake chan struct{}
 	// writeFailed holds the torrents whose file storage writes failed. Their
@@ -67,9 +68,9 @@ type Hooks struct {
 	// background downloads. Nil means never.
 	Streaming func() bool
 	// WaitForInfo waits for a torrent's metadata, so the owner can count the
-	// wait as one that needs the torrent loaded. Nil waits up to
-	// gotInfoTimeout.
-	WaitForInfo func(*torrent.Torrent) error
+	// wait as one that needs the torrent loaded. It must return once ctx ends.
+	// Nil waits up to gotInfoTimeout.
+	WaitForInfo func(ctx context.Context, to *torrent.Torrent) error
 }
 
 // New creates a new Downloader.
@@ -95,13 +96,16 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 	}
 }
 
-// waitForInfoTimeout waits up to gotInfoTimeout for the metadata of to.
-func waitForInfoTimeout(to *torrent.Torrent) error {
+// waitForInfoTimeout waits up to gotInfoTimeout for the metadata of to, or
+// until ctx ends.
+func waitForInfoTimeout(ctx context.Context, to *torrent.Torrent) error {
 	select {
 	case <-to.GotInfo():
 		return nil
 	case <-to.Closed():
 		return errors.New("torrent closed")
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-time.After(gotInfoTimeout):
 		return errors.New("timed out")
 	}
@@ -154,22 +158,20 @@ func (d *Downloader) Stop() {
 	close(d.stop)
 	d.stop = nil
 
-	// Pause all torrents that this downloader was managing.
+	d.pauseAllLocked()
+}
+
+// pauseAllLocked pauses every background download. d.mu must be held.
+func (d *Downloader) pauseAllLocked() {
 	for hash := range d.downloading {
-		if to, ok := d.client.Torrent(hash); ok {
-			if to.Info() == nil {
-				d.logger.Warn("torrent in downloader has no info on stop", "hash", hash)
-				continue
-			}
-			d.logger.Debug("pausing background download for torrent on stop", "hash", hash)
+		if to, ok := d.client.Torrent(hash); ok && to.Info() != nil {
+			d.logger.Debug("pausing background download for torrent", "hash", hash)
 			for _, f := range to.Files() {
 				f.SetPriority(torrent.PiecePriorityNone)
 			}
 		}
 	}
-
-	// Clear the state.
-	d.downloading = make(map[metainfo.Hash]struct{})
+	clear(d.downloading)
 	d.metrics.SetDownloadingTorrents(0)
 }
 
@@ -189,14 +191,14 @@ func (d *Downloader) run(stop <-chan struct{}) {
 	d.logger.Info("background downloader started")
 
 	// Run once on start
-	d.processTorrents()
+	d.processTorrents(stop)
 
 	for {
 		select {
 		case <-ticker.C:
-			d.processTorrents()
+			d.processTorrents(stop)
 		case <-d.wake:
-			d.processTorrents()
+			d.processTorrents(stop)
 		case <-stop:
 			d.logger.Info("background downloader stopped")
 			return
@@ -204,7 +206,13 @@ func (d *Downloader) run(stop <-chan struct{}) {
 	}
 }
 
-func (d *Downloader) processTorrents() {
+// processTorrents loads the saved file-storage torrents and starts or pauses
+// their background downloads. While a file is being streamed, it only pauses
+// every download, and while the downloader is disabled, it pauses them all
+// first. It waits for each torrent's metadata in turn; a wake or stop ends the
+// pass, and the wake runs a new one, so a stream that starts meanwhile pauses
+// the downloads without waiting for the metadata.
+func (d *Downloader) processTorrents(stop <-chan struct{}) {
 	d.logger.Debug("checking for torrents to download in the background")
 
 	settings, err := d.db.GetSettings()
@@ -214,14 +222,32 @@ func (d *Downloader) processTorrents() {
 	}
 
 	downloaderEnabled := utils.Val(settings.EnableDownloader)
-	isStreaming := d.streaming != nil && d.streaming()
-
+	streaming := d.isStreaming()
+	if !downloaderEnabled || streaming {
+		d.mu.Lock()
+		d.pauseAllLocked()
+		d.mu.Unlock()
+	}
+	if streaming {
+		d.logger.Debug("streaming is active, pausing background downloader")
+		return
+	}
 	if !downloaderEnabled {
 		d.logger.Debug("background downloader is disabled, stopping all background downloads")
 	}
-	if isStreaming {
-		d.logger.Debug("streaming is active, pausing background downloader")
-	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-stop:
+			cancel()
+		case <-d.wake:
+			cancel()
+			d.Wake()
+		}
+	}()
 
 	allTorrents, err := d.db.GetTorrents()
 	if err != nil {
@@ -247,6 +273,9 @@ func (d *Downloader) processTorrents() {
 	d.mu.Unlock()
 
 	for _, t := range fileTorrents {
+		if ctx.Err() != nil {
+			return
+		}
 		to, ok := d.client.Torrent(t.Hash)
 		if !ok {
 			spec, err := torrent.TorrentSpecFromMagnetUri(t.Magnet)
@@ -284,7 +313,10 @@ func (d *Downloader) processTorrents() {
 			d.WatchStorageWrites(to)
 		}
 
-		if err := d.waitForInfo(to); err != nil {
+		if err := d.waitForInfo(ctx, to); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			d.logger.Warn("failed to get info for torrent", "hash", t.Hash, "error", err)
 			continue
 		}
@@ -309,24 +341,10 @@ func (d *Downloader) processTorrents() {
 		}
 
 		inMemory := d.inMemoryStorage != nil && d.inMemoryStorage(t.Hash)
-		shouldDownload := downloaderEnabled && !isStreaming && !writeFailed && !inMemory
 
-		if shouldDownload {
-			if !isDownloading {
-				d.logger.Debug("starting background download for torrent", "hash", t.Hash)
-				// Download through file priorities, which pausing sets back to
-				// none. Piece priorities belong to the stream pool's claims,
-				// and a piece's effective priority is the highest of the two,
-				// so raising piece priorities here could not be undone.
-				for _, f := range to.Files() {
-					f.SetPriority(torrent.PiecePriorityNormal)
-				}
-				// A failed storage write stops the torrent's downloads
-				// until they are allowed again.
-				to.AllowDataDownload()
-				d.mu.Lock()
-				d.downloading[t.Hash] = struct{}{}
-				d.mu.Unlock()
+		if downloaderEnabled && !writeFailed && !inMemory {
+			if !isDownloading && !d.startDownload(ctx, stop, to) {
+				return
 			}
 		} else { // should pause
 			if isDownloading {
@@ -345,6 +363,45 @@ func (d *Downloader) processTorrents() {
 	downloadingCount := float64(len(d.downloading))
 	d.mu.Unlock()
 	d.metrics.SetDownloadingTorrents(downloadingCount)
+}
+
+// startDownload starts the background download of to, unless the pass that
+// calls it has ended or a file is being streamed; then it pauses every
+// download and returns false, and the pass ends. It checks and starts under
+// d.mu, so a Stop that closed stop meanwhile pauses the new download too.
+func (d *Downloader) startDownload(ctx context.Context, stop <-chan struct{}, to *torrent.Torrent) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	select {
+	case <-stop:
+		return false
+	default:
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+	if d.isStreaming() {
+		d.pauseAllLocked()
+		return false
+	}
+	d.logger.Debug("starting background download for torrent", "hash", to.InfoHash())
+	// Download through file priorities, which pausing sets back to none.
+	// Piece priorities belong to the stream pool's claims, and a piece's
+	// effective priority is the highest of the two, so raising piece
+	// priorities here could not be undone.
+	for _, f := range to.Files() {
+		f.SetPriority(torrent.PiecePriorityNormal)
+	}
+	// A failed storage write stops the torrent's downloads until they are
+	// allowed again.
+	to.AllowDataDownload()
+	d.downloading[to.InfoHash()] = struct{}{}
+	return true
+}
+
+// isStreaming reports whether any file is being streamed.
+func (d *Downloader) isStreaming() bool {
+	return d.streaming != nil && d.streaming()
 }
 
 // WatchStorageWrites stops downloading a file-storage torrent when writing its

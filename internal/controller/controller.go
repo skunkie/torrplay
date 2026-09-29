@@ -970,7 +970,7 @@ func (c *Controller) downloaderHooks() downloader.Hooks {
 	return downloader.Hooks{
 		InMemoryStorage: c.inMemoryFallback,
 		Streaming:       c.isStreaming,
-		WaitForInfo:     c.waitForInfo,
+		WaitForInfo:     c.waitForInfoContext,
 	}
 }
 
