@@ -1164,7 +1164,7 @@ func TestWaitForPieceChange(t *testing.T) {
 		changes <- change(1, false)
 		complete := map[int]bool{1: false, 2: false}
 
-		require.True(t, waitForPieceChange(context.Background(), to, changes, complete))
+		require.True(t, waitForPieceChange(context.Background(), to, changes, complete, nil))
 		assert.Equal(t, map[int]bool{1: false, 2: true}, complete, "later changes must win and unwatched pieces stay untracked")
 		assert.Empty(t, changes, "the burst must be drained")
 	})
@@ -1172,13 +1172,13 @@ func TestWaitForPieceChange(t *testing.T) {
 	t.Run("ends when the subscription closes", func(t *testing.T) {
 		changes := make(chan torrent.PieceStateChange)
 		close(changes)
-		assert.False(t, waitForPieceChange(context.Background(), to, changes, map[int]bool{}))
+		assert.False(t, waitForPieceChange(context.Background(), to, changes, map[int]bool{}, nil))
 	})
 
 	t.Run("ends with its context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		assert.False(t, waitForPieceChange(ctx, to, make(chan torrent.PieceStateChange), map[int]bool{}))
+		assert.False(t, waitForPieceChange(ctx, to, make(chan torrent.PieceStateChange), map[int]bool{}, nil))
 	})
 }
 
@@ -1285,6 +1285,35 @@ func TestPool_PreloadAt(t *testing.T) {
 		status, _ = pool.PreloadStatus(to.InfoHash())
 		assert.Equal(t, int64(256), status.TargetBytes)
 		assert.Equal(t, []int{0, 4, 5, 9}, protected(reg), "a ready preload keeps its window protected")
+	})
+
+	t.Run("reports progress while it resolves the position", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "slow index")
+		release := make(chan struct{})
+		pool := New(Config{
+			Logger: testLogger(),
+			SeekIndex: func(io.ReaderAt, *torrent.File, time.Duration) (int64, bool, error) {
+				<-release
+				return 320, true, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 9)
+		require.Eventually(t, func() bool {
+			status, _ := pool.PreloadStatus(to.InfoHash())
+			return status.CompletedBytes == 128
+		}, 5*time.Second, time.Millisecond, "the head and tail must count while the index is read")
+		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "the window must be placed before the preload is ready")
+
+		close(release)
+		require.Eventually(t, func() bool { return slices.Equal(claimed(pool, to), []int{0, 4, 5, 9}) }, 5*time.Second, time.Millisecond)
+		writePieces(t, to, data, 4, 5)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
 	})
 
 	t.Run("keeps its window between the head and the tail", func(t *testing.T) {

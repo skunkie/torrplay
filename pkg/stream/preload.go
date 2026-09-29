@@ -157,6 +157,8 @@ type preload struct {
 	// position could not be resolved.
 	windowPlaced           bool
 	windowStart, windowEnd int64
+	// resolving reports that the playback position is being resolved.
+	resolving bool
 }
 
 // preloadReservation is the protection budget held by a memory-storage
@@ -542,9 +544,9 @@ func (r *readerAt) ReadAt(b []byte, off int64) (int, error) {
 // offset, or records that it has none when ok is false. The window takes the
 // preload's windowPieces whole pieces, starts an eighth of its size before
 // offset, and stays between the head and the tail. A placed window's pieces
-// join the preload's pieces, claims, and protection. It returns the pieces the
-// window added. Must be called with p.mu held.
-func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) []int {
+// join the preload's pieces, claims, and protection. Must be called with p.mu
+// held.
+func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) {
 	pl.windowPlaced = true
 	pieceLength := max(pl.file.Torrent().Info().PieceLength, 1)
 	fileOffset := pl.file.Offset()
@@ -563,7 +565,7 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) []int {
 			slog.String("hash", pl.infoHash.HexString()),
 			slog.String("file", pl.file.Path()),
 			slog.Duration("position", pl.position))
-		return nil
+		return
 	}
 	pl.targetBytes = pl.rangeBytes()
 	windowStartPiece := int((fileOffset + pl.windowStart) / pieceLength)
@@ -589,7 +591,6 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) []int {
 		slog.Int64("offset", offset),
 		slog.Int64("windowStart", pl.windowStart),
 		slog.Int64("windowEnd", pl.windowEnd))
-	return added
 }
 
 // preloadMemoryLimit returns the bytes one memory-storage preload may protect,
@@ -726,8 +727,9 @@ func (p *Pool) startPreloadLocked(pl *preload) {
 // the preload runs or is ready. It marks the preload ready once every piece is
 // complete, and running again if storage evicts one of its pieces, and it
 // removes the preload when its torrent closes. When a preload with a resume
-// window starts running, it first resolves the playback position and places
-// the window, which the preload must complete before it can become ready.
+// window starts running, a goroutine resolves the playback position and places
+// the window, which the preload must complete before it can become ready,
+// while the watcher goes on reporting the progress of the head and tail.
 func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	to := pl.file.Torrent()
 	// Subscribe before reading the piece states, so no change between the
@@ -736,35 +738,59 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	sub := to.SubscribePieceStateChanges()
 	defer sub.Close()
 	pieces := completedPieces(to, pl.pieces)
+	// placed wakes the watcher when the resume window is placed.
+	placed := make(chan struct{}, 1)
+	windowTracked := false
 
 	for {
-		completedBytes, complete := pl.progress(pieces)
 		p.mu.Lock()
 		if ctx.Err() != nil {
 			p.mu.Unlock()
 			return
 		}
+		var added []int
+		if pl.windowPlaced && !windowTracked {
+			windowTracked = true
+			for _, index := range pl.pieces {
+				if _, tracked := pieces[index]; !tracked {
+					added = append(added, index)
+				}
+			}
+		}
+		p.mu.Unlock()
+		// Changes to the added pieces delivered before they were watched are
+		// applied after this read, in order, so their tracked states still
+		// end at the latest ones.
+		maps.Copy(pieces, completedPieces(to, added))
+
+		p.mu.Lock()
+		if ctx.Err() != nil {
+			p.mu.Unlock()
+			return
+		}
+		// The window is placed under p.mu, so progress reads it there too.
+		completedBytes, complete := pl.progress(pieces)
 		p.updatePreloadLocked(pl, completedBytes, complete)
-		place := pl.state == PreloadRunning && pl.awaitingWindow()
+		if pl.state == PreloadRunning && pl.awaitingWindow() && !pl.resolving {
+			// Resolving waits for the index pieces to download, so it runs
+			// apart from the watcher, which keeps reporting progress.
+			pl.resolving = true
+			p.preloadWatchers.Go(func() {
+				offset, ok := p.resolveResumeOffset(ctx, pl)
+				p.mu.Lock()
+				if ctx.Err() == nil && p.preloads[pl.infoHash] == pl {
+					p.placeWindowLocked(pl, offset, ok)
+				}
+				p.mu.Unlock()
+				select {
+				case placed <- struct{}{}:
+				default:
+				}
+			})
+		}
 		p.mu.Unlock()
 
-		if place {
-			offset, ok := p.resolveResumeOffset(ctx, pl)
-			p.mu.Lock()
-			if ctx.Err() != nil {
-				p.mu.Unlock()
-				return
-			}
-			added := p.placeWindowLocked(pl, offset, ok)
-			p.mu.Unlock()
-			// Changes to the added pieces delivered before they were watched
-			// are applied after this read, in order, so their tracked states
-			// still end at the latest ones.
-			maps.Copy(pieces, completedPieces(to, added))
-			continue
-		}
-
-		if !waitForPieceChange(ctx, to, sub.Values, pieces) {
+		if !waitForPieceChange(ctx, to, sub.Values, pieces, placed) {
 			if ctx.Err() == nil {
 				p.mu.Lock()
 				if p.preloads[pl.infoHash] == pl {
@@ -780,9 +806,9 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 
 // waitForPieceChange blocks until the state of a piece in complete changes,
 // records the new completion in complete, and records the changes already
-// delivered as well, so that a burst causes one check. It returns false when
-// ctx ends or the torrent closes.
-func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, complete map[int]bool) bool {
+// delivered as well, so that a burst causes one check. It also returns true
+// when wake is signalled. It returns false when ctx ends or the torrent closes.
+func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, complete map[int]bool, wake <-chan struct{}) bool {
 	record := func(change torrent.PieceStateChange) bool {
 		if _, watched := complete[change.Index]; !watched {
 			return false
@@ -796,6 +822,8 @@ func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan
 			return false
 		case <-to.Closed():
 			return false
+		case <-wake:
+			return true
 		case change, ok := <-changes:
 			if !ok {
 				return false
