@@ -11,7 +11,7 @@ import useSWR from 'swr';
 
 import { getSettings } from '@/lib/api/settings';
 import { getSystemLogs } from '@/lib/api/system';
-import { getApiBaseUrl } from '@/lib/api-client';
+import { getApiBaseUrl, setApiBaseUrlOverride } from '@/lib/api-client';
 import { useAuth } from '@/lib/auth-context';
 import { copyLogEntries } from '@/lib/copy-logs';
 import { LogLevel, normalizeLogLevel } from '@/lib/log-level';
@@ -156,7 +156,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             throw new Error(`Server responded with status: ${response.status}`);
           await response.json();
 
-          localStorage.setItem('NEXT_PUBLIC_API_URL', apiUrl);
+          setApiBaseUrlOverride(apiUrl);
           toast.info('API URL updated', {
             description: 'The page will now reload.',
             duration: 2500,
@@ -175,7 +175,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
           clearTimeout(timeoutId);
         }
       } else {
-        localStorage.removeItem('NEXT_PUBLIC_API_URL');
+        setApiBaseUrlOverride(null);
         toast.info('API URL reset to default', {
           description: 'The page will now reload.',
           duration: 2500,

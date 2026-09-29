@@ -8,7 +8,7 @@ import React, { createContext, ReactNode, useCallback, useContext, useEffect, us
 
 import { login as apiLogin } from '@/lib/api/auth';
 import { getSettings, updateSettings as apiUpdateSettings } from '@/lib/api/settings';
-import { HttpError, onUnauthorized } from '@/lib/api-client';
+import { clearStoredCredentials, HttpError, onUnauthorized } from '@/lib/api-client';
 import { Auth, Settings } from '@/lib/types/api';
 
 import { demoDefaultSettings } from './demo-settings';
@@ -62,9 +62,7 @@ function useAuthStore(isDemo = false) {
     } catch (error) {
       if (error instanceof HttpError && error.status === 401) {
         const detectedType = parseAuthType(error.wwwAuthenticate);
-        localStorage.removeItem('jwt_token');
-        localStorage.removeItem('basic_auth');
-        localStorage.removeItem('playback_token');
+        clearStoredCredentials();
         setAuth({
           enabled: true,
           type: detectedType ?? 'basic',
@@ -94,9 +92,7 @@ function useAuthStore(isDemo = false) {
     const handleUnauthorized = (error: HttpError) => {
       const detectedType = parseAuthType(error.wwwAuthenticate);
 
-      localStorage.removeItem('jwt_token');
-      localStorage.removeItem('basic_auth');
-      localStorage.removeItem('playback_token');
+      clearStoredCredentials();
 
       setAuth(prev => ({
         ...(prev || {}),
@@ -165,9 +161,7 @@ function useAuthStore(isDemo = false) {
       setAuth({ enabled: false } as Auth);
       return;
     }
-    localStorage.removeItem('jwt_token');
-    localStorage.removeItem('basic_auth');
-    localStorage.removeItem('playback_token');
+    clearStoredCredentials();
     setSettings(null);
     setAuth(prev => (prev?.enabled ? { enabled: true, type: prev.type } : null));
     window.location.reload();
@@ -194,9 +188,7 @@ function useAuthStore(isDemo = false) {
     await apiUpdateSettings(settingsToUpdate);
 
     if (settingsToUpdate.auth) {
-      localStorage.removeItem('jwt_token');
-      localStorage.removeItem('basic_auth');
-      localStorage.removeItem('playback_token');
+      clearStoredCredentials();
     }
 
     fetchSettings();
