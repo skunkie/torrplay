@@ -8,13 +8,17 @@ import { expect, it, vi } from 'vitest';
 
 import VideoPlayer from '@/components/video-player';
 
+const media = vi.hoisted(() => ({ src: undefined as unknown }));
+
 vi.mock('@vidstack/react', async () => {
   const React = await import('react');
   const MockMediaPlayer = React.forwardRef<unknown, {
     children: React.ReactNode,
-    onError?: (detail: MediaErrorDetail) => void
-  }>(({ children, onError }, ref) => {
+    onError?: (detail: MediaErrorDetail) => void,
+    src?: unknown
+  }>(({ children, onError, src }, ref) => {
     React.useImperativeHandle(ref, () => null);
+    media.src = src;
     return (
       <div data-testid='media-player'>
         <button type='button'
@@ -86,28 +90,28 @@ it('shows a network-specific error instead of a misleading codec message', () =>
   );
 });
 
-it('explains that MKV files cannot be played where the video element reports no Matroska support', () => {
+it('shows the MKV message without loading the file where the video element reports no Matroska support', () => {
+  // Safari may load an MKV file indefinitely without reporting an error.
   const canPlayType = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('');
   render(<VideoPlayer options={{
     src: { src: 'http://test-server/api/v1/stream/hash?path=Show%2FMovie.mkv&token=t', type: 'video/mp4' },
     title: 'Movie',
   }} />);
 
-  fireEvent.click(screen.getByRole('button', { name: 'Fail playback (network)' }));
-
   expect(screen.getByRole('alert')).toHaveTextContent(
     'MKV files cannot be played here. Open the file in an external player.',
   );
+  expect(media.src).toBeUndefined();
   canPlayType.mockRestore();
 });
 
-it('keeps the standard error for an MKV file in a browser that plays Matroska', () => {
+it('loads an MKV file and keeps the standard errors in a browser that plays Matroska', () => {
   const canPlayType = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('maybe');
-  render(<VideoPlayer options={{
-    src: { src: 'http://test-server/movie.mkv', type: 'video/mp4' },
-    title: 'Movie.mkv',
-  }} />);
+  const src = { src: 'http://test-server/api/v1/stream/hash?path=movie.mkv', type: 'video/mp4' as const };
+  render(<VideoPlayer options={{ src, title: 'Movie' }} />);
 
+  expect(media.src).toBe(src);
+  expect(screen.queryByRole('alert')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Fail playback (unsupported format)' }));
 
   expect(screen.getByRole('alert')).toHaveTextContent(

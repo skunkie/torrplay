@@ -15,7 +15,7 @@ import {
   MediaProvider,
   type PlayerSrc,
 } from '@vidstack/react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useSubtitleTracks } from '@/hooks/use-subtitle-tracks';
 import {
@@ -41,16 +41,14 @@ const PLAYBACK_ERROR_MESSAGES: Record<number, string> = {
   4: 'This video container or codec is not supported by the internal player.',
 };
 
-// MATROSKA_UNSUPPORTED_MESSAGE explains a failed MKV file where the video
-// element cannot play Matroska, as in Safari, every iOS browser, and the macOS
-// app's WebKit view, which report only that the resource failed to load.
+// MATROSKA_UNSUPPORTED_MESSAGE replaces an MKV file where the video element
+// cannot play Matroska, as in Safari, every iOS browser, and the macOS app's
+// WebKit view. Such an element is never given the file: Safari may load it
+// indefinitely without reporting an error.
 const MATROSKA_UNSUPPORTED_MESSAGE =
   'MKV files cannot be played here. Open the file in an external player.';
 
-function getPlaybackErrorMessage(detail: MediaErrorDetail, streamUrl?: string): string {
-  if (isMatroskaStream(streamUrl) && !canPlayMatroska()) {
-    return MATROSKA_UNSUPPORTED_MESSAGE;
-  }
+function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
   if (detail.code && PLAYBACK_ERROR_MESSAGES[detail.code]) {
     return PLAYBACK_ERROR_MESSAGES[detail.code];
   }
@@ -121,6 +119,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ? options.src.src
       : undefined;
 
+  const matroskaUnsupported = useMemo(() => isMatroskaStream(streamUrl) && !canPlayMatroska(), [streamUrl]);
+
   const positionHash = positionKey?.hash;
   const positionFilePath = positionKey?.filePath;
 
@@ -165,7 +165,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     player,
     sourceKey: streamUrl,
     tracks: options.tracks,
-    enabled: preferenceLoaded && !useExternalPlayer && !isPreloading,
+    enabled: preferenceLoaded && !useExternalPlayer && !isPreloading && !matroskaUnsupported,
     embeddedStreamUrl: isMkv ? streamUrl : undefined,
   });
   const {
@@ -181,7 +181,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     // Keep in sync with useSubtitleTracks' `enabled` above: keyboard shortcuts
     // (including subtitle cycling) shouldn't fire while the player has no source
     // loaded during preloading.
-    enabled: preferenceLoaded && !useExternalPlayer && !isPreloading,
+    enabled: preferenceLoaded && !useExternalPlayer && !isPreloading && !matroskaUnsupported,
   });
 
   useEffect(() => {
@@ -201,7 +201,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   }, [internalOnly]);
 
   useEffect(() => {
-    if (!streamUrl || useExternalPlayer || !isAudioDecodingSupported() || isPreloading) return;
+    if (!streamUrl || useExternalPlayer || !isAudioDecodingSupported() || isPreloading || matroskaUnsupported) return;
 
     let cancelled = false;
     probeAudioTracks(streamUrl)
@@ -267,7 +267,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setAudioTracks([]);
       setIsWasmAudioActive(false);
     };
-  }, [streamUrl, useExternalPlayer, isPreloading]);
+  }, [streamUrl, useExternalPlayer, isPreloading, matroskaUnsupported]);
 
   const handleSelectAudioTrack = (index: number) => {
     setSelectedAudioTrack(index);
@@ -498,16 +498,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return null;
   }
 
-  const playbackErrorMessage = playbackError && playbackError.source === streamUrl
-    ? playbackError.message
-    : null;
+  const playbackErrorMessage = matroskaUnsupported
+    ? MATROSKA_UNSUPPORTED_MESSAGE
+    : playbackError && playbackError.source === streamUrl
+      ? playbackError.message
+      : null;
 
   return (
     <MediaPlayer
       ref={player}
       className='group bg-black text-white font-sans rounded-lg aspect-video w-full'
       title={options.title}
-      src={isPreloading ? undefined : options.src}
+      src={isPreloading || matroskaUnsupported ? undefined : options.src}
       autoPlay={options.autoPlay && !isPreloading}
       onLoadedMetadata={resume}
       onCanPlay={handleCanPlay}
@@ -523,7 +525,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onRateChange={handleRateChange}
       onError={detail => setPlaybackError({
         source: streamUrl,
-        message: getPlaybackErrorMessage(detail, streamUrl),
+        message: getPlaybackErrorMessage(detail),
       })}
       playsInline
     >
