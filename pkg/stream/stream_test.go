@@ -1547,6 +1547,50 @@ func TestReadaheadRamp(t *testing.T) {
 		})
 	}
 
+	t.Run("a reader taking over continues the reading it takes over", func(t *testing.T) {
+		for _, tt := range []struct {
+			name      string
+			firstRead int64
+			want      int64
+		}{
+			// A player's next range request starts where the last one stopped.
+			{name: "next range request", firstRead: 4<<20 + pieceLength, want: 8<<20 + 2*pieceLength},
+			{name: "seek elsewhere", firstRead: 512 << 20, want: ramp},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				c := newTestTorrentClient(t)
+				_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
+				pool := newTestPool(t, Config{Logger: testLogger(), ReadaheadRampBytes: ramp})
+				pool.SetReadaheadBudget(64 << 20)
+				_, releaseFirst, err := pool.Acquire(context.Background(), file, MemoryStorage)
+				require.NoError(t, err)
+				pool.mu.Lock()
+				var first *streamReader
+				for _, sr := range pool.readers {
+					first = sr
+				}
+				pool.mu.Unlock()
+				readSequentially(pool, first, 0, 4<<20)
+				releaseFirst()
+
+				_, releaseSecond, err := pool.Acquire(context.Background(), file, MemoryStorage)
+				require.NoError(t, err)
+				defer releaseSecond()
+				pool.mu.Lock()
+				var second *streamReader
+				for _, sr := range pool.readers {
+					if sr != first {
+						second = sr
+					}
+				}
+				pool.mu.Unlock()
+				require.NotNil(t, second)
+				pool.updateReaderPosition(second.readerID, tt.firstRead)
+				assert.Equal(t, tt.want, readahead(pool, second))
+			})
+		}
+	})
+
 	t.Run("disabled", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)

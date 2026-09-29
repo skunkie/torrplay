@@ -124,7 +124,10 @@ type Config struct {
 	// it has read since, and at least ReadaheadRampBytes or one piece, until
 	// it reaches the readahead its share allows. A player's request that reads
 	// only a container header before seeking elsewhere then downloads little
-	// past it. Zero gives every reader its full readahead at once.
+	// past it. A reader that takes over from a lingering reader and starts
+	// reading where that reader stopped, as a player's next range request
+	// does, continues its ramp. Zero gives every reader its full readahead at
+	// once.
 	ReadaheadRampBytes int64
 	// ReadObserver, when set, is called after every Read of a reader with the
 	// reader's storage mode and how long the Read took, including any wait
@@ -323,6 +326,10 @@ type streamReader struct {
 	// runStart is the offset where the reader's current sequential reading
 	// began, at its first read or its last seek, or -1 before its first read.
 	runStart int64
+	// handoff is the reading of the lingering reader this reader took over,
+	// which it continues when its first read lands in that reader's window,
+	// as a player's next range request does. Nil once the reader has read.
+	handoff *readerHandoff
 	// shareReadahead is the readahead the reader's share of the budget, or
 	// FileReadaheadBytes for file storage, allows once ramped up.
 	shareReadahead int64
@@ -330,6 +337,14 @@ type streamReader struct {
 	readerID       uint64
 	// stream is the caller's view of reader.
 	stream *streamReadSeeker
+}
+
+// readerHandoff is a lingering reader's sequential reading, handed to the
+// reader of its file that takes over from it.
+type readerHandoff struct {
+	lastOffset int64
+	readahead  int64
+	runStart   int64
 }
 
 // Pool manages torrent readers with dynamic readahead management.
@@ -452,6 +467,11 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		runStart:      -1,
 		readerID:      readerID,
 		stream:        stream,
+	}
+	for _, other := range p.readers {
+		if !other.active && other.file == file && other.runStart >= 0 {
+			sr.handoff = &readerHandoff{lastOffset: other.lastOffset, readahead: other.readahead, runStart: other.runStart}
+		}
 	}
 	p.readers[readerID] = sr
 	p.noteStreamingLocked()
@@ -1062,10 +1082,16 @@ func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
 	// the stream's lock, preserving the lock order.
 	// A read before or far past the last one is a seek, which restarts the
-	// readahead ramp.
-	if sr.runStart < 0 || newOffset < sr.lastOffset || newOffset-sr.lastOffset > max(sr.readahead, filePieceLength(file)) {
+	// readahead ramp. A first read near where the reader taken over from
+	// stopped continues that reader's reading instead.
+	window := max(sr.readahead, filePieceLength(file))
+	switch h := sr.handoff; {
+	case sr.runStart < 0 && h != nil && newOffset >= h.lastOffset-max(h.readahead, filePieceLength(file)) && newOffset-h.lastOffset <= max(h.readahead, filePieceLength(file)):
+		sr.runStart = h.runStart
+	case sr.runStart < 0, newOffset < sr.lastOffset, newOffset-sr.lastOffset > window:
 		sr.runStart = newOffset
 	}
+	sr.handoff = nil
 	sr.lastOffset = newOffset
 	currentPiece := filePiece(file, newOffset)
 	pieceChanged := (currentPiece != sr.lastPiece) || (sr.lastPiece < 0)
