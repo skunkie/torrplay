@@ -1358,7 +1358,8 @@ func authChanged(oldAuth, newAuth *api.Auth) bool {
 // update changed. The logger and piece completion database are restored before
 // the torrent client, whose rebuilt downloader captures both. Restoration is
 // best effort: failures are logged because the original error is what the
-// caller reports.
+// caller reports. A JWT secret rotated by the update is not restored, so
+// clients must sign in again even though the previous credentials are back.
 func (c *Controller) rollbackSettings(old *api.Settings, applied appliedSettings) {
 	if err := c.db.UpdateSettings(database.FromAPISettings(old)); err != nil {
 		c.logger.Load().Error("failed to restore previous settings", "err", err)

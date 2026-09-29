@@ -757,6 +757,25 @@ func TestUpdateSettingsRotatesJWTSecretOnAuthChange(t *testing.T) {
 			assert.Error(t, err, "playback tokens issued before the update must be revoked")
 			assert.False(t, stremio.ValidateAccessToken(stremio.AccessToken(secretBefore), secretAfter),
 				"Stremio tokens issued before the update must be revoked")
+
+			current := controller.settings.Load().Auth
+			if !utils.Val(current.Enabled) {
+				return
+			}
+			if utils.Val(current.Type) == api.Bearer {
+				rr = testutil.NewRequest().Get("/api/v1/torrents").
+					WithHeader("Authorization", "Bearer "+token).
+					GoWithHTTPHandler(t, controller.router).Recorder
+				assert.Equal(t, http.StatusUnauthorized, rr.Code, "the API must reject tokens issued before the update")
+			}
+
+			rr = httptest.NewRecorder()
+			controller.GetSettings(rr, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+			require.Equal(t, http.StatusOK, rr.Code)
+			var res api.Settings
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&res))
+			assert.Equal(t, stremio.AccessToken(secretAfter), utils.Val(res.StremioToken),
+				"settings must expose the Stremio token for the new secret")
 		})
 	}
 }
