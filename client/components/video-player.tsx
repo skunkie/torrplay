@@ -112,21 +112,21 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ? options.src.src
       : undefined;
 
-  const resumeHash = positionKey?.hash;
-  const resumeFilePath = positionKey?.filePath;
+  const positionHash = positionKey?.hash;
+  const positionFilePath = positionKey?.filePath;
 
   // Each source resumes from the position saved for it when it loads, and its
   // latest position is saved when it is left or the page is hidden.
   useEffect(() => {
-    resumeFromRef.current = resumeHash && resumeFilePath
-      ? getPlaybackPositionSeconds(resumeHash, resumeFilePath)
+    resumeFromRef.current = positionHash && positionFilePath
+      ? getPlaybackPositionSeconds(positionHash, positionFilePath)
       : 0;
     resumedRef.current = false;
     lastPositionRef.current = null;
     lastPositionSaveMsRef.current = 0;
     const flush = () => {
-      if (resumeHash && resumeFilePath && lastPositionRef.current !== null) {
-        savePlaybackPositionSeconds(resumeHash, resumeFilePath, lastPositionRef.current);
+      if (positionHash && positionFilePath && lastPositionRef.current !== null) {
+        savePlaybackPositionSeconds(positionHash, positionFilePath, lastPositionRef.current);
       }
     };
     window.addEventListener('pagehide', flush);
@@ -134,16 +134,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       window.removeEventListener('pagehide', flush);
       flush();
     };
-  }, [resumeHash, resumeFilePath, streamUrl]);
+  }, [positionHash, positionFilePath, streamUrl]);
 
   const recordPosition = (positionSeconds: number, force: boolean) => {
-    if (!resumeHash || !resumeFilePath || !resumedRef.current || !hasPlayedRef.current) return;
+    if (!positionHash || !positionFilePath || !resumedRef.current || !hasPlayedRef.current) return;
     if (!Number.isFinite(positionSeconds) || positionSeconds < 0) return;
     lastPositionRef.current = positionSeconds;
     const now = Date.now();
     if (!force && now - lastPositionSaveMsRef.current < PLAYBACK_POSITION_SAVE_INTERVAL_MS) return;
     lastPositionSaveMsRef.current = now;
-    savePlaybackPositionSeconds(resumeHash, resumeFilePath, positionSeconds);
+    savePlaybackPositionSeconds(positionHash, positionFilePath, positionSeconds);
   };
 
   const isMkv = isMkvOrWebmStream(streamUrl) ||

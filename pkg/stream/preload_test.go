@@ -1220,13 +1220,13 @@ func TestPool_PreloadAt(t *testing.T) {
 	// A 512-byte budget leaves a 256-byte preload limit, four of the ten
 	// 64-byte pieces: a 64-byte head and tail, and two pieces for the window.
 	const budget, position = 512, 30 * time.Second
-	type seekCall struct {
+	type resolveCall struct {
 		header   []byte
 		position time.Duration
 	}
-	newPool := func(t *testing.T, reg ProtectionRegistry, offset int64, ok bool) (*Pool, chan seekCall) {
+	newPool := func(t *testing.T, reg ProtectionRegistry, offset int64, ok bool) (*Pool, chan resolveCall) {
 		t.Helper()
-		calls := make(chan seekCall, 1)
+		calls := make(chan resolveCall, 1)
 		pool := New(Config{
 			Logger:   testLogger(),
 			Registry: reg,
@@ -1235,7 +1235,7 @@ func TestPool_PreloadAt(t *testing.T) {
 				if _, err := r.ReadAt(header, 0); err != nil {
 					return 0, false, err
 				}
-				calls <- seekCall{header: header, position: position}
+				calls <- resolveCall{header: header, position: position}
 				return offset, ok, nil
 			},
 		})
@@ -1266,7 +1266,7 @@ func TestPool_PreloadAt(t *testing.T) {
 		// The seek index reads only the first piece, so the window is placed
 		// while the tail still downloads.
 		writePieces(t, to, data, 0)
-		var call seekCall
+		var call resolveCall
 		select {
 		case call = <-calls:
 		case <-time.After(5 * time.Second):
@@ -1434,18 +1434,18 @@ func TestPool_PreloadAt(t *testing.T) {
 
 	t.Run("is ready with its head and tail when the position cannot be resolved", func(t *testing.T) {
 		for _, tt := range []struct {
-			name      string
-			seekIndex bool
+			name     string
+			resolver bool
 		}{
-			{name: "unresolved", seekIndex: true},
-			{name: "no seek index", seekIndex: false},
+			{name: "unresolved", resolver: true},
+			{name: "no resolver", resolver: false},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				c := newTestTorrentClient(t)
 				to, file, data := addHashedTorrent(t, c, tt.name)
 				reg := newProtectionRegistry()
 				pool, _ := newPool(t, reg, 0, false)
-				if !tt.seekIndex {
+				if !tt.resolver {
 					pool.cfg.ResolveOffset = nil
 				}
 
