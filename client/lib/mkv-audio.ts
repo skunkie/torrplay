@@ -252,6 +252,16 @@ export class MkvAudioSyncEngine {
     this.lastVideoFrameWallTime = null;
   }
 
+  // ensureVideoFrameSync starts observing the bound element's frames once
+  // playback starts. Observing them from the moment the element is attached,
+  // before a resume seek, makes Chromium reach the seek target by reading the
+  // file from its start instead of seeking through the container's index.
+  private ensureVideoFrameSync() {
+    if (this.boundElement && this.videoFrameElement !== this.boundElement) {
+      this.startVideoFrameSync(this.boundElement);
+    }
+  }
+
   private startVideoFrameSync(videoEl: HTMLMediaElement) {
     if (!(videoEl instanceof HTMLVideoElement) ||
       typeof videoEl.requestVideoFrameCallback !== 'function') return;
@@ -344,8 +354,6 @@ export class MkvAudioSyncEngine {
         this.updateGains();
         this.onError?.(err);
       }
-
-      this.startVideoFrameSync(videoEl);
     }
 
     this.syncAudioTracks();
@@ -378,6 +386,7 @@ export class MkvAudioSyncEngine {
 
   public onPlay(currentTime: number) {
     this.isPaused = false;
+    this.ensureVideoFrameSync();
     const ctx = this.initAudioContext();
     if (ctx.state === 'suspended') {
       ctx.resume();
@@ -389,6 +398,7 @@ export class MkvAudioSyncEngine {
 
   public onPlaying(currentTime: number) {
     this.isPaused = false;
+    this.ensureVideoFrameSync();
     const ctx = this.initAudioContext();
     if (ctx.state === 'suspended') {
       ctx.resume();

@@ -28,7 +28,7 @@ import {
 import { isMkvOrWebmStream } from '@/lib/mkv-subtitles';
 import { getPlaybackPositionSeconds, type PlaybackPositionKey, savePlaybackPositionSeconds } from '@/lib/playback-position';
 import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
-import { getVidstackVideoElement } from '@/lib/vidstack-media';
+import { getVidstackCurrentTime, getVidstackVideoElement } from '@/lib/vidstack-media';
 
 import { useVideoPlayerControls, VideoPlayerCaptions, VideoPlayerControls } from './video-player-controls';
 
@@ -238,7 +238,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             // If the player is already playing when probing finishes, start audio immediately
             if (player.current && !player.current.paused) {
-              engine.onPlay(player.current.currentTime);
+              engine.onPlay(getVidstackCurrentTime(player.current));
             }
           } else {
             setIsWasmAudioActive(false);
@@ -287,7 +287,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setIsWasmAudioActive(activated);
       if (!activated) return;
       if (player.current && !player.current.paused) {
-        engine.onPlay(player.current.currentTime);
+        engine.onPlay(getVidstackCurrentTime(player.current));
       }
     } else {
       engine.setNativeTrackIndex(index);
@@ -313,7 +313,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (syncEngineRef.current && player.current) {
       const videoEl = getVidstackVideoElement(player.current);
       if (videoEl && syncEngineRef.current.attachMediaElement(videoEl) && isWasmAudioActive) {
-        syncEngineRef.current.onPlay(player.current.currentTime);
+        syncEngineRef.current.onPlay(getVidstackCurrentTime(player.current));
       } else if (isWasmAudioActive) {
         syncEngineRef.current.setWasmActive(false);
         setIsWasmAudioActive(false);
@@ -326,16 +326,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       syncEngineRef.current.onPause();
     }
     if (player.current && !player.current.state?.ended) {
-      recordPosition(player.current.currentTime, true);
+      recordPosition(getVidstackCurrentTime(player.current), true);
     }
   };
 
   const handleSeeked = () => {
     if (isWasmAudioActive && syncEngineRef.current && player.current) {
-      syncEngineRef.current.onSeek(player.current.currentTime);
+      syncEngineRef.current.onSeek(getVidstackCurrentTime(player.current));
     }
     if (player.current) {
-      recordPosition(player.current.currentTime, true);
+      recordPosition(getVidstackCurrentTime(player.current), true);
     }
   };
 
@@ -356,7 +356,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (syncEngineRef.current && player.current) {
       const videoEl = getVidstackVideoElement(player.current);
       if (videoEl && syncEngineRef.current.attachMediaElement(videoEl) && isWasmAudioActive) {
-        syncEngineRef.current.onPlaying(player.current.currentTime);
+        syncEngineRef.current.onPlaying(getVidstackCurrentTime(player.current));
       } else if (isWasmAudioActive) {
         syncEngineRef.current.setWasmActive(false);
         setIsWasmAudioActive(false);
@@ -448,21 +448,33 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, []);
 
-  const handleCanPlay = useCallback(() => {
-    canPlayRef.current = true;
-    setPlaybackError(null);
-    if (!resumedRef.current && player.current) {
-      resumedRef.current = true;
-      const resumeFrom = resumeFromRef.current;
-      const duration = player.current.duration;
-      if (resumeFrom > 0 && (!duration || resumeFrom < duration)) {
+  // resume seeks the source to its saved position once. It seeks the video
+  // element as soon as its metadata loads, since Vidstack defers its own seeks
+  // until the source can play, by which time the browser has buffered the
+  // start of the file. Without the element it falls back to Vidstack.
+  const resume = useCallback(() => {
+    if (resumedRef.current || !player.current) return;
+    resumedRef.current = true;
+    const resumeFrom = resumeFromRef.current;
+    const videoEl = getVidstackVideoElement(player.current);
+    const duration = videoEl?.duration ?? player.current.duration;
+    if (resumeFrom > 0 && (!duration || resumeFrom < duration)) {
+      if (videoEl) {
+        videoEl.currentTime = resumeFrom;
+      } else {
         player.current.currentTime = resumeFrom;
       }
     }
+  }, []);
+
+  const handleCanPlay = useCallback(() => {
+    canPlayRef.current = true;
+    setPlaybackError(null);
+    resume();
     if (!isPreloading && options.autoPlay) {
       tryPlay();
     }
-  }, [isPreloading, options.autoPlay, tryPlay]);
+  }, [isPreloading, options.autoPlay, resume, tryPlay]);
 
   useEffect(() => {
     if (prevPreloadingRef.current && !isPreloading && options.autoPlay) {
@@ -490,6 +502,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       title={options.title}
       src={isPreloading ? undefined : options.src}
       autoPlay={options.autoPlay && !isPreloading}
+      onLoadedMetadata={resume}
       onCanPlay={handleCanPlay}
       onFullscreenChange={setIsFullscreen}
       onEnded={handleEnded}

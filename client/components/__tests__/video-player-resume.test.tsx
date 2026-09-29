@@ -11,6 +11,7 @@ import { getPlaybackPositionSeconds, savePlaybackPositionSeconds } from '@/lib/p
 interface MediaHandlers {
   onCanPlay?: () => void,
   onEnded?: () => void,
+  onLoadedMetadata?: () => void,
   onPause?: () => void,
   onPlay?: () => void,
   onSeeked?: () => void,
@@ -19,7 +20,13 @@ interface MediaHandlers {
 
 const media = vi.hoisted(() => ({
   handlers: {} as MediaHandlers,
-  instance: { currentTime: 0, duration: 0, state: { canPlay: false, ended: false }, play: () => Promise.resolve() },
+  instance: {
+    currentTime: 0,
+    duration: 0,
+    provider: null as { media: HTMLVideoElement } | null,
+    state: { canPlay: false, ended: false },
+    play: () => Promise.resolve(),
+  },
 }));
 
 vi.mock('@vidstack/react', async () => {
@@ -78,6 +85,7 @@ describe('VideoPlayer playback position', () => {
     localStorage.clear();
     media.instance.currentTime = 0;
     media.instance.duration = 600;
+    media.instance.provider = null;
     media.instance.state.ended = false;
   });
 
@@ -94,6 +102,28 @@ describe('VideoPlayer playback position', () => {
     act(() => media.handlers.onCanPlay?.());
 
     expect(media.instance.currentTime).toBe(120);
+  });
+
+  it('seeks the video element as soon as its metadata loads', () => {
+    savePlaybackPositionSeconds(positionKey.hash, positionKey.filePath, 120);
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'duration', { value: 600, configurable: true });
+    Object.defineProperty(video, 'currentTime', { value: 0, configurable: true, writable: true });
+    media.instance.provider = { media: video };
+    render(<VideoPlayer options={options}
+      positionKey={positionKey}
+      internalOnly />);
+
+    act(() => media.handlers.onLoadedMetadata?.());
+    expect(video.currentTime).toBe(120);
+    // Vidstack defers its own seeks until the source can play, by which time
+    // the browser has buffered the start of the file.
+    expect(media.instance.currentTime).toBe(0);
+
+    // The source resumes once, so it keeps its position when it can play.
+    video.currentTime = 130;
+    act(() => media.handlers.onCanPlay?.());
+    expect(video.currentTime).toBe(130);
   });
 
   it('starts from the beginning when the saved position is past the end', () => {

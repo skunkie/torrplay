@@ -392,6 +392,28 @@ describe('mkv-audio utilities', () => {
       expect(sinkConstructor).toHaveBeenCalledTimes(3);
     });
 
+    it('observes video frames only once playback starts', () => {
+      mockAudioCtx.createMediaElementSource = vi.fn(() => ({
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      }) as unknown as MediaElementAudioSourceNode);
+      const videoEl = document.createElement('video');
+      videoEl.requestVideoFrameCallback = vi.fn(() => 1);
+      videoEl.cancelVideoFrameCallback = vi.fn();
+
+      const mockInput = { dispose: vi.fn() } as unknown as Input;
+      const engine = new MkvAudioSyncEngine(mockInput, [mockRawTracks[0] as unknown as InputAudioTrack]);
+
+      // Observing frames before a resume seek makes Chromium reach the seek
+      // target by reading the file from its start.
+      expect(engine.attachMediaElement(videoEl)).toBe(true);
+      expect(videoEl.requestVideoFrameCallback).not.toHaveBeenCalled();
+
+      engine.onPlay(40);
+      engine.onPlaying(40);
+      expect(videoEl.requestVideoFrameCallback).toHaveBeenCalledTimes(1);
+    });
+
     it('uses presented video frames as the primary clock and cancels observation on destroy', () => {
       Object.defineProperty(mockAudioCtx, 'state', { value: 'running', configurable: true });
       Object.defineProperty(mockAudioCtx, 'currentTime', { value: 10, configurable: true });

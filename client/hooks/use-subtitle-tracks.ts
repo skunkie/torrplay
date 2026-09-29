@@ -9,6 +9,7 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { loadEmbeddedSubtitleTrackVtt, probeEmbeddedSubtitleTracks, SUBTITLE_SEEK_PREROLL_SECONDS, type SubtitleCue, SubtitleSourceCache } from '@/lib/mkv-subtitles';
 import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { getVidstackCurrentTime } from '@/lib/vidstack-media';
 
 const EMPTY_TRACKS: SubtitleTrackInfo[] = [];
 
@@ -158,7 +159,7 @@ export function useSubtitleTracks({
     if (completed.current.has(track)) return;
     const controller = new AbortController();
     activeScan.current = controller;
-    const startedAt = instance.currentTime;
+    const startedAt = getVidstackCurrentTime(instance);
     let skipped = false;
     loadEmbeddedSubtitleTrackVtt(embeddedStreamUrl, info.embeddedTrackNumber!, fetch, controller.signal, cues => {
       if (controller.signal.aborted) return;
@@ -183,7 +184,7 @@ export function useSubtitleTracks({
       }
     }, {
       cache: sourceCache,
-      currentTime: () => instance.currentTime,
+      currentTime: () => getVidstackCurrentTime(instance),
       waitForTimeChange: signal => waitForTimeChange(instance, signal),
       onSkip: () => { skipped = true; },
     }).then(() => {
