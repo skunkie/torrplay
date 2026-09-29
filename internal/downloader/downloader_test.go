@@ -256,6 +256,44 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		assertNothingWanted(t, to)
 	})
 
+	t.Run("counts a paused download before a later metadata wait ends", func(t *testing.T) {
+		unresolved := newTestTorrent(t, 2048).HashInfoBytes()
+		var inMemory, block atomic.Bool
+		waiting := make(chan struct{}, 1)
+		waitForInfo := func(ctx context.Context, to *torrent.Torrent) error {
+			if to.InfoHash() != unresolved {
+				return nil
+			}
+			if !block.Load() {
+				return errors.New("no metadata")
+			}
+			waiting <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		hooks := Hooks{InMemoryStorage: func(metainfo.Hash) bool { return inMemory.Load() }, WaitForInfo: waitForInfo}
+		downloader, to := newStreamingTestDownloader(t, hooks, metainfo.Hash{}, unresolved)
+		downloader.processTorrents(nil)
+		require.True(t, downloader.IsDownloading(to.InfoHash()))
+		require.Equal(t, float64(1), testutil.ToFloat64(downloader.metrics.DownloadingTorrents))
+
+		// The torrent falls back to memory storage, which pauses it, and the
+		// next torrent's metadata wait then blocks until the pass is stopped.
+		inMemory.Store(true)
+		block.Store(true)
+		stop := make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			downloader.processTorrents(stop)
+		}()
+		<-waiting
+		assert.False(t, downloader.IsDownloading(to.InfoHash()))
+		assert.Equal(t, float64(0), testutil.ToFloat64(downloader.metrics.DownloadingTorrents), "a paused download must not count while the pass goes on")
+		close(stop)
+		<-done
+	})
+
 	t.Run("waits for metadata through its waiter", func(t *testing.T) {
 		testMetaInfo := newTestTorrent(t, 1024)
 		testHash := testMetaInfo.HashInfoBytes()

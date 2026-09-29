@@ -267,7 +267,7 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 	d.mu.Lock()
 	for hash := range d.downloading {
 		if _, ok := currentTorrents[hash]; !ok {
-			delete(d.downloading, hash)
+			d.setDownloadingLocked(hash, false)
 		}
 	}
 	d.mu.Unlock()
@@ -334,7 +334,7 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 			if isDownloading {
 				// If it was downloading, remove it from our tracking.
 				d.mu.Lock()
-				delete(d.downloading, t.Hash)
+				d.setDownloadingLocked(t.Hash, false)
 				d.mu.Unlock()
 			}
 			continue
@@ -353,16 +353,11 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 					f.SetPriority(torrent.PiecePriorityNone)
 				}
 				d.mu.Lock()
-				delete(d.downloading, t.Hash)
+				d.setDownloadingLocked(t.Hash, false)
 				d.mu.Unlock()
 			}
 		}
 	}
-
-	d.mu.Lock()
-	downloadingCount := float64(len(d.downloading))
-	d.mu.Unlock()
-	d.metrics.SetDownloadingTorrents(downloadingCount)
 }
 
 // startDownload starts the background download of to. It returns false, and
@@ -396,9 +391,20 @@ func (d *Downloader) startDownload(ctx context.Context, stop <-chan struct{}, to
 	// A failed storage write stops the torrent's downloads until they are
 	// allowed again.
 	to.AllowDataDownload()
-	d.downloading[to.InfoHash()] = struct{}{}
-	d.metrics.SetDownloadingTorrents(float64(len(d.downloading)))
+	d.setDownloadingLocked(to.InfoHash(), true)
 	return true
+}
+
+// setDownloadingLocked records whether the torrent with hash downloads in the
+// background, and updates the downloading-torrents metric with it. d.mu must
+// be held.
+func (d *Downloader) setDownloadingLocked(hash metainfo.Hash, downloading bool) {
+	if downloading {
+		d.downloading[hash] = struct{}{}
+	} else {
+		delete(d.downloading, hash)
+	}
+	d.metrics.SetDownloadingTorrents(float64(len(d.downloading)))
 }
 
 // isStreaming reports whether any file is being streamed.
@@ -424,14 +430,12 @@ func (d *Downloader) storageWriteFailed(to *torrent.Torrent, err error) {
 	_, alreadyFailed := d.writeFailed[hash]
 	d.writeFailed[hash] = struct{}{}
 	_, wasDownloading := d.downloading[hash]
-	delete(d.downloading, hash)
-	downloadingCount := float64(len(d.downloading))
+	d.setDownloadingLocked(hash, false)
 	d.mu.Unlock()
 	if wasDownloading {
 		for _, f := range to.Files() {
 			f.SetPriority(torrent.PiecePriorityNone)
 		}
-		d.metrics.SetDownloadingTorrents(downloadingCount)
 	}
 	if !alreadyFailed {
 		d.logger.Error("stopped downloading torrent after a storage write failed", "hash", hash, "error", err)
