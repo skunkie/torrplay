@@ -604,6 +604,12 @@ func (c *Controller) GetToken(w http.ResponseWriter, r *http.Request) {
 		api.HTTPError(w, "failed to get JWT secret", http.StatusInternalServerError)
 		return
 	}
+	// A concurrent auth change may have rotated the secret after the check
+	// above; never sign a token for credentials that are no longer valid.
+	if authChanged(settings.Auth, c.settings.Load().Auth) {
+		api.HTTPError(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
 
 	token, err := auth.GenerateToken(username, []byte(jwtSecret))
 	if err != nil {
@@ -1137,6 +1143,21 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		c.mu.Lock()
 		c.settings.Store(&newSettings)
 		c.mu.Unlock()
+
+		// Revoke every bearer, playback, and Stremio token issued under the
+		// previous credentials. Rotating only after the new credentials are in
+		// effect leaves no window in which the old credentials can obtain a
+		// token signed with the new secret.
+		if authChanged(oldSettings.Auth, newSettings.Auth) {
+			if err := c.db.RotateJWTSecret(); err != nil {
+				if newPieceCompletion != nil {
+					_ = newPieceCompletion.Close()
+				}
+				c.rollbackSettings(oldSettings, appliedSettings{})
+				api.HTTPError(w, fmt.Sprintf("failed to rotate JWT secret, %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	// Apply the new settings. A failure restores the previous settings in
@@ -1315,6 +1336,21 @@ func (c *Controller) applyHeapLimit(maxMemory int64) {
 	limit := maxMemory + heapLimitOverhead
 	c.runtimeConfig.setMemoryLimit(limit)
 	c.logger.Load().Info("set heap limit", "limit", limit)
+}
+
+// authChanged reports whether an update changes any authentication setting.
+func authChanged(oldAuth, newAuth *api.Auth) bool {
+	var o, n api.Auth
+	if oldAuth != nil {
+		o = *oldAuth
+	}
+	if newAuth != nil {
+		n = *newAuth
+	}
+	return utils.Val(o.Enabled) != utils.Val(n.Enabled) ||
+		utils.Val(o.Type) != utils.Val(n.Type) ||
+		utils.Val(o.Username) != utils.Val(n.Username) ||
+		utils.Val(o.Password) != utils.Val(n.Password)
 }
 
 // rollbackSettings restores the previous settings in memory and in the

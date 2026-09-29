@@ -505,6 +505,9 @@ func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 			if claims.Scope != "" {
 				return &api.AuthError{Message: "token scope is not valid for API access", Type: "Bearer"}
 			}
+			if claims.Username != username {
+				return &api.AuthError{Message: "token was issued to a different user", Type: "Bearer"}
+			}
 			return nil
 		case "queryTokenAuth":
 			return c.validatePlaybackQueryToken(input.RequestValidationInput.Request)

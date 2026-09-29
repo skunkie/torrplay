@@ -171,6 +171,30 @@ func TestBBoltDB(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, secret, secret2)
 		})
+
+		t.Run("rotate secret", func(t *testing.T) {
+			secret, err := db.GetJWTSecret()
+			require.NoError(t, err)
+			udn, err := db.GetDLNAUDN()
+			require.NoError(t, err)
+			settings, err := db.GetSettings()
+			require.NoError(t, err)
+
+			require.NoError(t, db.RotateJWTSecret())
+
+			rotated, err := db.GetJWTSecret()
+			require.NoError(t, err)
+			assert.NotEmpty(t, rotated)
+			assert.NotEqual(t, secret, rotated)
+
+			udnAfter, err := db.GetDLNAUDN()
+			require.NoError(t, err)
+			assert.Equal(t, udn, udnAfter)
+
+			settingsAfter, err := db.GetSettings()
+			require.NoError(t, err)
+			assert.Equal(t, settings.Settings, settingsAfter.Settings)
+		})
 	})
 
 	t.Run("empty database", func(t *testing.T) {
@@ -305,6 +329,8 @@ func TestBBoltDB(t *testing.T) {
 
 		_, err = db.GetJWTSecret()
 		assert.Error(t, err)
+
+		assert.Error(t, db.RotateJWTSecret())
 	})
 
 	t.Run("missing buckets", func(t *testing.T) {
