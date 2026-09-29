@@ -92,8 +92,10 @@ func (c container) resolve(reader io.ReaderAt, size int64, positionSeconds float
 	}
 }
 
-func scaleSeconds(positionSeconds, unitsPerSecond float64) uint64 {
-	scaled := positionSeconds * unitsPerSecond
+// scaleToUnits converts value to whole units at unitsPerValue units each,
+// saturating at the largest uint64 instead of overflowing.
+func scaleToUnits(value, unitsPerValue float64) uint64 {
+	scaled := value * unitsPerValue
 	if math.IsInf(scaled, 1) || scaled >= float64(math.MaxUint64) {
 		return math.MaxUint64
 	}

@@ -168,9 +168,9 @@ type preloadReservation struct {
 	// bytes includes the resume window's pieces before the window is placed.
 	bytes            int64
 	coversBoundaries bool
-	// headStart, headEnd, tailStart, and tailEnd are the inclusive piece
-	// ranges protected from eviction while the reservation is held.
-	headStart, headEnd, tailStart, tailEnd int
+	// head and tail are the inclusive piece ranges protected from eviction
+	// while the reservation is held.
+	head, tail storage.PieceRange
 	// placed holds the inclusive piece ranges protected as well once the
 	// resume window is placed: the window and the seek index pieces outside
 	// the head and tail it was resolved from.
@@ -183,9 +183,7 @@ type preloadReservation struct {
 // protection returns the piece ranges the reservation protects.
 func (r preloadReservation) protection() storage.Protection {
 	active := make([]storage.PieceRange, 0, 2+len(r.placed))
-	active = append(active,
-		storage.PieceRange{Start: r.headStart, End: r.headEnd},
-		storage.PieceRange{Start: r.tailStart, End: r.tailEnd})
+	active = append(active, r.head, r.tail)
 	return storage.Protection{Active: append(active, r.placed...)}
 }
 
@@ -460,10 +458,8 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position 
 			// A resume preload's single head and tail pieces are smaller than
 			// the boundaries playback readers protect, so readers keep theirs.
 			coversBoundaries: !resume && preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
-			headStart:        headStart,
-			headEnd:          headEndPiece,
-			tailStart:        tailStartPiece,
-			tailEnd:          tailEndPiece,
+			head:             storage.PieceRange{Start: headStart, End: headEndPiece},
+			tail:             storage.PieceRange{Start: tailStartPiece, End: tailEndPiece},
 		},
 	}
 	pl.targetBytes = pl.rangeBytes() + min(int64(windowPieces)*info.PieceLength, pl.windowCeiling()-headEnd)

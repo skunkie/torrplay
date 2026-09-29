@@ -238,7 +238,7 @@ func (table mp4SampleTable) resolveOffset(positionSeconds float64) (int64, bool)
 
 func (table mp4SampleTable) mediaTime(positionSeconds float64) uint64 {
 	if len(table.edits) == 0 || table.movieScale == 0 {
-		return scaleSeconds(positionSeconds, float64(table.timescale))
+		return scaleToUnits(positionSeconds, float64(table.timescale))
 	}
 	presentation := positionSeconds * float64(table.movieScale)
 	mediaPerMovieUnit := float64(table.timescale) / float64(table.movieScale)
@@ -260,10 +260,10 @@ func (table mp4SampleTable) mediaTime(positionSeconds float64) uint64 {
 			if edit.mediaTime < 0 {
 				return ended
 			}
-			return add(uint64(edit.mediaTime), scaleSeconds(presentation-elapsed, mediaPerMovieUnit))
+			return add(uint64(edit.mediaTime), scaleToUnits(presentation-elapsed, mediaPerMovieUnit))
 		}
 		if edit.mediaTime >= 0 {
-			ended = add(uint64(edit.mediaTime), scaleSeconds(duration, mediaPerMovieUnit))
+			ended = add(uint64(edit.mediaTime), scaleToUnits(duration, mediaPerMovieUnit))
 		}
 		elapsed += duration
 	}

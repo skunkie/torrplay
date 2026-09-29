@@ -113,7 +113,7 @@ func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float
 	if err := readAtFull(reader, cuesData, cues.dataStart); err != nil {
 		return 0, false, err
 	}
-	target := scaleSeconds(positionSeconds, 1_000_000_000/float64(timestampScale))
+	target := scaleToUnits(positionSeconds, 1_000_000_000/float64(timestampScale))
 	cue, found, err := findMatroskaCue(bytes.NewReader(cuesData), matroskaElement{dataEnd: cuesSize, id: cues.id}, videoTrack, target)
 	if err != nil || !found {
 		return 0, false, err
