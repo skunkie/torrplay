@@ -241,24 +241,33 @@ func (table mp4SampleTable) mediaTime(positionSeconds float64) uint64 {
 		return scaleSeconds(positionSeconds, float64(table.timescale))
 	}
 	presentation := positionSeconds * float64(table.movieScale)
+	mediaPerMovieUnit := float64(table.timescale) / float64(table.movieScale)
+	add := func(a, b uint64) uint64 {
+		if math.MaxUint64-a < b {
+			return math.MaxUint64
+		}
+		return a + b
+	}
+	// ended is the media time where the latest media edit so far ends, which
+	// an empty edit after it shows.
 	var elapsed float64
-	for _, edit := range table.edits {
+	var ended uint64
+	for index, edit := range table.edits {
 		duration := float64(edit.duration)
-		if presentation < elapsed+duration {
+		// The last edit also takes positions past the end of the edits, whose
+		// durations are rounded.
+		if presentation < elapsed+duration || index == len(table.edits)-1 {
 			if edit.mediaTime < 0 {
-				return 0
+				return ended
 			}
-			within := presentation - elapsed
-			mediaTime := uint64(edit.mediaTime)
-			offset := scaleSeconds(within, float64(table.timescale)/float64(table.movieScale))
-			if math.MaxUint64-mediaTime < offset {
-				return math.MaxUint64
-			}
-			return mediaTime + offset
+			return add(uint64(edit.mediaTime), scaleSeconds(presentation-elapsed, mediaPerMovieUnit))
+		}
+		if edit.mediaTime >= 0 {
+			ended = add(uint64(edit.mediaTime), scaleSeconds(duration, mediaPerMovieUnit))
 		}
 		elapsed += duration
 	}
-	return scaleSeconds(positionSeconds, float64(table.timescale))
+	return ended
 }
 
 func (table mp4SampleTable) sampleAtTime(target uint64) uint64 {

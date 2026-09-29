@@ -7,6 +7,7 @@ package media
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"math"
 	"slices"
@@ -35,33 +36,40 @@ func TestResolvePlaybackOffset(t *testing.T) {
 	})
 
 	t.Run("mp4 edit list", func(t *testing.T) {
-		// A two-second empty edit, whose media time is -1, precedes the
-		// track's media from its start.
-		v0 := slices.Concat(uint32Bytes(2000), uint32Bytes(math.MaxUint32), make([]byte, 4),
-			uint32Bytes(10000), uint32Bytes(0), make([]byte, 4))
-		v1 := slices.Concat(uint64Bytes(2000), uint64Bytes(math.MaxUint64), make([]byte, 4),
-			uint64Bytes(10000), uint64Bytes(0), make([]byte, 4))
-		for _, tt := range []struct {
-			name    string
-			version byte
-			entries []byte
-		}{
-			{name: "version 0", version: 0, entries: v0},
-			{name: "version 1", version: 1, entries: v1},
-		} {
-			t.Run(tt.name, func(t *testing.T) {
-				elst := mp4TestBox("elst", slices.Concat([]byte{tt.version, 0, 0, 0}, uint32Bytes(2), tt.entries))
-				file := buildIndexedMP4(t, mp4TestBox("edts", elst))
+		// Edit durations are in the movie timescale of 1000 and media times
+		// in the media timescale of 90000: one second empty, two seconds
+		// from media time 4 s, one second empty, and one second from media
+		// time 1 s.
+		edits := []struct {
+			duration  uint64
+			mediaTime int64
+		}{{1000, -1}, {2000, 4 * 90000}, {1000, -1}, {1000, 90000}}
+		for _, version := range []byte{0, 1} {
+			t.Run(fmt.Sprintf("version %d", version), func(t *testing.T) {
+				payload := slices.Concat([]byte{version, 0, 0, 0}, uint32Bytes(uint32(len(edits))))
+				for _, e := range edits {
+					if version == 1 {
+						payload = slices.Concat(payload, uint64Bytes(e.duration), uint64Bytes(uint64(e.mediaTime)), make([]byte, 4))
+					} else {
+						payload = slices.Concat(payload, uint32Bytes(uint32(e.duration)), uint32Bytes(uint32(e.mediaTime)), make([]byte, 4))
+					}
+				}
+				file := buildIndexedMP4(t, mp4TestBox("edts", mp4TestBox("elst", payload)))
 				for _, position := range []struct {
 					seconds float64
 					want    int64
 				}{
-					// Within the empty edit, playback starts at the media's start.
-					{seconds: 1, want: 1000},
-					// Six seconds in is media time 4, before sync sample 6.
+					// The first empty edit shows the media's start.
+					{seconds: 0.5, want: 1000},
+					// 1.5 s into the second edit is media time 5.5 s, at sync
+					// sample 6.
+					{seconds: 2.5, want: 2000},
+					// The empty edit after it shows where it ended, media
+					// time 6 s.
+					{seconds: 3.5, want: 2000},
+					// Past the edits, the last edit continues to media time
+					// 3 s, before sync sample 6.
 					{seconds: 6, want: 1000},
-					// 7.2 seconds in is media time 5.2, at sync sample 6.
-					{seconds: 7.2, want: 2000},
 				} {
 					offset, ok, err := ResolvePlaybackOffset(bytes.NewReader(file), int64(len(file)), "movie.mp4", position.seconds)
 					require.NoError(t, err)
@@ -194,15 +202,16 @@ func (r *furthestReader) ReadAt(b []byte, off int64) (int, error) {
 	return r.ReaderAt.ReadAt(b, off)
 }
 
-// buildIndexedMP4 returns an MP4 file with a video track of ten one-second
-// samples, sync samples 1 and 6, and five samples each in chunks at offsets
-// 1000 and 2000. A non-nil edts is the track's edit box.
+// buildIndexedMP4 returns an MP4 file with a movie timescale of 1000 and a
+// video track, in a media timescale of 90000, of ten one-second samples, sync
+// samples 1 and 6, and five samples each in chunks at offsets 1000 and 2000.
+// A non-nil edts is the track's edit box.
 func buildIndexedMP4(t *testing.T, edts []byte) []byte {
 	t.Helper()
 	mvhd := mp4TestBox("mvhd", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, uint32Bytes(1000)...))
-	mdhd := mp4TestBox("mdhd", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, uint32Bytes(1000)...))
+	mdhd := mp4TestBox("mdhd", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, uint32Bytes(90000)...))
 	hdlr := mp4TestBox("hdlr", append([]byte{0, 0, 0, 0, 0, 0, 0, 0}, []byte("vide")...))
-	stts := mp4FullTableBox("stts", [][]byte{append(uint32Bytes(10), uint32Bytes(1000)...)}...)
+	stts := mp4FullTableBox("stts", [][]byte{append(uint32Bytes(10), uint32Bytes(90000)...)}...)
 	stss := mp4FullTableBox("stss", uint32Bytes(1), uint32Bytes(6))
 	stsc := mp4FullTableBox("stsc", append(append(uint32Bytes(1), uint32Bytes(5)...), uint32Bytes(1)...))
 	stszPayload := append([]byte{0, 0, 0, 0}, uint32Bytes(100)...)
@@ -245,9 +254,7 @@ func uint64Bytes(value uint64) []byte {
 }
 
 func uint32Bytes(value uint32) []byte {
-	buffer := make([]byte, 4)
-	binary.BigEndian.PutUint32(buffer, value)
-	return buffer
+	return binary.BigEndian.AppendUint32(nil, value)
 }
 
 // buildIndexedMatroska returns a Matroska file with two clusters followed by
