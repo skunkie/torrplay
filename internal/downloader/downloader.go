@@ -95,6 +95,18 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 	}
 }
 
+// waitForInfoTimeout waits up to gotInfoTimeout for the metadata of to.
+func waitForInfoTimeout(to *torrent.Torrent) error {
+	select {
+	case <-to.GotInfo():
+		return nil
+	case <-to.Closed():
+		return errors.New("torrent closed")
+	case <-time.After(gotInfoTimeout):
+		return errors.New("timed out")
+	}
+}
+
 // IsDownloading reports whether the torrent is being downloaded in the
 // background.
 func (d *Downloader) IsDownloading(hash metainfo.Hash) bool {
@@ -159,18 +171,6 @@ func (d *Downloader) Stop() {
 	// Clear the state.
 	d.downloading = make(map[metainfo.Hash]struct{})
 	d.metrics.SetDownloadingTorrents(0)
-}
-
-// waitForInfoTimeout waits up to gotInfoTimeout for the metadata of to.
-func waitForInfoTimeout(to *torrent.Torrent) error {
-	select {
-	case <-to.GotInfo():
-		return nil
-	case <-to.Closed():
-		return errors.New("torrent closed")
-	case <-time.After(gotInfoTimeout):
-		return errors.New("timed out")
-	}
 }
 
 // Wake makes the downloader run a pass at once instead of at its next

@@ -517,23 +517,6 @@ func (p *Pool) releaseFunc(readerID uint64) ReleaseFunc {
 	}
 }
 
-// closeStreamReaderLocked cancels and closes a reader. Canceling first ends a
-// read in progress, and retiring its stream then waits for that read. The caller must hold
-// Pool.mu so no new pool-owned use can begin while closure is in progress.
-func closeStreamReaderLocked(sr *streamReader) {
-	if sr.cancel != nil {
-		sr.cancel()
-		sr.cancel = nil
-	}
-	if sr.stream != nil {
-		sr.stream.retire()
-	}
-	if sr.reader != nil {
-		_ = sr.reader.Close()
-	}
-	sr.reader = nil
-}
-
 // release ends a reader's lease. Called immediately after the HTTP request
 // ends (via defer in streamFile).
 //
@@ -656,6 +639,24 @@ func (p *Pool) clearReaderClaimsLocked(sr *streamReader) {
 	if p.cfg.Registry != nil {
 		p.cfg.Registry.ClearProtection(sr.infoHash, sr.readerID)
 	}
+}
+
+// closeStreamReaderLocked cancels and closes a reader. Canceling first ends a
+// read in progress, and retiring its stream then waits for that read. The
+// caller must hold Pool.mu so no new pool-owned use can begin while closure is
+// in progress.
+func closeStreamReaderLocked(sr *streamReader) {
+	if sr.cancel != nil {
+		sr.cancel()
+		sr.cancel = nil
+	}
+	if sr.stream != nil {
+		sr.stream.retire()
+	}
+	if sr.reader != nil {
+		_ = sr.reader.Close()
+	}
+	sr.reader = nil
 }
 
 // removeReaderLocked releases a reader's claims, closes it, and removes it
