@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"github.com/stretchr/testify/assert"
@@ -54,7 +55,7 @@ func TestPieceCompletionPersistsState(t *testing.T) {
 	assert.Equal(t, storage.Completion{Complete: false, Ok: true}, comp)
 
 	// 2. Set the piece as complete.
-	err = pc.Set(pk, true)
+	err = pc.Set(pk, generics.Some(true))
 	require.NoError(t, err)
 
 	// 3. Get the completed piece.
@@ -63,7 +64,7 @@ func TestPieceCompletionPersistsState(t *testing.T) {
 	assert.Equal(t, storage.Completion{Complete: true, Ok: true}, comp)
 
 	// 4. Set the piece as not complete.
-	err = pc.Set(pk, false)
+	err = pc.Set(pk, generics.Some(false))
 	require.NoError(t, err)
 
 	// 5. Get the not-completed piece.
@@ -72,18 +73,27 @@ func TestPieceCompletionPersistsState(t *testing.T) {
 	assert.Equal(t, storage.Completion{Complete: false, Ok: true}, comp)
 
 	// 6. Test idempotency of Set(true).
-	err = pc.Set(pk, true)
+	err = pc.Set(pk, generics.Some(true))
 	require.NoError(t, err)
-	err = pc.Set(pk, true)
+	err = pc.Set(pk, generics.Some(true))
 	require.NoError(t, err)
 	comp, err = pc.Get(pk)
 	require.NoError(t, err)
 	assert.Equal(t, storage.Completion{Complete: true, Ok: true}, comp)
 
 	// 7. Test idempotency of Set(false).
-	err = pc.Set(pk, false)
+	err = pc.Set(pk, generics.Some(false))
 	require.NoError(t, err)
-	err = pc.Set(pk, false)
+	err = pc.Set(pk, generics.Some(false))
+	require.NoError(t, err)
+	comp, err = pc.Get(pk)
+	require.NoError(t, err)
+	assert.Equal(t, storage.Completion{Complete: false, Ok: true}, comp)
+
+	// 8. Record an unknown state as incomplete.
+	err = pc.Set(pk, generics.Some(true))
+	require.NoError(t, err)
+	err = pc.Set(pk, generics.None[bool]())
 	require.NoError(t, err)
 	comp, err = pc.Get(pk)
 	require.NoError(t, err)
