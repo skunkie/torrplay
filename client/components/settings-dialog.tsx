@@ -203,6 +203,29 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       return;
     }
 
+    // Mirror the API's length limits so the error names the offending field.
+    // The API counts Unicode code points, not UTF-16 code units.
+    if (authSettings?.enabled) {
+      const username = authSettings.username ?? '';
+      const usernameLength = Array.from(username).length;
+      if (username !== settings.auth?.username && (usernameLength < 4 || usernameLength > 64)) {
+        toast.error('Invalid username', {
+          description: 'The username must be 4 to 64 characters long.',
+        });
+        setSaving(false);
+        return;
+      }
+      const password = authSettings.password ?? '';
+      const passwordLength = Array.from(password).length;
+      if (password && (passwordLength < 4 || passwordLength > 128)) {
+        toast.error('Invalid password', {
+          description: 'The password must be 4 to 128 characters long.',
+        });
+        setSaving(false);
+        return;
+      }
+    }
+
     try {
       const settingsToUpdate: Partial<Settings> = {};
       const normalizedCorsAllowedOrigins = corsAllowedOrigins.map(origin => origin.trim()).filter(Boolean);
@@ -223,10 +246,12 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         const authChanges: Partial<Auth> = {};
 
         if (authSettings.enabled !== originalAuth.enabled) authChanges.enabled = authSettings.enabled;
-        if (authSettings.type !== originalAuth.type) authChanges.type = authSettings.type;
-        if (authSettings.username !== originalAuth.username) authChanges.username = authSettings.username;
-        if (authSettings.password) {
-          authChanges.password = authSettings.password;
+        // Credentials are hidden while authentication is off; leave the stored
+        // ones untouched rather than sending cleared fields the API rejects.
+        if (authSettings.enabled) {
+          if (authSettings.type !== originalAuth.type) authChanges.type = authSettings.type;
+          if (authSettings.username !== originalAuth.username) authChanges.username = authSettings.username;
+          if (authSettings.password) authChanges.password = authSettings.password;
         }
 
         if (Object.keys(authChanges).length > 0) {

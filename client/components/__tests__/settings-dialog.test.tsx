@@ -394,6 +394,57 @@ describe('SettingsDialog', () => {
     });
   });
 
+  it('sends only the disabled flag when Reset to Defaults turns authentication off', async () => {
+    settingsRef.current = buildMockSettings({
+      auth: { enabled: true, type: 'bearer', username: 'admin' },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    fireEvent.click(getResetToDefaultsButton());
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        auth: { enabled: false },
+      }));
+    });
+  });
+
+  it('rejects credentials outside the API length limits', async () => {
+    const { toast } = await import('sonner');
+    settingsRef.current = buildMockSettings({
+      auth: { enabled: true, type: 'basic', username: 'admin' },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/^username$/i), { target: { value: 'abc' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Invalid username', expect.anything());
+    });
+
+    fireEvent.change(screen.getByLabelText(/^username$/i), { target: { value: 'admin' } });
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: 'abc' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Invalid password', expect.anything());
+    });
+
+    // Two emoji are four UTF-16 code units but only two code points.
+    vi.mocked(toast.error).mockClear();
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: '😀😀' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Invalid password', expect.anything());
+    });
+
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
   it('saves additional trusted web origins', async () => {
     render(<SettingsDialog open={true}
       onOpenChange={vi.fn()} />);

@@ -887,7 +887,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Settings"
+                $ref: "#/components/schemas/TSSettings"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1379,15 +1379,15 @@ components:
         username:
           type: string
           description: Username for authentication.
-          minimum: 4
-          maximum: 64
+          minLength: 4
+          maxLength: 64
           example: "admin"
         password:
           type: string
           writeOnly: true
           description: Password for authentication. Never returned in responses; omit it to keep the current password.
-          minimum: 4
-          maximum: 128
+          minLength: 4
+          maxLength: 128
           example: "password"
     Backup:
       type: object
