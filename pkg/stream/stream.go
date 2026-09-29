@@ -39,7 +39,8 @@ type ProtectionRegistry interface {
 type ReaderPosition struct {
 	// End is the inclusive end of the reader's readahead window.
 	End int
-	// Position is the reader's current piece index, or its last position while lingering.
+	// Position is the reader's current piece index, or its last position while
+	// lingering.
 	Position int
 	// Start is the inclusive start of the reader's trailing window.
 	Start int
@@ -427,12 +428,13 @@ func New(cfg Config) *Pool {
 }
 
 // Acquire returns an io.ReadSeeker for reading the given file within a torrent
-// with cancellation tied to ctx. The caller MUST call the returned release function
-// (typically via defer) when done reading. The release function is safe to call
-// multiple times. MemoryStorage readers share the budget configured by SetReadaheadBudget;
-// FileStorage readers use Config.FileReadaheadBytes. With Config.ReadaheadRampBytes,
-// a reader ramps up to that readahead as it reads. Acquire returns an error
-// for an invalid file or mode, or after the pool has been closed.
+// with cancellation tied to ctx. The caller MUST call the returned release
+// function (typically via defer) when done reading. The release function is
+// safe to call multiple times. MemoryStorage readers share the budget
+// configured by SetReadaheadBudget; FileStorage readers use
+// Config.FileReadaheadBytes. With Config.ReadaheadRampBytes, a reader ramps up
+// to that readahead as it reads. Acquire returns an error for an invalid file
+// or mode, or after the pool has been closed.
 func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode) (io.ReadSeeker, ReleaseFunc, error) {
 	if file == nil || file.Torrent() == nil {
 		return nil, nil, ErrInvalidFile
@@ -1189,8 +1191,8 @@ func (p *Pool) prioritizeAsync(readerID uint64, piece int64, file *torrent.File,
 	sr.claimed = p.claimLocked(sr, fileTorrent(file), sr.claimed, planned)
 }
 
-// ReaderPositions returns positions for all active and lingering readers belonging
-// to the given info hash. The result order is unspecified.
+// ReaderPositions returns positions for all active and lingering readers
+// belonging to the given info hash. The result order is unspecified.
 func (p *Pool) ReaderPositions(infoHash metainfo.Hash) []ReaderPosition {
 	p.mu.Lock()
 	defer p.mu.Unlock()

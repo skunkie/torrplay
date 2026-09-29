@@ -386,12 +386,12 @@ func (pl *preload) markProgress(now time.Time) {
 // planPreloadLocked sizes a preload of file. The head starts at the file's
 // beginning and the tail, when the file is large enough to have one, covers at
 // least a default boundary or one piece at its end, so container metadata at
-// either end is cached. A preload at a positive position caches only the
-// file's first and last pieces as its head and tail and keeps the rest of its
-// budget, in whole pieces, for a resume window, unless the budget covers the
-// whole file or leaves no piece for the window. Memory-storage preloads are trimmed to whole pieces
-// within their share of the preload capacity. It returns false when not even
-// one piece fits. Must be called with p.mu held.
+// either end is cached. A preload at a positive position caches only the file's
+// first and last pieces as its head and tail and keeps the rest of its budget,
+// in whole pieces, for a resume window, unless the budget covers the whole file
+// or leaves no piece for the window. Memory-storage preloads are trimmed to
+// whole pieces within their share of the preload capacity. It returns false
+// when not even one piece fits. Must be called with p.mu held.
 func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position time.Duration) (*preload, bool) {
 	info := file.Torrent().Info()
 	// File-storage preloads are written to disk and reserve no memory, so only
@@ -620,11 +620,11 @@ func (r *indexReader) ReadAt(b []byte, off int64) (int, error) {
 // placeWindowLocked places a preload's resume window at the file-relative
 // offset, or records that it has none when ok is false. The seek index pieces
 // the offset was resolved from that lie outside the head and tail are kept as
-// they are, each taking a piece from the window, up to all of its pieces. The window takes the rest of
-// the preload's windowPieces whole pieces, starts an eighth of its size before
-// offset, and stays between the head and the tail. The window's and the index
-// pieces join the preload's pieces, claims, and protection. Must be called
-// with p.mu held.
+// they are, each taking a piece from the window, up to all of its pieces. The
+// window takes the rest of the preload's windowPieces whole pieces, starts an
+// eighth of its size before offset, and stays between the head and the tail.
+// The window's and the index pieces join the preload's pieces, claims, and
+// protection. Must be called with p.mu held.
 func (p *Pool) placeWindowLocked(pl *preload, offset int64, indexPieces []int, ok bool) {
 	pl.windowPlaced = true
 	if !ok {

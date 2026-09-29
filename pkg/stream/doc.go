@@ -27,12 +27,12 @@
 // its readahead, so the torrent client keeps fetching the pieces just past
 // where the player stopped. A player that fetches a file in consecutive range
 // requests, or reconnects after a pause, then finds those pieces cached by the
-// time its next request's reader reaches them. The next reader of the same
-// file closes it once that reader has its own readahead window, and a reader
-// released while another reader of its file is active closes at once, so a
-// file has at most one lingering reader. Other viewers' readers never close
-// it, because the engine is shared; readers still lingering after
-// LingerTimeout are closed. Readers of a dropped torrent close on release, or within a second
+// time its next request's reader reaches them. The next reader of the same file
+// closes it once that reader has its own readahead window, and a reader
+// released while another reader of its file is active closes at once, so a file
+// has at most one lingering reader. Other viewers' readers never close it,
+// because the engine is shared; readers still lingering after LingerTimeout are
+// closed. Readers of a dropped torrent close on release, or within a second
 // when the torrent is dropped while they linger. OnStreamingChange reports when
 // the pool gains its first reader and when its last reader, lingering ones
 // included, closes.
@@ -89,12 +89,13 @@
 // # Preloads
 //
 // Preload caches the head and tail of a file, where containers keep their
-// metadata and seek indexes, so its playback starts without waiting for them.
-// A torrent has at most one preload, and a request for another of its files,
-// or for the same file at another resume position, replaces it. Preloads never pause for playback, because the engine is shared
-// by every viewer: they have no reader, claim their pieces at
-// PiecePriorityHigh, and a watcher marks them ready once every piece is
-// complete. At most two preloads download at a time, in request order.
+// metadata and seek indexes, so its playback starts without waiting for them. A
+// torrent has at most one preload, and a request for another of its files, or
+// for the same file at another resume position, replaces it. Preloads never
+// pause for playback, because the engine is shared by every viewer: they have
+// no reader, claim their pieces at PiecePriorityHigh, and a watcher marks them
+// ready once every piece is complete. At most two preloads download at a time,
+// in request order.
 //
 // PreloadAt preloads for playback that resumes at a position. Its head and
 // tail are only the file's first and last pieces, which usually hold the
