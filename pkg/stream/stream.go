@@ -12,7 +12,6 @@ import (
 	"io"
 	"iter"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
@@ -327,11 +326,6 @@ type streamReader struct {
 	// runStart is the offset where the reader's current sequential reading
 	// began, at its first read or its last seek, or -1 before its first read.
 	runStart int64
-	// handoffs holds the reading of the file's recently released readers,
-	// one of which the reader continues when its first read lands in that
-	// reader's window, as a player's next range request does. Nil once the
-	// reader has read.
-	handoffs []readerHandoff
 	// shareReadahead is the readahead the reader's share of the budget, or
 	// FileReadaheadBytes for file storage, allows once ramped up.
 	shareReadahead int64
@@ -480,7 +474,6 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		readerID:      readerID,
 		stream:        stream,
 	}
-	sr.handoffs = p.recentRunsLocked(file, time.Now())
 	p.readers[readerID] = sr
 	p.noteStreamingLocked()
 	p.wakeExpireLoop()
@@ -598,9 +591,8 @@ func (p *Pool) recordRunLocked(sr *streamReader) {
 	p.recentRuns[sr.file] = runs[max(len(runs)-maxRecentRuns, 0):]
 }
 
-// recentRunsLocked returns a copy of the runs of file's readers released
-// within LingerTimeout of now, forgetting older ones. Must be called with
-// p.mu held.
+// recentRunsLocked returns the runs of file's readers released within
+// LingerTimeout of now, forgetting older ones. Must be called with p.mu held.
 func (p *Pool) recentRunsLocked(file *torrent.File, now time.Time) []readerHandoff {
 	var runs []readerHandoff
 	for _, run := range p.recentRuns[file] {
@@ -613,7 +605,7 @@ func (p *Pool) recentRunsLocked(file *torrent.File, now time.Time) []readerHando
 	} else {
 		p.recentRuns[file] = runs
 	}
-	return slices.Clone(runs)
+	return runs
 }
 
 // rebalanceLocked redistributes the readahead budget after a reader stops
@@ -1133,7 +1125,7 @@ func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 	switch {
 	case sr.runStart < 0:
 		sr.runStart = newOffset
-		for _, h := range sr.handoffs {
+		for _, h := range p.recentRunsLocked(file, time.Now()) {
 			reach := max(h.readahead, filePieceLength(file))
 			if newOffset >= h.lastOffset-reach && newOffset-h.lastOffset <= reach {
 				sr.runStart = min(sr.runStart, h.runStart)
@@ -1142,7 +1134,6 @@ func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 	case newOffset < sr.lastOffset, newOffset-sr.lastOffset > window:
 		sr.runStart = newOffset
 	}
-	sr.handoffs = nil
 	sr.lastOffset = newOffset
 	currentPiece := filePiece(file, newOffset)
 	pieceChanged := (currentPiece != sr.lastPiece) || (sr.lastPiece < 0)

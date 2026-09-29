@@ -171,13 +171,10 @@ type preloadReservation struct {
 	// headStart, headEnd, tailStart, and tailEnd are the inclusive piece
 	// ranges protected from eviction while the reservation is held.
 	headStart, headEnd, tailStart, tailEnd int
-	// hasWindow reports that the inclusive piece range windowStart to
-	// windowEnd of a placed resume window is protected as well.
-	hasWindow              bool
-	windowStart, windowEnd int
-	// index holds the seek index pieces outside the head and tail that a
-	// placed resume window was resolved from, protected as well.
-	index []int
+	// placed holds the inclusive piece ranges protected as well once the
+	// resume window is placed: the window and the seek index pieces outside
+	// the head and tail it was resolved from.
+	placed []storage.PieceRange
 	// id identifies the reservation's protection in the registry. It is drawn
 	// from the reader ID sequence, so it never collides with a reader's.
 	id uint64
@@ -185,17 +182,11 @@ type preloadReservation struct {
 
 // protection returns the piece ranges the reservation protects.
 func (r preloadReservation) protection() storage.Protection {
-	active := []storage.PieceRange{
-		{Start: r.headStart, End: r.headEnd},
-		{Start: r.tailStart, End: r.tailEnd},
-	}
-	if r.hasWindow {
-		active = append(active, storage.PieceRange{Start: r.windowStart, End: r.windowEnd})
-	}
-	for _, piece := range r.index {
-		active = append(active, storage.PieceRange{Start: piece, End: piece})
-	}
-	return storage.Protection{Active: active}
+	active := make([]storage.PieceRange, 0, 2+len(r.placed))
+	active = append(active,
+		storage.PieceRange{Start: r.headStart, End: r.headEnd},
+		storage.PieceRange{Start: r.tailStart, End: r.tailEnd})
+	return storage.Protection{Active: append(active, r.placed...)}
 }
 
 // Preload starts caching the head and tail of file, replacing any preload of
@@ -603,22 +594,22 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, indexPieces []int, o
 		pl.windowStart, pl.windowEnd = 0, 0
 	}
 	pl.targetBytes = pl.rangeBytes()
-	added := index
-	if pl.windowEnd > pl.windowStart {
-		windowStartPiece := int((fileOffset + pl.windowStart) / pieceLength)
-		windowEndPiece := int((fileOffset + pl.windowEnd - 1) / pieceLength)
-		for piece := windowStartPiece; piece <= windowEndPiece; piece++ {
-			_, held := slices.BinarySearch(pl.pieces, piece)
-			if !held && !slices.Contains(index, piece) {
-				added = append(added, piece)
-			}
-		}
-		pl.reservation.hasWindow = true
-		pl.reservation.windowStart, pl.reservation.windowEnd = windowStartPiece, windowEndPiece
+	for _, piece := range index {
+		pl.reservation.placed = append(pl.reservation.placed, storage.PieceRange{Start: piece, End: piece})
 	}
-	pl.reservation.index = index
-	pl.pieces = append(pl.pieces, added...)
+	if pl.windowEnd > pl.windowStart {
+		pl.reservation.placed = append(pl.reservation.placed, storage.PieceRange{
+			Start: int((fileOffset + pl.windowStart) / pieceLength),
+			End:   int((fileOffset + pl.windowEnd - 1) / pieceLength),
+		})
+	}
+	for _, placed := range pl.reservation.placed {
+		for piece := placed.Start; piece <= placed.End; piece++ {
+			pl.pieces = append(pl.pieces, piece)
+		}
+	}
 	slices.Sort(pl.pieces)
+	pl.pieces = slices.Compact(pl.pieces)
 	if pl.reserved && p.cfg.Registry != nil {
 		p.cfg.Registry.SetProtection(pl.infoHash, pl.reservation.id, pl.reservation.protection())
 	}
@@ -780,7 +771,6 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	pieces := completedPieces(to, pl.pieces)
 	// placed wakes the watcher when the resume window is placed.
 	placed := make(chan struct{}, 1)
-	windowTracked := false
 
 	for {
 		p.mu.Lock()
@@ -788,9 +778,9 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 			p.mu.Unlock()
 			return
 		}
+		// Pieces join a preload only when its window is placed.
 		var added []int
-		if pl.windowPlaced && !windowTracked {
-			windowTracked = true
+		if len(pl.pieces) > len(pieces) {
 			for _, index := range pl.pieces {
 				if _, tracked := pieces[index]; !tracked {
 					added = append(added, index)
