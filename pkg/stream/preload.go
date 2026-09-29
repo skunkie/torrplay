@@ -469,6 +469,76 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position 
 	return pl, true
 }
 
+// preloadMemoryLimit returns the bytes one memory-storage preload may protect,
+// given the total preload capacity. Preloads run concurrently with an even
+// share each when that share still covers a default head and tail boundary;
+// otherwise one preload uses the whole capacity and later requests wait for
+// it, because splitting would leave each too small to be useful. The
+// startup-latency ceiling applies either way.
+func preloadMemoryLimit(capacity int64) int64 {
+	limit := capacity / maxConcurrentPreloads
+	if limit < minSharedPreloadBytes {
+		limit = capacity
+	}
+	return max(min(limit, maxPreloadBytes), 0)
+}
+
+// fitPreloadRanges trims the head range [0, headEnd) and the tail range
+// [tailStart, tailEnd) until the whole pieces they touch fit within budget.
+// Storage protects and evicts complete pieces, so a range ending one byte into
+// a piece costs that entire piece, and byte-sized ranges can exceed the
+// preload's admission capacity. Each step drops the last piece of the head or
+// the first piece of the tail, whichever range spans more pieces, keeping at
+// least one head piece while a tail remains. A returned headEnd of zero means
+// that not even one piece fits.
+func fitPreloadRanges(file *torrent.File, budget, headEnd, tailStart, tailEnd int64) (int64, int64, int64) {
+	info := file.Torrent().Info()
+	pieceLength := max(info.PieceLength, 1)
+	fileOffset := file.Offset()
+	for headEnd > 0 {
+		headStartPiece, headEndPiece, tailStartPiece, tailEndPiece, ok := filePieceRanges(file, headEnd, tailStart, tailEnd)
+		if !ok || boundaryPieceBytes(info, headStartPiece, headEndPiece, tailStartPiece, tailEndPiece) <= budget {
+			break
+		}
+		headPieces := headEndPiece - headStartPiece + 1
+		tailPieces := tailEndPiece - tailStartPiece + 1
+		if tailEnd > tailStart && (tailPieces > headPieces || headPieces == 1) {
+			// Start the tail at the next piece boundary, dropping it when
+			// nothing is left.
+			tailStart = int64(tailStartPiece+1)*pieceLength - fileOffset
+			if tailStart >= tailEnd {
+				tailStart, tailEnd = 0, 0
+			}
+			continue
+		}
+		// End the head where its last piece begins; an empty head means that
+		// the budget cannot hold a single piece.
+		headEnd = max(int64(headEndPiece)*pieceLength-fileOffset, 0)
+	}
+	if headEnd <= 0 {
+		return 0, 0, 0
+	}
+	return headEnd, tailStart, tailEnd
+}
+
+// preloadCoversBoundaries reports whether the head range [0, headEnd) and the
+// tail range [tailStart, tailEnd) reach both ends of a file of fileLength
+// bytes. A preload trimmed to part of its head leaves the tail to playback
+// boundary protection; one whose head spans the whole file covers the tail as
+// well.
+func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool {
+	return headEnd > 0 && (headEnd >= fileLength || (tailEnd > tailStart && tailEnd >= fileLength))
+}
+
+// preloadProtectionCapacity returns the portion of the shared protection
+// budget that preloads may reserve. The remainder is kept available for
+// playback readers, so a newly acquired stream is never starved by held
+// preloads.
+func preloadProtectionCapacity(totalBudget int64) int64 {
+	playbackReserve := min(totalBudget/2, 2*int64(defaultFileBoundaryBytes))
+	return max(totalBudget-playbackReserve, 0)
+}
+
 // rangeBytes returns the size of the preload's head and tail ranges and of
 // its resume window once placed.
 func (pl *preload) rangeBytes() int64 {
@@ -622,76 +692,6 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, indexPieces []int, o
 		slog.Int64("windowStart", pl.windowStart),
 		slog.Int64("windowEnd", pl.windowEnd),
 		slog.Int("indexPieces", len(index)))
-}
-
-// preloadMemoryLimit returns the bytes one memory-storage preload may protect,
-// given the total preload capacity. Preloads run concurrently with an even
-// share each when that share still covers a default head and tail boundary;
-// otherwise one preload uses the whole capacity and later requests wait for
-// it, because splitting would leave each too small to be useful. The
-// startup-latency ceiling applies either way.
-func preloadMemoryLimit(capacity int64) int64 {
-	limit := capacity / maxConcurrentPreloads
-	if limit < minSharedPreloadBytes {
-		limit = capacity
-	}
-	return max(min(limit, maxPreloadBytes), 0)
-}
-
-// fitPreloadRanges trims the head range [0, headEnd) and the tail range
-// [tailStart, tailEnd) until the whole pieces they touch fit within budget.
-// Storage protects and evicts complete pieces, so a range ending one byte into
-// a piece costs that entire piece, and byte-sized ranges can exceed the
-// preload's admission capacity. Each step drops the last piece of the head or
-// the first piece of the tail, whichever range spans more pieces, keeping at
-// least one head piece while a tail remains. A returned headEnd of zero means
-// that not even one piece fits.
-func fitPreloadRanges(file *torrent.File, budget, headEnd, tailStart, tailEnd int64) (int64, int64, int64) {
-	info := file.Torrent().Info()
-	pieceLength := max(info.PieceLength, 1)
-	fileOffset := file.Offset()
-	for headEnd > 0 {
-		headStartPiece, headEndPiece, tailStartPiece, tailEndPiece, ok := filePieceRanges(file, headEnd, tailStart, tailEnd)
-		if !ok || boundaryPieceBytes(info, headStartPiece, headEndPiece, tailStartPiece, tailEndPiece) <= budget {
-			break
-		}
-		headPieces := headEndPiece - headStartPiece + 1
-		tailPieces := tailEndPiece - tailStartPiece + 1
-		if tailEnd > tailStart && (tailPieces > headPieces || headPieces == 1) {
-			// Start the tail at the next piece boundary, dropping it when
-			// nothing is left.
-			tailStart = int64(tailStartPiece+1)*pieceLength - fileOffset
-			if tailStart >= tailEnd {
-				tailStart, tailEnd = 0, 0
-			}
-			continue
-		}
-		// End the head where its last piece begins; an empty head means that
-		// the budget cannot hold a single piece.
-		headEnd = max(int64(headEndPiece)*pieceLength-fileOffset, 0)
-	}
-	if headEnd <= 0 {
-		return 0, 0, 0
-	}
-	return headEnd, tailStart, tailEnd
-}
-
-// preloadCoversBoundaries reports whether the head range [0, headEnd) and the
-// tail range [tailStart, tailEnd) reach both ends of a file of fileLength
-// bytes. A preload trimmed to part of its head leaves the tail to playback
-// boundary protection; one whose head spans the whole file covers the tail as
-// well.
-func preloadCoversBoundaries(fileLength, headEnd, tailStart, tailEnd int64) bool {
-	return headEnd > 0 && (headEnd >= fileLength || (tailEnd > tailStart && tailEnd >= fileLength))
-}
-
-// preloadProtectionCapacity returns the portion of the shared protection
-// budget that preloads may reserve. The remainder is kept available for
-// playback readers, so a newly acquired stream is never starved by held
-// preloads.
-func preloadProtectionCapacity(totalBudget int64) int64 {
-	playbackReserve := min(totalBudget/2, 2*int64(defaultFileBoundaryBytes))
-	return max(totalBudget-playbackReserve, 0)
 }
 
 // dispatchPreloadsLocked starts queued preloads in FIFO order while fewer than

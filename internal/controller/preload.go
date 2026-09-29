@@ -99,6 +99,20 @@ func (c *Controller) PutTorrentPreload(w http.ResponseWriter, r *http.Request, h
 	}
 }
 
+// playbackPosition converts a playback position in seconds to a duration,
+// saturating positions too large for one. A position that is not positive,
+// including NaN, is zero.
+func playbackPosition(seconds float64) time.Duration {
+	switch {
+	case !(seconds > 0):
+		return 0
+	case seconds >= float64(math.MaxInt64)/float64(time.Second):
+		return math.MaxInt64
+	default:
+		return time.Duration(seconds * float64(time.Second))
+	}
+}
+
 // GetTorrentPreload returns the current preload status and progress for a torrent.
 func (c *Controller) GetTorrentPreload(w http.ResponseWriter, _ *http.Request, hash api.Hash) {
 	ih := hash
@@ -241,20 +255,6 @@ func (c *Controller) startPreload(to *torrent.Torrent, file *torrent.File, posit
 		return false
 	}
 	return true
-}
-
-// playbackPosition converts a playback position in seconds to a duration,
-// saturating positions too large for one. A position that is not positive,
-// including NaN, is zero.
-func playbackPosition(seconds float64) time.Duration {
-	switch {
-	case !(seconds > 0):
-		return 0
-	case seconds >= float64(math.MaxInt64)/float64(time.Second):
-		return math.MaxInt64
-	default:
-		return time.Duration(seconds * float64(time.Second))
-	}
 }
 
 // torrentStorageMode returns the storage a torrent's streams, preload, and
