@@ -317,7 +317,7 @@ export const TorrentPlayerDialog = ({
   }, [selectedFile, torrent]);
 
   const isPlayerVisible = !!videoPlayerOptions;
-  const resumeKey = useMemo<PlaybackPositionKey | undefined>(
+  const positionKey = useMemo<PlaybackPositionKey | undefined>(
     () => (torrentHash && selectedFilePath ? { hash: torrentHash, filePath: selectedFilePath } : undefined),
     [selectedFilePath, torrentHash],
   );
@@ -374,7 +374,7 @@ export const TorrentPlayerDialog = ({
       handleExit={handleExit}
       playlistNavigation={playlistNavigation}
       preloadBadge={preloadBadge}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
     />
   );
 };

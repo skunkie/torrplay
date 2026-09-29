@@ -1042,7 +1042,7 @@ func (c *Controller) configureTorrentClient() error {
 			observeMemoryRead(duration)
 		},
 		Registry: storageClient,
-		SeekIndex: func(r io.ReaderAt, file *torrent.File, position time.Duration) (int64, bool, error) {
+		ResolveOffset: func(r io.ReaderAt, file *torrent.File, position time.Duration) (int64, bool, error) {
 			return media.ResolvePlaybackOffset(r, file.Length(), file.Path(), position.Seconds())
 		},
 	})

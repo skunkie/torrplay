@@ -66,9 +66,9 @@ export interface VideoPlayerProps {
   },
   internalOnly?: boolean,
   preloadBadge?: PreloadBadgeInfo | null,
-  // resumeKey, when set, names the torrent file whose playback resumes from
+  // positionKey, when set, names the torrent file whose playback resumes from
   // its saved position and saves its position as it plays.
-  resumeKey?: PlaybackPositionKey
+  positionKey?: PlaybackPositionKey
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();
@@ -80,7 +80,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   playlistNavigation,
   internalOnly = false,
   preloadBadge,
-  resumeKey,
+  positionKey,
 }) => {
   const isPreloading = !!preloadBadge;
   const player = useRef<MediaPlayerInstance>(null);
@@ -112,8 +112,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       ? options.src.src
       : undefined;
 
-  const resumeHash = resumeKey?.hash;
-  const resumeFilePath = resumeKey?.filePath;
+  const resumeHash = positionKey?.hash;
+  const resumeFilePath = positionKey?.filePath;
 
   // Each source resumes from the position saved for it when it loads, and its
   // latest position is saved when it is left or the page is hidden.

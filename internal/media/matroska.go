@@ -56,7 +56,7 @@ type matroskaCue struct {
 }
 
 func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float64) (int64, bool, error) {
-	segment, found, err := findMatroskaTopLevel(reader, 0, size, matroskaSegmentID)
+	segment, found, err := findMatroskaElement(reader, 0, size, matroskaSegmentID)
 	if err != nil || !found {
 		return 0, false, err
 	}
@@ -329,7 +329,7 @@ func readMatroskaCuePoint(reader io.ReaderAt, point matroskaElement, videoTrack 
 	return cue, false, nil
 }
 
-func findMatroskaTopLevel(reader io.ReaderAt, start, end int64, id uint64) (matroskaElement, bool, error) {
+func findMatroskaElement(reader io.ReaderAt, start, end int64, id uint64) (matroskaElement, bool, error) {
 	for offset := start; offset < end; {
 		element, ok, err := readMatroskaElement(reader, offset, end)
 		if err != nil || !ok {
@@ -344,7 +344,7 @@ func findMatroskaTopLevel(reader io.ReaderAt, start, end int64, id uint64) (matr
 }
 
 func findMatroskaChild(reader io.ReaderAt, parent matroskaElement, id uint64) (matroskaElement, bool, error) {
-	return findMatroskaTopLevel(reader, parent.dataStart, parent.dataEnd, id)
+	return findMatroskaElement(reader, parent.dataStart, parent.dataEnd, id)
 }
 
 func readMatroskaElement(reader io.ReaderAt, offset, limit int64) (matroskaElement, bool, error) {

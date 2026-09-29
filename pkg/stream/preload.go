@@ -63,9 +63,9 @@ type PreloadStatus struct {
 	FileIndex int
 	// FilePath is the preloaded file's path within its torrent.
 	FilePath string
-	// Position is the playback position whose data the preload's resume
+	// PlaybackPosition is the playback position whose data the preload's resume
 	// window caches, or zero for a preload without one.
-	Position time.Duration
+	PlaybackPosition time.Duration
 	// State is the preload's lifecycle state.
 	State PreloadState
 	// TargetBytes is the size of the preload's ranges. A preload at a playback
@@ -206,12 +206,13 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 // PreloadAt is Preload for playback that resumes at position. Its head and
 // tail are only the file's first and last pieces, which usually hold the
 // container's header and seek index, and the rest of the preload is a window
-// of the file's data at position. As soon as the preload runs, Config.SeekIndex resolves position
-// to a byte offset through a torrent reader, which downloads the pieces
-// holding the container's seek index first, and the window is placed there,
-// starting an eighth of its size before the offset, to download with the head
-// and tail. When position cannot be resolved, the preload is ready
-// with its head and tail. A non-positive position, or a file the preload
+// of the file's data at position. As soon as the preload runs,
+// Config.ResolveOffset resolves position to a byte offset through a torrent
+// reader, which downloads the pieces holding the container's seek index first,
+// and the window is placed there, starting an eighth of its size before the
+// offset, to download with the head and tail. When position cannot be
+// resolved, the preload is ready with its head and tail. A non-positive
+// position, or a file the preload
 // covers whole or leaves no piece of a window for, preloads as Preload does.
 // A request whose plan has a window at another position, or none where the
 // torrent's preload has one, replaces the preload.
@@ -315,12 +316,12 @@ func (pl *preload) status() PreloadStatus {
 		completed = pl.targetBytes
 	}
 	return PreloadStatus{
-		CompletedBytes: completed,
-		FileIndex:      pl.fileIndex,
-		FilePath:       pl.file.Path(),
-		Position:       pl.position,
-		State:          pl.state,
-		TargetBytes:    pl.targetBytes,
+		CompletedBytes:   completed,
+		FileIndex:        pl.fileIndex,
+		FilePath:         pl.file.Path(),
+		PlaybackPosition: pl.position,
+		State:            pl.state,
+		TargetBytes:      pl.targetBytes,
 	}
 }
 
@@ -491,12 +492,12 @@ func (pl *preload) awaitingWindow() bool {
 }
 
 // resolveResumeOffset resolves the preload's playback position to a
-// file-relative byte offset through Config.SeekIndex, reading the file with a
+// file-relative byte offset through Config.ResolveOffset, reading the file with a
 // torrent reader that stops when ctx ends. It also returns the pieces the seek
-// index was read from. It returns false when the pool has no SeekIndex or the
+// index was read from. It returns false when the pool has no ResolveOffset or the
 // position cannot be resolved.
 func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, []int, bool) {
-	if p.cfg.SeekIndex == nil {
+	if p.cfg.ResolveOffset == nil {
 		return 0, nil, false
 	}
 	reader := pl.file.NewReader()
@@ -505,8 +506,8 @@ func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, []i
 	// The index is read in small scattered pieces, which a readahead would
 	// only add downloads to.
 	reader.SetReadahead(0)
-	indexReader := &readerAt{file: pl.file, pieces: make(map[int]struct{}), reader: reader}
-	offset, ok, err := p.cfg.SeekIndex(indexReader, pl.file, pl.position)
+	index := &indexReader{file: pl.file, pieces: make(map[int]struct{}), reader: reader}
+	offset, ok, err := p.cfg.ResolveOffset(index, pl.file, pl.position)
 	if err != nil {
 		if ctx.Err() == nil {
 			p.logger.Debug("failed to resolve preload playback position",
@@ -517,19 +518,19 @@ func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, []i
 		}
 		return 0, nil, false
 	}
-	return offset, slices.Sorted(maps.Keys(indexReader.pieces)), ok && offset >= 0 && offset < pl.file.Length()
+	return offset, slices.Sorted(maps.Keys(index.pieces)), ok && offset >= 0 && offset < pl.file.Length()
 }
 
-// readerAt reads at offsets of a torrent reader of file by seeking it first,
+// indexReader reads at offsets of a torrent reader of file by seeking it first,
 // and records the torrent pieces it reads.
-type readerAt struct {
+type indexReader struct {
 	file   *torrent.File
 	pieces map[int]struct{}
 	reader torrent.Reader
 }
 
 // ReadAt implements io.ReaderAt.
-func (r *readerAt) ReadAt(b []byte, off int64) (int, error) {
+func (r *indexReader) ReadAt(b []byte, off int64) (int, error) {
 	if _, err := r.reader.Seek(off, io.SeekStart); err != nil {
 		return 0, err
 	}
@@ -769,8 +770,8 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	sub := to.SubscribePieceStateChanges()
 	defer sub.Close()
 	pieces := completedPieces(to, pl.pieces)
-	// placed wakes the watcher when the resume window is placed.
-	placed := make(chan struct{}, 1)
+	// windowSignal wakes the watcher when the resume window is placed.
+	windowSignal := make(chan struct{}, 1)
 
 	for {
 		p.mu.Lock()
@@ -815,14 +816,14 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 				}
 				p.mu.Unlock()
 				select {
-				case placed <- struct{}{}:
+				case windowSignal <- struct{}{}:
 				default:
 				}
 			})
 		}
 		p.mu.Unlock()
 
-		if !waitForPieceChange(ctx, to, sub.Values, pieces, placed) {
+		if !waitForPieceChange(ctx, to, sub.Values, pieces, windowSignal) {
 			if ctx.Err() == nil {
 				p.mu.Lock()
 				if p.preloads[pl.infoHash] == pl {

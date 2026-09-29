@@ -1230,7 +1230,7 @@ func TestPool_PreloadAt(t *testing.T) {
 		pool := New(Config{
 			Logger:   testLogger(),
 			Registry: reg,
-			SeekIndex: func(r io.ReaderAt, _ *torrent.File, position time.Duration) (int64, bool, error) {
+			ResolveOffset: func(r io.ReaderAt, _ *torrent.File, position time.Duration) (int64, bool, error) {
 				header := make([]byte, 8)
 				if _, err := r.ReadAt(header, 0); err != nil {
 					return 0, false, err
@@ -1259,7 +1259,7 @@ func TestPool_PreloadAt(t *testing.T) {
 
 		status, err := pool.PreloadAt(file, MemoryStorage, position)
 		require.NoError(t, err)
-		assert.Equal(t, PreloadStatus{FilePath: file.Path(), Position: position, State: PreloadRunning, TargetBytes: 256}, status)
+		assert.Equal(t, PreloadStatus{FilePath: file.Path(), PlaybackPosition: position, State: PreloadRunning, TargetBytes: 256}, status)
 		assert.Equal(t, []int{0, 9}, claimed(pool, to), "the window waits for its seek index")
 		assert.Equal(t, []int{0, 9}, protected(reg))
 
@@ -1293,7 +1293,7 @@ func TestPool_PreloadAt(t *testing.T) {
 		release := make(chan struct{})
 		pool := New(Config{
 			Logger: testLogger(),
-			SeekIndex: func(io.ReaderAt, *torrent.File, time.Duration) (int64, bool, error) {
+			ResolveOffset: func(io.ReaderAt, *torrent.File, time.Duration) (int64, bool, error) {
 				<-release
 				return 320, true, nil
 			},
@@ -1323,7 +1323,7 @@ func TestPool_PreloadAt(t *testing.T) {
 		pool := New(Config{
 			Logger:   testLogger(),
 			Registry: reg,
-			SeekIndex: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
+			ResolveOffset: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
 				// An index that spans the first five pieces.
 				if _, err := r.ReadAt(make([]byte, 300), 0); err != nil {
 					return 0, false, err
@@ -1352,7 +1352,7 @@ func TestPool_PreloadAt(t *testing.T) {
 		pool := New(Config{
 			Logger:   testLogger(),
 			Registry: reg,
-			SeekIndex: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
+			ResolveOffset: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
 				// An index that spans the first two pieces leaves one window
 				// piece. Offset 320 starts piece 5, and a window starting 8
 				// bytes earlier would begin in piece 4.
@@ -1446,7 +1446,7 @@ func TestPool_PreloadAt(t *testing.T) {
 				reg := newProtectionRegistry()
 				pool, _ := newPool(t, reg, 0, false)
 				if !tt.seekIndex {
-					pool.cfg.SeekIndex = nil
+					pool.cfg.ResolveOffset = nil
 				}
 
 				_, err := pool.PreloadAt(file, MemoryStorage, position)
@@ -1475,7 +1475,7 @@ func TestPool_PreloadAt(t *testing.T) {
 
 		status, err := pool.PreloadAt(file, MemoryStorage, position)
 		require.NoError(t, err)
-		assert.Zero(t, status.Position)
+		assert.Zero(t, status.PlaybackPosition)
 		pool.mu.Lock()
 		assert.Same(t, first, pool.preloads[to.InfoHash()])
 		pool.mu.Unlock()

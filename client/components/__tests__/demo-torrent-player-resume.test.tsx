@@ -12,11 +12,11 @@ import type { Torrent } from '@/lib/types/api';
 
 type LayoutProps = ComponentProps<typeof TorrentPlayerDialogLayout>;
 
-const observedResumeKeys = vi.hoisted(() => [] as LayoutProps['resumeKey'][]);
+const observedPositionKeys = vi.hoisted(() => [] as LayoutProps['positionKey'][]);
 
 vi.mock('@/components/torrent-player-dialog-layout', () => ({
   TorrentPlayerDialogLayout: (props: LayoutProps) => {
-    observedResumeKeys.push(props.resumeKey);
+    observedPositionKeys.push(props.positionKey);
     return null;
   },
 }));
@@ -38,5 +38,5 @@ it('resumes demo playback from the saved position of the selected file', () => {
     open={true}
     onOpenChange={vi.fn()} />);
 
-  expect(observedResumeKeys[observedResumeKeys.length - 1]).toEqual({ hash: 'demosingle123', filePath: '/single_video.mp4' });
+  expect(observedPositionKeys[observedPositionKeys.length - 1]).toEqual({ hash: 'demosingle123', filePath: '/single_video.mp4' });
 });

@@ -97,14 +97,14 @@
 // PreloadAt preloads for playback that resumes at a position. Its head and
 // tail are only the file's first and last pieces, which usually hold the
 // container's header and seek index, and it keeps the rest, in whole pieces,
-// for a window at the position. As soon as the preload
-// runs, Config.SeekIndex resolves the position to a byte offset through a
+// for a window at the position. As soon as the preload runs,
+// Config.ResolveOffset resolves the position to a byte offset through a
 // torrent reader, which downloads the pieces holding the container's seek
 // index first. The window is placed there, starting an eighth of its size
 // before the offset, and downloads with the head and tail; the preload is not
 // ready until it completes. Index pieces the lookup read outside the head and
-// tail are kept as well, each taking a piece from the window. When the position cannot be resolved,
-// the preload is ready with its head and tail.
+// tail are kept as well, each taking a piece from the window. When the
+// position cannot be resolved, the preload is ready with its head and tail.
 //
 // A memory-storage preload reserves its whole pieces in the preload share of
 // the readahead budget, reported by PreloadCapacity, and protects them from

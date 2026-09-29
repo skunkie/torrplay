@@ -137,12 +137,12 @@ type Config struct {
 	// Registry protects the pieces readers and preloads need from eviction.
 	// Nil disables eviction protection.
 	Registry ProtectionRegistry
-	// SeekIndex, when set, resolves a playback position in file to the
+	// ResolveOffset, when set, resolves a playback position in file to the
 	// file-relative byte offset playback resumes from, reading the file's
 	// container index through r. It returns false when the file has no index
 	// it understands. A preload at a playback position calls it when it starts
 	// running; nil leaves such a preload with its head and tail.
-	SeekIndex func(r io.ReaderAt, file *torrent.File, position time.Duration) (offset int64, ok bool, err error)
+	ResolveOffset func(r io.ReaderAt, file *torrent.File, position time.Duration) (offset int64, ok bool, err error)
 }
 
 type prioritizedPiece struct {
@@ -335,9 +335,9 @@ type streamReader struct {
 	stream *streamReadSeeker
 }
 
-// readerHandoff is a released reader's sequential reading, which the next
+// releasedRun is a released reader's sequential reading, which the next
 // reader of its file may continue.
-type readerHandoff struct {
+type releasedRun struct {
 	lastOffset int64
 	readahead  int64
 	releasedAt time.Time
@@ -378,7 +378,7 @@ type Pool struct {
 	readers         map[uint64]*streamReader
 	// recentRuns holds the runs of each file's recently released readers,
 	// newest last, for the next reader of the file to continue.
-	recentRuns map[*torrent.File][]readerHandoff
+	recentRuns map[*torrent.File][]releasedRun
 	// streaming is whether OnStreamingChange last reported that the pool has
 	// readers.
 	streaming bool
@@ -414,7 +414,7 @@ func New(cfg Config) *Pool {
 		priorityClaims: make(map[priorityPieceKey]priorityClaim),
 		preloads:       make(map[metainfo.Hash]*preload),
 		readers:        make(map[uint64]*streamReader),
-		recentRuns:     make(map[*torrent.File][]readerHandoff),
+		recentRuns:     make(map[*torrent.File][]releasedRun),
 	}
 
 	go p.expireLoop()
@@ -582,7 +582,7 @@ func (p *Pool) recordRunLocked(sr *streamReader) {
 		return
 	}
 	now := time.Now()
-	runs := append(p.recentRunsLocked(sr.file, now), readerHandoff{
+	runs := append(p.recentRunsLocked(sr.file, now), releasedRun{
 		lastOffset: sr.lastOffset,
 		readahead:  sr.readahead,
 		releasedAt: now,
@@ -593,8 +593,8 @@ func (p *Pool) recordRunLocked(sr *streamReader) {
 
 // recentRunsLocked returns the runs of file's readers released within
 // LingerTimeout of now, forgetting older ones. Must be called with p.mu held.
-func (p *Pool) recentRunsLocked(file *torrent.File, now time.Time) []readerHandoff {
-	var runs []readerHandoff
+func (p *Pool) recentRunsLocked(file *torrent.File, now time.Time) []releasedRun {
+	var runs []releasedRun
 	for _, run := range p.recentRuns[file] {
 		if now.Sub(run.releasedAt) < p.cfg.LingerTimeout {
 			runs = append(runs, run)

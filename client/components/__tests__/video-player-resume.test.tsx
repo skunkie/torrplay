@@ -62,7 +62,7 @@ vi.mock('@/lib/mkv-audio', async importOriginal => ({
   isAudioDecodingSupported: () => false,
 }));
 
-const resumeKey = { hash: 'hash-a', filePath: 'movie.mp4' };
+const positionKey = { hash: 'hash-a', filePath: 'movie.mp4' };
 const options = { src: { src: 'http://test-server/movie.mp4', type: 'video/mp4' as const }, title: 'Movie' };
 
 // startPlayback reports that the source can play and has started playing.
@@ -86,9 +86,9 @@ describe('VideoPlayer playback position', () => {
   });
 
   it('resumes from the saved position when the source can play', () => {
-    savePlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath, 120);
+    savePlaybackPositionSeconds(positionKey.hash, positionKey.filePath, 120);
     render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
 
     act(() => media.handlers.onCanPlay?.());
@@ -97,9 +97,9 @@ describe('VideoPlayer playback position', () => {
   });
 
   it('starts from the beginning when the saved position is past the end', () => {
-    savePlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath, 700);
+    savePlaybackPositionSeconds(positionKey.hash, positionKey.filePath, 700);
     render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
 
     act(() => media.handlers.onCanPlay?.());
@@ -108,53 +108,53 @@ describe('VideoPlayer playback position', () => {
   });
 
   it('does not overwrite the saved position before playback starts', () => {
-    savePlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath, 120);
+    savePlaybackPositionSeconds(positionKey.hash, positionKey.filePath, 120);
     render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
 
     act(() => media.handlers.onTimeUpdate?.({ currentTime: 0 }));
 
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(120);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(120);
   });
 
   it('saves the position while playing, at most every five seconds', () => {
     vi.useFakeTimers();
     render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
     startPlayback();
 
     act(() => media.handlers.onTimeUpdate?.({ currentTime: 30 }));
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(30);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(30);
 
     act(() => media.handlers.onTimeUpdate?.({ currentTime: 31 }));
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(30);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(30);
 
     vi.advanceTimersByTime(5000);
     act(() => media.handlers.onTimeUpdate?.({ currentTime: 36 }));
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(36);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(36);
   });
 
   it('saves the position at once on pause and seek', () => {
     render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
     startPlayback();
     act(() => media.handlers.onTimeUpdate?.({ currentTime: 30 }));
 
     media.instance.currentTime = 42;
     act(() => media.handlers.onPause?.());
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(42);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(42);
 
     media.instance.currentTime = 300;
     act(() => media.handlers.onSeeked?.());
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(300);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(300);
   });
 
   it('saves the latest position when the player closes', () => {
     const { unmount } = render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
     startPlayback();
     act(() => {
@@ -164,12 +164,12 @@ describe('VideoPlayer playback position', () => {
 
     unmount();
 
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(31);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(31);
   });
 
   it('forgets the position of a finished file', () => {
     render(<VideoPlayer options={options}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       internalOnly />);
     startPlayback();
     act(() => media.handlers.onTimeUpdate?.({ currentTime: 30 }));
@@ -180,10 +180,10 @@ describe('VideoPlayer playback position', () => {
       media.handlers.onEnded?.();
     });
 
-    expect(getPlaybackPositionSeconds(resumeKey.hash, resumeKey.filePath)).toBe(0);
+    expect(getPlaybackPositionSeconds(positionKey.hash, positionKey.filePath)).toBe(0);
   });
 
-  it('saves nothing without a resume key', () => {
+  it('saves nothing without a position key', () => {
     render(<VideoPlayer options={options}
       internalOnly />);
     startPlayback();

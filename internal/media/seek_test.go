@@ -317,7 +317,7 @@ func buildIndexedMatroska(t *testing.T, seekHeads int) (file []byte, secondClust
 	file = make([]byte, 0, len(ebml)+len(segment))
 	file = append(file, ebml...)
 	file = append(file, segment...)
-	segmentElement, found, err := findMatroskaTopLevel(bytes.NewReader(file), 0, int64(len(file)), matroskaSegmentID)
+	segmentElement, found, err := findMatroskaElement(bytes.NewReader(file), 0, int64(len(file)), matroskaSegmentID)
 	require.NoError(t, err)
 	require.True(t, found)
 	return file, segmentElement.dataStart + int64(clusterTwoPosition), segmentElement.dataStart + int64(clusterOnePosition)

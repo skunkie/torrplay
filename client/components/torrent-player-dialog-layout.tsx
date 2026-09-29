@@ -37,7 +37,7 @@ interface TorrentPlayerDialogLayoutProps {
     onNext?: () => void
   },
   preloadBadge?: PreloadBadgeInfo | null,
-  resumeKey?: PlaybackPositionKey,
+  positionKey?: PlaybackPositionKey,
   isDemo?: boolean
 }
 
@@ -51,7 +51,7 @@ export const TorrentPlayerDialogLayout = ({
   handleExit,
   playlistNavigation,
   preloadBadge,
-  resumeKey,
+  positionKey,
   isDemo = false,
 }: TorrentPlayerDialogLayoutProps) => {
   if (isPlayerVisible && videoPlayerOptions) {
@@ -69,7 +69,7 @@ export const TorrentPlayerDialogLayout = ({
         onExit={handleExit}
         playlistNavigation={playlistNavigation}
         preloadBadge={preloadBadge}
-        resumeKey={resumeKey}
+        positionKey={positionKey}
         isDemo={isDemo}
       />
     );

@@ -11,7 +11,7 @@ import { savePlaybackPositionSeconds } from '@/lib/playback-position';
 import type { PreloadRequest, Torrent } from '@/lib/types/api';
 
 const observedPreloadBadges = vi.hoisted(() => [] as VideoPlayerProps['preloadBadge'][]);
-const observedResumeKeys = vi.hoisted(() => [] as VideoPlayerProps['resumeKey'][]);
+const observedPositionKeys = vi.hoisted(() => [] as VideoPlayerProps['positionKey'][]);
 const { startPreloadMock } = vi.hoisted(() => ({
   startPreloadMock: vi.fn<(hash: string, request: PreloadRequest) => Promise<never>>(() => new Promise(() => {})),
 }));
@@ -19,7 +19,7 @@ const { startPreloadMock } = vi.hoisted(() => ({
 vi.mock('@/components/video-player', () => ({
   default: (props: VideoPlayerProps) => {
     observedPreloadBadges.push(props.preloadBadge);
-    observedResumeKeys.push(props.resumeKey);
+    observedPositionKeys.push(props.positionKey);
     return <div data-testid='mock-video-player' />;
   },
 }));
@@ -100,7 +100,7 @@ it('does not restart an in-flight preload when the torrent prop is replaced by a
 it('preloads from the saved playback position and resumes the player there', () => {
   localStorage.clear();
   savePlaybackPositionSeconds('1234567890', 'movie.mp4', 900);
-  observedResumeKeys.length = 0;
+  observedPositionKeys.length = 0;
   startPreloadMock.mockClear();
 
   render(
@@ -113,7 +113,7 @@ it('preloads from the saved playback position and resumes the player there', () 
   );
 
   expect(startPreloadMock).toHaveBeenCalledWith('1234567890', { filePath: 'movie.mp4', playbackPositionSeconds: 900 });
-  expect(observedResumeKeys[observedResumeKeys.length - 1]).toEqual({ hash: '1234567890', filePath: 'movie.mp4' });
+  expect(observedPositionKeys[observedPositionKeys.length - 1]).toEqual({ hash: '1234567890', filePath: 'movie.mp4' });
   localStorage.clear();
 });
 

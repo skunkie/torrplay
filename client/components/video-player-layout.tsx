@@ -28,7 +28,7 @@ interface VideoPlayerLayoutProps {
     onNext?: () => void
   },
   preloadBadge?: PreloadBadgeInfo | null,
-  resumeKey?: PlaybackPositionKey,
+  positionKey?: PlaybackPositionKey,
   isDemo?: boolean
 }
 
@@ -39,7 +39,7 @@ export const VideoPlayerLayout = ({
   onExit,
   playlistNavigation,
   preloadBadge,
-  resumeKey,
+  positionKey,
   isDemo = false,
 }: VideoPlayerLayoutProps) => {
   return (
@@ -61,7 +61,7 @@ export const VideoPlayerLayout = ({
               onExit={onExit}
               playlistNavigation={playlistNavigation}
               preloadBadge={preloadBadge}
-              resumeKey={resumeKey}
+              positionKey={positionKey}
             />
           ) : (
             <VideoPlayer
@@ -69,7 +69,7 @@ export const VideoPlayerLayout = ({
               onExit={onExit}
               playlistNavigation={playlistNavigation}
               preloadBadge={preloadBadge}
-              resumeKey={resumeKey}
+              positionKey={positionKey}
             />
           )
         )}

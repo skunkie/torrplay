@@ -130,7 +130,7 @@ export function DemoTorrentPlayerDialog({
   const isPlayerVisible = !!videoPlayerOptions;
   const torrentHash = torrent?.hash;
   const selectedFilePath = selectedFile?.path;
-  const resumeKey = useMemo<PlaybackPositionKey | undefined>(
+  const positionKey = useMemo<PlaybackPositionKey | undefined>(
     () => (torrentHash && selectedFilePath ? { hash: torrentHash, filePath: selectedFilePath } : undefined),
     [selectedFilePath, torrentHash],
   );
@@ -179,7 +179,7 @@ export function DemoTorrentPlayerDialog({
       handleExit={handleExit}
       playlistNavigation={playlistNavigation}
       preloadBadge={preloadBadge}
-      resumeKey={resumeKey}
+      positionKey={positionKey}
       isDemo={true}
     />
   );
