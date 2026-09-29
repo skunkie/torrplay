@@ -212,7 +212,8 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		// The second torrent's metadata never comes.
 		unresolved := newTestTorrent(t, 2048).HashInfoBytes()
 		var streaming atomic.Bool
-		waiting := make(chan struct{})
+		// Buffered, so the first wait is signalled even before the test receives.
+		waiting := make(chan struct{}, 1)
 		waitForInfo := func(ctx context.Context, to *torrent.Torrent) error {
 			if to.InfoHash() != unresolved {
 				return nil
