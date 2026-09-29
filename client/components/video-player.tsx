@@ -451,7 +451,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   // resume seeks the source to its saved position once. It seeks the video
   // element as soon as its metadata loads, since Vidstack defers its own seeks
   // until the source can play, by which time the browser has buffered the
-  // start of the file. Without the element it falls back to Vidstack.
+  // start of the file. Vidstack is given the position too, so the seek it
+  // defers does not return the source to where it started.
   const resume = useCallback(() => {
     if (resumedRef.current || !player.current) return;
     resumedRef.current = true;
@@ -459,11 +460,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     const videoEl = getVidstackVideoElement(player.current);
     const duration = videoEl?.duration ?? player.current.duration;
     if (resumeFrom > 0 && (!duration || resumeFrom < duration)) {
-      if (videoEl) {
-        videoEl.currentTime = resumeFrom;
-      } else {
-        player.current.currentTime = resumeFrom;
-      }
+      if (videoEl) videoEl.currentTime = resumeFrom;
+      player.current.currentTime = resumeFrom;
     }
   }, []);
 

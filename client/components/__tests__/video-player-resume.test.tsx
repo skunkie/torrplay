@@ -116,9 +116,9 @@ describe('VideoPlayer playback position', () => {
 
     act(() => media.handlers.onLoadedMetadata?.());
     expect(video.currentTime).toBe(120);
-    // Vidstack defers its own seeks until the source can play, by which time
-    // the browser has buffered the start of the file.
-    expect(media.instance.currentTime).toBe(0);
+    // Vidstack defers its seeks until the source can play; given the same
+    // position, its deferred seek cannot return the source to the start.
+    expect(media.instance.currentTime).toBe(120);
 
     // The source resumes once, so it keeps its position when it can play.
     video.currentTime = 130;
