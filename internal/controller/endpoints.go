@@ -420,7 +420,36 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 	_, _ = w.Write([]byte(m3u.String()))
 }
 
-func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
+func (c *Controller) GetSettings(w http.ResponseWriter, r *http.Request) {
+	redactedSettings, status, err := c.redactedSettings(r)
+	if status == http.StatusUnauthorized {
+		c.writeAuthError(w, r, err)
+		return
+	}
+	if err != nil {
+		api.HTTPError(w, err.Error(), status)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(redactedSettings); err != nil {
+		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// redactedSettings returns the settings without the password, together with
+// the scoped tokens derived from the JWT secret. It holds authMu so the tokens
+// match the auth settings in the snapshot, and rechecks the request's
+// credentials so a revoked credential cannot obtain them. It returns the HTTP
+// status for any failure.
+func (c *Controller) redactedSettings(r *http.Request) (api.Settings, int, error) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+
+	if status, err := c.reauthenticate(r); err != nil {
+		return api.Settings{}, status, err
+	}
+
 	c.mu.RLock()
 	redactedSettings := *c.settings.Load()
 	if redactedSettings.Auth != nil {
@@ -434,22 +463,16 @@ func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
 	if authEnabled {
 		secret, err := c.db.GetJWTSecret()
 		if err != nil || secret == "" {
-			api.HTTPError(w, "failed to get scoped access tokens", http.StatusInternalServerError)
-			return
+			return api.Settings{}, http.StatusInternalServerError, errors.New("failed to get scoped access tokens")
 		}
 		redactedSettings.StremioToken = utils.Ptr(stremio.AccessToken(secret))
 		playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
 		if err != nil {
-			api.HTTPError(w, "failed to create playback token", http.StatusInternalServerError)
-			return
+			return api.Settings{}, http.StatusInternalServerError, errors.New("failed to create playback token")
 		}
 		redactedSettings.PlaybackToken = &playbackToken
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(redactedSettings); err != nil {
-		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
-	}
+	return redactedSettings, http.StatusOK, nil
 }
 
 func (c *Controller) CreateToken(w http.ResponseWriter, r *http.Request) {
@@ -463,15 +486,13 @@ func (c *Controller) CreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret, err := c.db.GetJWTSecret()
-	if err != nil || secret == "" {
-		api.HTTPError(w, "failed to get token secret", http.StatusInternalServerError)
+	token, expiresAt, status, err := c.issuePlaybackToken(r)
+	if status == http.StatusUnauthorized {
+		c.writeAuthError(w, r, err)
 		return
 	}
-
-	token, expiresAt, err := auth.GeneratePlaybackToken([]byte(secret))
 	if err != nil {
-		api.HTTPError(w, "failed to create token", http.StatusInternalServerError)
+		api.HTTPError(w, err.Error(), status)
 		return
 	}
 
@@ -479,6 +500,28 @@ func (c *Controller) CreateToken(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(api.ScopedToken{Token: token, Scope: string(req.Scope), ExpiresAt: expiresAt}); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// issuePlaybackToken signs a playback token while holding authMu, so a
+// concurrent auth change cannot rotate the secret before the token is issued.
+// It rechecks the request's credentials so a revoked credential cannot obtain
+// a token, and returns the HTTP status for any failure.
+func (c *Controller) issuePlaybackToken(r *http.Request) (string, time.Time, int, error) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+
+	if status, err := c.reauthenticate(r); err != nil {
+		return "", time.Time{}, status, err
+	}
+	secret, err := c.db.GetJWTSecret()
+	if err != nil || secret == "" {
+		return "", time.Time{}, http.StatusInternalServerError, errors.New("failed to get token secret")
+	}
+	token, expiresAt, err := auth.GeneratePlaybackToken([]byte(secret))
+	if err != nil {
+		return "", time.Time{}, http.StatusInternalServerError, errors.New("failed to create token")
+	}
+	return token, expiresAt, http.StatusOK, nil
 }
 
 func (c *Controller) GetStream(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, params api.GetStreamParams) {
@@ -580,38 +623,9 @@ func (c *Controller) GetToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings := c.settings.Load()
-
-	if settings.Auth == nil || !utils.Val(settings.Auth.Enabled) {
-		api.HTTPError(w, "authentication not enabled", http.StatusServiceUnavailable)
-		return
-	}
-
-	if utils.Val(settings.Auth.Username) != username || utils.Val(settings.Auth.Password) != password {
-		api.HTTPError(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-
-	if utils.Val(settings.Auth.Type) != "bearer" {
-		api.HTTPError(w, "token endpoint not supported for basic auth", http.StatusBadRequest)
-		return
-	}
-
-	jwtSecret, err := c.db.GetJWTSecret()
+	token, status, err := c.issueAccessToken(username, password)
 	if err != nil {
-		api.HTTPError(w, "failed to get JWT secret", http.StatusInternalServerError)
-		return
-	}
-	// A concurrent auth change may have rotated the secret after the check
-	// above; never sign a token for credentials that are no longer valid.
-	if authChanged(settings.Auth, c.settings.Load().Auth) {
-		api.HTTPError(w, "invalid credentials", http.StatusUnauthorized)
-		return
-	}
-
-	token, err := auth.GenerateToken(username, []byte(jwtSecret))
-	if err != nil {
-		api.HTTPError(w, "failed to generate token", http.StatusInternalServerError)
+		api.HTTPError(w, err.Error(), status)
 		return
 	}
 
@@ -623,6 +637,39 @@ func (c *Controller) GetToken(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// issueAccessToken checks the credentials and signs an access token while
+// holding authMu, so a concurrent auth change cannot rotate the secret between
+// the check and the signature. It returns the HTTP status for any failure.
+func (c *Controller) issueAccessToken(username, password string) (string, int, error) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+
+	settings := c.settings.Load()
+
+	if settings.Auth == nil || !utils.Val(settings.Auth.Enabled) {
+		return "", http.StatusServiceUnavailable, errors.New("authentication not enabled")
+	}
+
+	if utils.Val(settings.Auth.Username) != username || utils.Val(settings.Auth.Password) != password {
+		return "", http.StatusUnauthorized, errors.New("invalid credentials")
+	}
+
+	if utils.Val(settings.Auth.Type) != "bearer" {
+		return "", http.StatusBadRequest, errors.New("token endpoint not supported for basic auth")
+	}
+
+	jwtSecret, err := c.db.GetJWTSecret()
+	if err != nil {
+		return "", http.StatusInternalServerError, errors.New("failed to get JWT secret")
+	}
+
+	token, err := auth.GenerateToken(username, []byte(jwtSecret))
+	if err != nil {
+		return "", http.StatusInternalServerError, errors.New("failed to generate token")
+	}
+	return token, http.StatusOK, nil
 }
 
 func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, params api.GetTorrentParams) {
@@ -1130,38 +1177,22 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		reconfigureTorrentClient = true
 	}
 
-	if saveSettings {
-		if err := c.db.UpdateSettings(database.FromAPISettings(&newSettings)); err != nil {
-			if newPieceCompletion != nil {
-				_ = newPieceCompletion.Close()
-			}
-			api.HTTPError(w, fmt.Sprintf("failed to update settings, %v", err), http.StatusInternalServerError)
-			return
-		}
-		c.mu.Lock()
-		c.settings.Store(&newSettings)
-		c.mu.Unlock()
-
-		// Revoke every bearer, playback, and Stremio token issued under the
-		// previous credentials. Rotating only after the new credentials are in
-		// effect leaves no window in which the old credentials can obtain a
-		// token signed with the new secret.
-		if authChanged(oldSettings.Auth, newSettings.Auth) {
-			if err := c.db.RotateJWTSecret(); err != nil {
-				if newPieceCompletion != nil {
-					_ = newPieceCompletion.Close()
-				}
-				c.rollbackSettings(oldSettings, appliedSettings{})
-				api.HTTPError(w, fmt.Sprintf("failed to rotate JWT secret, %v", err), http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-
 	// Apply the new settings. A failure restores the previous settings in
 	// memory and in the database, and reapplies them to every component this
 	// update already touched.
 	var applied appliedSettings
+	if saveSettings {
+		rotated, err := c.storeSettings(oldSettings, &newSettings)
+		if err != nil {
+			if newPieceCompletion != nil {
+				_ = newPieceCompletion.Close()
+			}
+			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		applied.jwtSecret = rotated
+	}
+
 	fail := func(msg string) {
 		c.rollbackSettings(oldSettings, applied)
 		api.HTTPError(w, msg, http.StatusInternalServerError)
@@ -1248,11 +1279,71 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 type appliedSettings struct {
 	dlna            bool
 	downloader      bool
+	jwtSecret       bool
 	logStoreSize    bool
 	logger          bool
 	memoryLimit     bool
 	pieceCompletion bool
 	torrentClient   bool
+}
+
+// storeSettings persists and publishes new settings. When they change
+// authentication, it also rotates the JWT secret, revoking every bearer,
+// playback, and Stremio token issued under the previous credentials. The
+// whole auth change holds authMu, so no token is signed in between with a
+// secret that the rotation is about to revoke. It reports whether the secret
+// was rotated. A failed rotation restores the previous settings.
+func (c *Controller) storeSettings(oldSettings, newSettings *api.Settings) (bool, error) {
+	rotate := authChanged(oldSettings.Auth, newSettings.Auth)
+	if rotate {
+		c.authMu.Lock()
+		defer c.authMu.Unlock()
+	}
+
+	if err := c.db.UpdateSettings(database.FromAPISettings(newSettings)); err != nil {
+		return false, fmt.Errorf("failed to update settings, %w", err)
+	}
+	c.publishSettings(newSettings)
+
+	if !rotate {
+		return false, nil
+	}
+	if err := c.db.RotateJWTSecret(); err != nil {
+		// authMu is already held, so restore without rotating again.
+		c.restoreSettings(oldSettings, false)
+		return false, fmt.Errorf("failed to rotate JWT secret, %w", err)
+	}
+	return true, nil
+}
+
+// restoreSettings puts previous settings back in the database and in memory.
+// With rotate set, it holds authMu for the whole auth change and rotates the
+// JWT secret after restoring, revoking any token issued for the credentials
+// being replaced. Failures are logged because the caller reports the original
+// error.
+func (c *Controller) restoreSettings(old *api.Settings, rotate bool) {
+	if rotate {
+		c.authMu.Lock()
+		defer c.authMu.Unlock()
+	}
+
+	if err := c.db.UpdateSettings(database.FromAPISettings(old)); err != nil {
+		c.logger.Load().Error("failed to restore previous settings", "err", err)
+	}
+	c.publishSettings(old)
+
+	if rotate {
+		if err := c.db.RotateJWTSecret(); err != nil {
+			c.logger.Load().Error("failed to rotate JWT secret", "err", err)
+		}
+	}
+}
+
+// publishSettings makes settings the controller's current settings.
+func (c *Controller) publishSettings(s *api.Settings) {
+	c.mu.Lock()
+	c.settings.Store(s)
+	c.mu.Unlock()
 }
 
 // applyDLNASettings starts, restarts, or stops the DLNA service to match the
@@ -1356,15 +1447,11 @@ func authChanged(oldAuth, newAuth *api.Auth) bool {
 // update changed. The logger and piece completion database are restored before
 // the torrent client, whose rebuilt downloader captures both. Restoration is
 // best effort: failures are logged because the original error is what the
-// caller reports. A JWT secret rotated by the update is not restored, so
-// clients must sign in again even though the previous credentials are back.
+// caller reports. When the update rotated the JWT secret, restoring the
+// previous credentials rotates it again under authMu, revoking any token
+// issued for the credentials being rolled back.
 func (c *Controller) rollbackSettings(old *api.Settings, applied appliedSettings) {
-	if err := c.db.UpdateSettings(database.FromAPISettings(old)); err != nil {
-		c.logger.Load().Error("failed to restore previous settings", "err", err)
-	}
-	c.mu.Lock()
-	c.settings.Store(old)
-	c.mu.Unlock()
+	c.restoreSettings(old, applied.jwtSecret)
 
 	if applied.dlna {
 		if err := c.applyDLNASettings(); err != nil {

@@ -73,6 +73,11 @@ const (
 
 var _ api.ServerInterface = (*Controller)(nil)
 
+// errAuthNotConfigured reports a server-side authentication fault, such as
+// missing credentials or an unreadable JWT secret, rather than a client's bad
+// credentials.
+var errAuthNotConfigured = errors.New("authentication not configured correctly")
+
 // controllerRuntimeConfig contains private runtime dependencies and timing knobs
 // used to keep controller tests deterministic without expanding the public API.
 type controllerRuntimeConfig struct {
@@ -118,6 +123,12 @@ type torrentTracker struct {
 }
 
 type Controller struct {
+	// authMu serializes authentication changes, which publish credentials and
+	// rotate the JWT secret, against token issuance, so no token is signed
+	// with a secret that does not match the credentials it was issued for.
+	// Issuers hold it for reading; auth changes hold it for writing. Acquire
+	// it after settingsUpdateMu and before mu.
+	authMu       sync.RWMutex
 	client       *torrent.Client
 	dataDir      string
 	db           database.DatabaseInterface
@@ -452,80 +463,110 @@ func (c *Controller) SetupRouter() *chi.Mux {
 }
 
 func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
-	return func(ctx context.Context, input *openapi3filter.AuthenticationInput) error {
-		currentSettings := c.settings.Load()
-
-		if !utils.Val(currentSettings.Auth.Enabled) {
-			return nil
-		}
-
-		authType := utils.Val(currentSettings.Auth.Type)
-		username := utils.Val(currentSettings.Auth.Username)
-		password := utils.Val(currentSettings.Auth.Password)
-
-		if username == "" || password == "" {
-			return errors.New("authentication not configured correctly")
-		}
-
-		switch input.SecuritySchemeName {
-		case "basicAuth":
-			if authType != api.Basic {
-				return errors.New("basic authentication is not enabled")
-			}
-			authHeader := input.RequestValidationInput.Request.Header.Get("Authorization")
-			if authHeader == "" {
-				return &api.AuthError{Message: "authorization header is missing", Type: "Basic"}
-			}
-			user, pass, ok := input.RequestValidationInput.Request.BasicAuth()
-			if !ok {
-				return &api.AuthError{Message: "invalid basic auth format", Type: "Basic"}
-			}
-			if user != username || pass != password {
-				return &api.AuthError{Message: "invalid credentials", Type: "Basic"}
-			}
-			return nil
-		case "bearerAuth":
-			if authType != api.Bearer {
-				return errors.New("bearer authentication is not enabled")
-			}
-			jwtSecret, err := c.db.GetJWTSecret()
-			if err != nil || jwtSecret == "" {
-				return errors.New("authentication not configured correctly")
-			}
-			authHeader := input.RequestValidationInput.Request.Header.Get("Authorization")
-			if authHeader == "" {
-				return &api.AuthError{Message: "authorization header is missing", Type: "Bearer"}
-			}
-
-			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-			claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
-			if err != nil {
-				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "Bearer"}
-			}
-			if claims.Scope != "" {
-				return &api.AuthError{Message: "token scope is not valid for API access", Type: "Bearer"}
-			}
-			if claims.Username != username {
-				return &api.AuthError{Message: "token was issued to a different user", Type: "Bearer"}
-			}
-			return nil
-		case "queryTokenAuth":
-			return c.validatePlaybackQueryToken(input.RequestValidationInput.Request)
-		case "compatQueryTokenAuth":
-			if authType == api.Basic {
-				return nil
-			}
-			return c.validatePlaybackQueryToken(input.RequestValidationInput.Request)
-		}
-
-		return errors.New("authentication failed")
+	return func(_ context.Context, input *openapi3filter.AuthenticationInput) error {
+		return c.authenticate(input.RequestValidationInput.Request, input.SecuritySchemeName)
 	}
+}
+
+// authenticate checks a request against the current auth settings for one
+// OpenAPI security scheme.
+func (c *Controller) authenticate(r *http.Request, scheme string) error {
+	currentSettings := c.settings.Load()
+
+	if !utils.Val(currentSettings.Auth.Enabled) {
+		return nil
+	}
+
+	authType := utils.Val(currentSettings.Auth.Type)
+	username := utils.Val(currentSettings.Auth.Username)
+	password := utils.Val(currentSettings.Auth.Password)
+
+	if username == "" || password == "" {
+		return errAuthNotConfigured
+	}
+
+	switch scheme {
+	case "basicAuth":
+		if authType != api.Basic {
+			return errors.New("basic authentication is not enabled")
+		}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			return &api.AuthError{Message: "authorization header is missing", Type: "Basic"}
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok {
+			return &api.AuthError{Message: "invalid basic auth format", Type: "Basic"}
+		}
+		if user != username || pass != password {
+			return &api.AuthError{Message: "invalid credentials", Type: "Basic"}
+		}
+		return nil
+	case "bearerAuth":
+		if authType != api.Bearer {
+			return errors.New("bearer authentication is not enabled")
+		}
+		jwtSecret, err := c.db.GetJWTSecret()
+		if err != nil || jwtSecret == "" {
+			return errAuthNotConfigured
+		}
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			return &api.AuthError{Message: "authorization header is missing", Type: "Bearer"}
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+		if err != nil {
+			return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "Bearer"}
+		}
+		if claims.Scope != "" {
+			return &api.AuthError{Message: "token scope is not valid for API access", Type: "Bearer"}
+		}
+		if claims.Username != username {
+			return &api.AuthError{Message: "token was issued to a different user", Type: "Bearer"}
+		}
+		return nil
+	case "queryTokenAuth":
+		return c.validatePlaybackQueryToken(r)
+	case "compatQueryTokenAuth":
+		if authType == api.Basic {
+			return nil
+		}
+		return c.validatePlaybackQueryToken(r)
+	}
+
+	return errors.New("authentication failed")
+}
+
+// reauthenticate checks the credentials of a request that the middleware
+// already accepted for API access. Token issuers call it while holding authMu:
+// an auth change may have revoked the credentials after the middleware check,
+// and they must not obtain a token signed with the new secret. It returns the
+// HTTP status for a failure: 401 for rejected credentials and 500 for a
+// server-side fault.
+func (c *Controller) reauthenticate(r *http.Request) (int, error) {
+	authSettings := c.settings.Load().Auth
+	if authSettings == nil || !utils.Val(authSettings.Enabled) {
+		return http.StatusOK, nil
+	}
+	scheme := "bearerAuth"
+	if utils.Val(authSettings.Type) == api.Basic {
+		scheme = "basicAuth"
+	}
+	if err := c.authenticate(r, scheme); err != nil {
+		if errors.Is(err, errAuthNotConfigured) {
+			return http.StatusInternalServerError, err
+		}
+		return http.StatusUnauthorized, err
+	}
+	return http.StatusOK, nil
 }
 
 func (c *Controller) validatePlaybackQueryToken(r *http.Request) error {
 	jwtSecret, err := c.db.GetJWTSecret()
 	if err != nil || jwtSecret == "" {
-		return errors.New("authentication not configured correctly")
+		return errAuthNotConfigured
 	}
 
 	tokenString := r.URL.Query().Get("token")
@@ -543,6 +584,9 @@ func (c *Controller) validatePlaybackQueryToken(r *http.Request) error {
 }
 
 func (c *Controller) dlnaPlaybackToken() (string, error) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+
 	authSettings := c.settings.Load().Auth
 	enabled := authSettings != nil && utils.Val(authSettings.Enabled)
 
@@ -552,7 +596,7 @@ func (c *Controller) dlnaPlaybackToken() (string, error) {
 
 	secret, err := c.db.GetJWTSecret()
 	if err != nil || secret == "" {
-		return "", errors.New("authentication not configured correctly")
+		return "", errAuthNotConfigured
 	}
 
 	token, _, err := auth.GeneratePlaybackToken([]byte(secret))

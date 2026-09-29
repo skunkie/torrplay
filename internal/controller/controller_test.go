@@ -1530,6 +1530,60 @@ func TestUpdateSettingsRollsBackFailedTorrentClientReconfiguration(t *testing.T)
 	assert.Equal(t, *oldSettings.MaxMemory, *ctrl.settings.Load().MaxMemory)
 }
 
+// countingRotationDB counts JWT secret rotations.
+type countingRotationDB struct {
+	database.DatabaseInterface
+	rotations *atomic.Int32
+}
+
+func (d countingRotationDB) RotateJWTSecret() error {
+	d.rotations.Add(1)
+	return d.DatabaseInterface.RotateJWTSecret()
+}
+
+func TestUpdateSettingsRollbackRotatesJWTSecretAgain(t *testing.T) {
+	var failClient atomic.Bool
+	runtimeConfig := testControllerRuntimeConfig()
+	baseConfigure := runtimeConfig.configureClient
+	runtimeConfig.configureClient = func(config *torrent.ClientConfig) {
+		baseConfigure(config)
+		if failClient.Load() {
+			// An unparsable listen address makes torrent.NewClient fail.
+			config.DisableTCP = false
+			config.ListenHost = func(string) string { return "256.256.256.256" }
+		}
+	}
+	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+	defer cleanup()
+
+	var rotations atomic.Int32
+	ctrl.db = countingRotationDB{DatabaseInterface: ctrl.db, rotations: &rotations}
+	secretBefore, err := ctrl.db.GetJWTSecret()
+	require.NoError(t, err)
+
+	failClient.Store(true)
+	patch := map[string]any{
+		"auth":              map[string]any{"enabled": true, "type": "bearer", "username": "admin", "password": "password"},
+		"file_storage_path": t.TempDir(),
+	}
+	rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(patch).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+
+	// The update rotated the secret for the new credentials, and the rollback
+	// rotated it again to revoke any token issued for them in between.
+	assert.Equal(t, int32(2), rotations.Load())
+	assert.False(t, utils.Val(ctrl.settings.Load().Auth.Enabled))
+	secretAfter, err := ctrl.db.GetJWTSecret()
+	require.NoError(t, err)
+	assert.NotEqual(t, secretBefore, secretAfter)
+
+	// A rollback of an update that leaves authentication alone does not rotate.
+	rotations.Store(0)
+	rr = testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]any{"file_storage_path": t.TempDir()}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+	assert.Zero(t, rotations.Load())
+}
+
 func TestUpdateSettingsRollsBackFailedDLNAReconfiguration(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
