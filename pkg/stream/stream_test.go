@@ -1591,6 +1591,51 @@ func TestReadaheadRamp(t *testing.T) {
 		}
 	})
 
+	t.Run("a reader continues a reader released while another reader of its file is open", func(t *testing.T) {
+		// Audio decoding and subtitle extraction read the file beside the
+		// player, so a released playback reader closes rather than lingers.
+		c := newTestTorrentClient(t)
+		_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
+		pool := newTestPool(t, Config{Logger: testLogger(), ReadaheadRampBytes: ramp})
+		pool.SetReadaheadBudget(64 << 20)
+		_, releaseSidecar, err := pool.Acquire(context.Background(), file, MemoryStorage)
+		require.NoError(t, err)
+		defer releaseSidecar()
+		pool.mu.Lock()
+		known := make(map[*streamReader]bool)
+		for _, sr := range pool.readers {
+			known[sr] = true
+		}
+		pool.mu.Unlock()
+		acquire := func() (*streamReader, ReleaseFunc) {
+			_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
+			require.NoError(t, err)
+			pool.mu.Lock()
+			defer pool.mu.Unlock()
+			for _, sr := range pool.readers {
+				if !known[sr] {
+					known[sr] = true
+					return sr, release
+				}
+			}
+			t.Fatal("no new reader")
+			return nil, nil
+		}
+
+		first, releaseFirst := acquire()
+		readSequentially(pool, first, 0, 4<<20)
+		releaseFirst()
+		pool.mu.Lock()
+		_, lingers := pool.readers[first.readerID]
+		pool.mu.Unlock()
+		require.False(t, lingers, "a reader released beside another closes at once")
+
+		second, releaseSecond := acquire()
+		defer releaseSecond()
+		pool.updateReaderPosition(second.readerID, 4<<20+pieceLength)
+		assert.Equal(t, int64(8<<20+2*pieceLength), readahead(pool, second))
+	})
+
 	t.Run("disabled", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)

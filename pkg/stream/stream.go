@@ -12,6 +12,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -124,10 +125,10 @@ type Config struct {
 	// it has read since, and at least ReadaheadRampBytes or one piece, until
 	// it reaches the readahead its share allows. A player's request that reads
 	// only a container header before seeking elsewhere then downloads little
-	// past it. A reader that takes over from a lingering reader and starts
-	// reading where that reader stopped, as a player's next range request
-	// does, continues its ramp. Zero gives every reader its full readahead at
-	// once.
+	// past it. A reader whose first read lands where a reader of its file
+	// released within LingerTimeout stopped, as a player's next range request
+	// does, continues that reader's ramp. Zero gives every reader its full
+	// readahead at once.
 	ReadaheadRampBytes int64
 	// ReadObserver, when set, is called after every Read of a reader with the
 	// reader's storage mode and how long the Read took, including any wait
@@ -326,10 +327,11 @@ type streamReader struct {
 	// runStart is the offset where the reader's current sequential reading
 	// began, at its first read or its last seek, or -1 before its first read.
 	runStart int64
-	// handoff is the reading of the lingering reader this reader took over,
-	// which it continues when its first read lands in that reader's window,
-	// as a player's next range request does. Nil once the reader has read.
-	handoff *readerHandoff
+	// handoffs holds the reading of the file's recently released readers,
+	// one of which the reader continues when its first read lands in that
+	// reader's window, as a player's next range request does. Nil once the
+	// reader has read.
+	handoffs []readerHandoff
 	// shareReadahead is the readahead the reader's share of the budget, or
 	// FileReadaheadBytes for file storage, allows once ramped up.
 	shareReadahead int64
@@ -339,13 +341,19 @@ type streamReader struct {
 	stream *streamReadSeeker
 }
 
-// readerHandoff is a lingering reader's sequential reading, handed to the
-// reader of its file that takes over from it.
+// readerHandoff is a released reader's sequential reading, which the next
+// reader of its file may continue.
 type readerHandoff struct {
 	lastOffset int64
 	readahead  int64
+	releasedAt time.Time
 	runStart   int64
 }
+
+// maxRecentRuns bounds the released readers' runs remembered per file. A
+// player's playback reader shares its file with the short readers of audio
+// decoding and subtitle extraction, so one run is not enough.
+const maxRecentRuns = 4
 
 // Pool manages torrent readers with dynamic readahead management.
 // Callers must call Close() when the pool is no longer needed to stop the background
@@ -374,6 +382,9 @@ type Pool struct {
 	preloads        map[metainfo.Hash]*preload
 	readaheadBudget int64 // current total readahead budget, updated by SetReadaheadBudget
 	readers         map[uint64]*streamReader
+	// recentRuns holds the runs of each file's recently released readers,
+	// newest last, for the next reader of the file to continue.
+	recentRuns map[*torrent.File][]readerHandoff
 	// streaming is whether OnStreamingChange last reported that the pool has
 	// readers.
 	streaming bool
@@ -409,6 +420,7 @@ func New(cfg Config) *Pool {
 		priorityClaims: make(map[priorityPieceKey]priorityClaim),
 		preloads:       make(map[metainfo.Hash]*preload),
 		readers:        make(map[uint64]*streamReader),
+		recentRuns:     make(map[*torrent.File][]readerHandoff),
 	}
 
 	go p.expireLoop()
@@ -468,11 +480,7 @@ func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode
 		readerID:      readerID,
 		stream:        stream,
 	}
-	for _, other := range p.readers {
-		if !other.active && other.file == file && other.runStart >= 0 {
-			sr.handoff = &readerHandoff{lastOffset: other.lastOffset, readahead: other.readahead, runStart: other.runStart}
-		}
-	}
+	sr.handoffs = p.recentRunsLocked(file, time.Now())
 	p.readers[readerID] = sr
 	p.noteStreamingLocked()
 	p.wakeExpireLoop()
@@ -552,6 +560,7 @@ func (p *Pool) release(readerID uint64) {
 	}
 
 	sr.active = false
+	p.recordRunLocked(sr)
 	if torrentClosed(sr.file) || p.fileHasActiveReaderLocked(sr.file) {
 		p.removeReaderLocked(sr)
 		p.rebalanceLocked()
@@ -569,6 +578,42 @@ func (p *Pool) release(readerID uint64) {
 		slog.String("hash", sr.infoHash.HexString()),
 		slog.Uint64("readerID", readerID))
 	p.rebalanceLocked()
+}
+
+// recordRunLocked remembers the sequential reading of a released reader for
+// the next reader of its file, for as long as LingerTimeout, whether the
+// reader lingers or closes at once because another reader of its file is
+// active. Must be called with p.mu held.
+func (p *Pool) recordRunLocked(sr *streamReader) {
+	if p.cfg.ReadaheadRampBytes <= 0 || sr.runStart < 0 {
+		return
+	}
+	now := time.Now()
+	runs := append(p.recentRunsLocked(sr.file, now), readerHandoff{
+		lastOffset: sr.lastOffset,
+		readahead:  sr.readahead,
+		releasedAt: now,
+		runStart:   sr.runStart,
+	})
+	p.recentRuns[sr.file] = runs[max(len(runs)-maxRecentRuns, 0):]
+}
+
+// recentRunsLocked returns a copy of the runs of file's readers released
+// within LingerTimeout of now, forgetting older ones. Must be called with
+// p.mu held.
+func (p *Pool) recentRunsLocked(file *torrent.File, now time.Time) []readerHandoff {
+	var runs []readerHandoff
+	for _, run := range p.recentRuns[file] {
+		if now.Sub(run.releasedAt) < p.cfg.LingerTimeout {
+			runs = append(runs, run)
+		}
+	}
+	if len(runs) == 0 {
+		delete(p.recentRuns, file)
+	} else {
+		p.recentRuns[file] = runs
+	}
+	return slices.Clone(runs)
 }
 
 // rebalanceLocked redistributes the readahead budget after a reader stops
@@ -1082,16 +1127,22 @@ func (p *Pool) updateReaderPosition(readerID uint64, newOffset int64) {
 	// (refreshReadaheadLocked, ReaderPositions) can read it without touching
 	// the stream's lock, preserving the lock order.
 	// A read before or far past the last one is a seek, which restarts the
-	// readahead ramp. A first read near where the reader taken over from
-	// stopped continues that reader's reading instead.
+	// readahead ramp. A first read near where a recently released reader of
+	// the file stopped continues the longest such reader's reading instead.
 	window := max(sr.readahead, filePieceLength(file))
-	switch h := sr.handoff; {
-	case sr.runStart < 0 && h != nil && newOffset >= h.lastOffset-max(h.readahead, filePieceLength(file)) && newOffset-h.lastOffset <= max(h.readahead, filePieceLength(file)):
-		sr.runStart = h.runStart
-	case sr.runStart < 0, newOffset < sr.lastOffset, newOffset-sr.lastOffset > window:
+	switch {
+	case sr.runStart < 0:
+		sr.runStart = newOffset
+		for _, h := range sr.handoffs {
+			reach := max(h.readahead, filePieceLength(file))
+			if newOffset >= h.lastOffset-reach && newOffset-h.lastOffset <= reach {
+				sr.runStart = min(sr.runStart, h.runStart)
+			}
+		}
+	case newOffset < sr.lastOffset, newOffset-sr.lastOffset > window:
 		sr.runStart = newOffset
 	}
-	sr.handoff = nil
+	sr.handoffs = nil
 	sr.lastOffset = newOffset
 	currentPiece := filePiece(file, newOffset)
 	pieceChanged := (currentPiece != sr.lastPiece) || (sr.lastPiece < 0)
@@ -1320,5 +1371,14 @@ func (p *Pool) closeExpiredLingeringReaders() {
 	}
 	if closed {
 		p.releaseExpiredPreloadsLocked()
+	}
+	// Forget the runs of readers released long ago, so their files and
+	// torrents are not kept alive.
+	for file := range p.recentRuns {
+		if torrentClosed(file) {
+			delete(p.recentRuns, file)
+			continue
+		}
+		p.recentRunsLocked(file, now)
 	}
 }

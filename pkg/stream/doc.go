@@ -78,9 +78,11 @@
 // at most twice what it has read since, and at least ReadaheadRampBytes or one
 // piece, until it reaches the readahead its share allows. A player's request
 // that reads only a container header before seeking to where playback starts
-// then downloads little past the header. A reader that takes over from a
-// lingering reader and starts reading where that reader stopped, as a player's
-// next range request does, continues its ramp.
+// then downloads little past the header. A reader whose first read lands where
+// a reader of its file released within LingerTimeout stopped, as a player's
+// next range request does, continues that reader's ramp, even when another
+// reader of the file, such as one for audio decoding, kept the released one
+// from lingering.
 //
 // # Preloads
 //
