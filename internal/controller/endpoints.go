@@ -425,9 +425,7 @@ func (c *Controller) GetSettings(w http.ResponseWriter, _ *http.Request) {
 	redactedSettings := *c.settings.Load()
 	if redactedSettings.Auth != nil {
 		redactedAuth := *redactedSettings.Auth
-		if redactedAuth.Password != nil {
-			redactedAuth.Password = new("********")
-		}
+		redactedAuth.Password = nil
 		redactedSettings.Auth = &redactedAuth
 	}
 	authEnabled := redactedSettings.Auth != nil && utils.Val(redactedSettings.Auth.Enabled)

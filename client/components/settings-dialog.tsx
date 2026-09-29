@@ -193,6 +193,16 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       return;
     }
 
+    // The server never returns the stored password, so enabling authentication
+    // must set one explicitly rather than silently reuse a forgotten password.
+    if (authSettings?.enabled && !settings.auth?.enabled && !authSettings.password) {
+      toast.error('Password required', {
+        description: 'Enter a password to enable authentication.',
+      });
+      setSaving(false);
+      return;
+    }
+
     try {
       const settingsToUpdate: Partial<Settings> = {};
       const normalizedCorsAllowedOrigins = corsAllowedOrigins.map(origin => origin.trim()).filter(Boolean);
@@ -215,7 +225,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
         if (authSettings.enabled !== originalAuth.enabled) authChanges.enabled = authSettings.enabled;
         if (authSettings.type !== originalAuth.type) authChanges.type = authSettings.type;
         if (authSettings.username !== originalAuth.username) authChanges.username = authSettings.username;
-        if (authSettings.password && authSettings.password !== '********') {
+        if (authSettings.password) {
           authChanges.password = authSettings.password;
         }
 

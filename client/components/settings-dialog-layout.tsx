@@ -357,7 +357,9 @@ export function SettingsDialogLayout({
                         <Input
                           id='auth-password'
                           type='password'
-                          value={authSettings.password}
+                          autoComplete='new-password'
+                          placeholder={settings.auth?.enabled ? 'Leave blank to keep the current password' : undefined}
+                          value={authSettings.password ?? ''}
                           onChange={e => setAuthSettings({ ...authSettings, password: e.target.value } as Auth)}
                         />
                       </div>

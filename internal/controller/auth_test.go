@@ -547,6 +547,30 @@ func TestGetSettingsIncludesScopedStremioToken(t *testing.T) {
 	assert.Equal(t, auth.PlaybackTokenScope, claims.Scope)
 }
 
+func TestGetSettingsOmitsPassword(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{
+			Enabled:  new(true),
+			Type:     utils.Ptr(api.Basic),
+			Username: new("admin"),
+			Password: new("password"),
+		}
+	})
+	defer cleanup()
+
+	rr := httptest.NewRecorder()
+	controller.GetSettings(rr, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.NotContains(t, rr.Body.String(), `"password"`)
+
+	var got api.Settings
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&got))
+	require.NotNil(t, got.Auth)
+	assert.Equal(t, "admin", utils.Val(got.Auth.Username))
+	assert.Equal(t, "password", utils.Val(controller.settings.Load().Auth.Password),
+		"omitting the password from the response must not clear the stored password")
+}
+
 func TestCreateToken(t *testing.T) {
 	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
 		s.Auth = &api.Auth{

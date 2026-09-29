@@ -1384,7 +1384,8 @@ components:
           example: "admin"
         password:
           type: string
-          description: Password for authentication.
+          writeOnly: true
+          description: Password for authentication. Never returned in responses; omit it to keep the current password.
           minimum: 4
           maximum: 128
           example: "password"

@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getSettings } from '@/lib/api/settings';
 import { HttpError, notifyUnauthorized } from '@/lib/api-client';
-import { AuthProvider, useAuth } from '@/lib/auth-context';
+import { AuthProvider, DemoAuthProvider, useAuth } from '@/lib/auth-context';
 import type { Auth, Settings } from '@/lib/types/api';
 
 vi.mock('@/lib/api/settings', () => ({
@@ -184,5 +184,21 @@ describe('AuthContext', () => {
     expect(result.current.auth?.enabled).toBe(true);
     expect(result.current.auth?.type).toBe('bearer');
     expect(result.current.isAuthenticated).toBe(false);
+  });
+});
+
+describe('DemoAuthProvider', () => {
+  it('does not return the password after saving auth settings', async () => {
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <DemoAuthProvider>{children}</DemoAuthProvider>
+    );
+    const { result } = renderHook(() => useAuth(), { wrapper });
+
+    await act(async () => {
+      await result.current.updateSettings({ auth: { enabled: true, type: 'bearer', username: 'admin', password: 'secret' } });
+    });
+
+    expect(result.current.settings?.auth).toEqual(expect.objectContaining({ enabled: true, username: 'admin' }));
+    expect(result.current.settings?.auth.password).toBeUndefined();
   });
 });
