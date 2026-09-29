@@ -194,11 +194,13 @@ export function VideoPlayerControls({
 
   return (
     <>
+      {/* The title bar stays shown while preloading. On a small screen the
+          badge goes below it; on a larger one the badge, which matters more
+          then, stays at the top over the bar's left end. */}
       {preloadBadge && (
         <div
           data-testid='player-preload-badge'
-          // Below the title bar, which stays shown while preloading.
-          className={`pointer-events-none absolute ${title ? 'top-10 sm:top-14' : 'top-2 sm:top-3'} left-2 sm:left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/70 border border-white/10 text-xs font-medium text-white/90 shadow-md backdrop-blur-md`}
+          className={`pointer-events-none absolute ${title ? 'top-10' : 'top-2'} sm:top-3 left-2 sm:left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/70 border border-white/10 text-xs font-medium text-white/90 shadow-md backdrop-blur-md`}
         >
           <span className='relative flex h-2 w-2'>
             <span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75' />

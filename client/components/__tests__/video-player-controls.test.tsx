@@ -105,10 +105,10 @@ describe('VideoPlayerControls visibility', () => {
     expect(screen.getByRole('button', { name: 'Enter fullscreen' })).toBeInTheDocument();
   });
 
-  it('places the preload badge below the title bar, which stays shown while preloading', () => {
+  it('places the preload badge below the title bar on small screens only', () => {
     const preloadBadge = { progress: 0.3 };
     const { unmount } = renderControls({ mediaUnavailable: true, preloadBadge, title: 'A long movie title.mkv' });
-    expect(screen.getByTestId('player-preload-badge')).toHaveClass('top-10');
+    expect(screen.getByTestId('player-preload-badge')).toHaveClass('top-10', 'sm:top-3');
     unmount();
 
     renderControls({ mediaUnavailable: true, preloadBadge });
