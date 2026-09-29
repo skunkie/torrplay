@@ -148,31 +148,24 @@ func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float
 func scanMatroskaSegment(reader io.ReaderAt, segment matroskaElement) (map[uint64]matroskaElement, map[uint64]uint64, error) {
 	elements := make(map[uint64]matroskaElement)
 	seekTargets := make(map[uint64]uint64)
-	for offset := segment.dataStart; offset < segment.dataEnd; {
-		element, ok, err := readMatroskaElement(reader, offset, segment.dataEnd)
-		if err != nil || !ok {
-			return nil, nil, err
-		}
+	err := walkMatroskaElements(reader, segment.dataStart, segment.dataEnd, func(element matroskaElement) (bool, error) {
 		if _, exists := elements[element.id]; !exists {
 			elements[element.id] = element
 		}
 		if element.id == matroskaSeekHeadID {
-			targets, parseErr := readMatroskaSeekHead(reader, element)
-			if parseErr != nil {
-				return nil, nil, parseErr
+			targets, err := readMatroskaSeekHead(reader, element)
+			if err != nil {
+				return false, err
 			}
 			maps.Copy(seekTargets, targets)
 		}
 		// Media data follows the first Cluster. Elements past it are found
 		// through the SeekHead, because walking the clusters would read the
 		// whole file.
-		if element.id == matroskaClusterID {
-			break
-		}
-		if element.dataEnd <= offset {
-			return nil, nil, errInvalidContainer
-		}
-		offset = element.dataEnd
+		return element.id != matroskaClusterID, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 	// A SeekHead may list another SeekHead, typically placed after the
 	// clusters, which lists the elements the first one does not.
@@ -209,33 +202,27 @@ func scanMatroskaSegment(reader io.ReaderAt, segment matroskaElement) (map[uint6
 // a SeekHead lists, keyed by element ID.
 func readMatroskaSeekHead(reader io.ReaderAt, seekHead matroskaElement) (map[uint64]uint64, error) {
 	targets := make(map[uint64]uint64)
-	for offset := seekHead.dataStart; offset < seekHead.dataEnd; {
-		entry, ok, err := readMatroskaElement(reader, offset, seekHead.dataEnd)
-		if err != nil || !ok {
-			return nil, err
+	err := walkMatroskaElements(reader, seekHead.dataStart, seekHead.dataEnd, func(entry matroskaElement) (bool, error) {
+		if entry.id != matroskaSeekEntryID {
+			return true, nil
 		}
-		if entry.id == matroskaSeekEntryID {
-			identifier, hasIdentifier, findErr := findMatroskaChild(reader, entry, matroskaSeekIdentifierID)
-			if findErr != nil {
-				return nil, findErr
-			}
-			position, hasPosition, findErr := findMatroskaChild(reader, entry, matroskaSeekPositionID)
-			if findErr != nil {
-				return nil, findErr
-			}
-			if hasIdentifier && hasPosition {
-				id, readErr := readMatroskaUint(reader, identifier)
-				if readErr != nil {
-					return nil, readErr
-				}
-				value, readErr := readMatroskaUint(reader, position)
-				if readErr != nil {
-					return nil, readErr
-				}
-				targets[id] = value
-			}
+		identifier, hasIdentifier, err := findMatroskaChild(reader, entry, matroskaSeekIdentifierID)
+		if err != nil {
+			return false, err
 		}
-		offset = entry.dataEnd
+		position, hasPosition, err := findMatroskaChild(reader, entry, matroskaSeekPositionID)
+		if err != nil || !hasIdentifier || !hasPosition {
+			return err == nil, err
+		}
+		id, err := readMatroskaUint(reader, identifier)
+		if err != nil {
+			return false, err
+		}
+		targets[id], err = readMatroskaUint(reader, position)
+		return err == nil, err
+	})
+	if err != nil {
+		return nil, err
 	}
 	return targets, nil
 }
@@ -243,34 +230,29 @@ func readMatroskaSeekHead(reader io.ReaderAt, seekHead matroskaElement) (map[uin
 // findMatroskaVideoTrack returns the track number of the first video track
 // in Tracks, or false when there is none.
 func findMatroskaVideoTrack(reader io.ReaderAt, tracks matroskaElement) (uint64, bool, error) {
-	for offset := tracks.dataStart; offset < tracks.dataEnd; {
-		entry, ok, err := readMatroskaElement(reader, offset, tracks.dataEnd)
-		if err != nil || !ok {
-			return 0, false, err
+	var number uint64
+	found := false
+	err := walkMatroskaElements(reader, tracks.dataStart, tracks.dataEnd, func(entry matroskaElement) (bool, error) {
+		if entry.id != matroskaTrackEntryID {
+			return true, nil
 		}
-		if entry.id == matroskaTrackEntryID {
-			numberElement, hasNumber, findErr := findMatroskaChild(reader, entry, matroskaTrackNumberID)
-			if findErr != nil {
-				return 0, false, findErr
-			}
-			typeElement, hasType, findErr := findMatroskaChild(reader, entry, matroskaTrackTypeID)
-			if findErr != nil {
-				return 0, false, findErr
-			}
-			if hasNumber && hasType {
-				trackType, readErr := readMatroskaUint(reader, typeElement)
-				if readErr != nil {
-					return 0, false, readErr
-				}
-				if trackType == 1 {
-					number, readErr := readMatroskaUint(reader, numberElement)
-					return number, readErr == nil, readErr
-				}
-			}
+		numberElement, hasNumber, err := findMatroskaChild(reader, entry, matroskaTrackNumberID)
+		if err != nil {
+			return false, err
 		}
-		offset = entry.dataEnd
-	}
-	return 0, false, nil
+		typeElement, hasType, err := findMatroskaChild(reader, entry, matroskaTrackTypeID)
+		if err != nil || !hasNumber || !hasType {
+			return err == nil, err
+		}
+		trackType, err := readMatroskaUint(reader, typeElement)
+		if err != nil || trackType != 1 {
+			return err == nil, err
+		}
+		number, err = readMatroskaUint(reader, numberElement)
+		found = err == nil
+		return false, err
+	})
+	return number, found, err
 }
 
 // findMatroskaCue returns the last cue for videoTrack at or before target, in
@@ -279,30 +261,22 @@ func findMatroskaVideoTrack(reader io.ReaderAt, tracks matroskaElement) (uint64,
 func findMatroskaCue(reader io.ReaderAt, cues matroskaElement, videoTrack, target uint64) (matroskaCue, bool, error) {
 	var selected matroskaCue
 	found := false
-	for offset := cues.dataStart; offset < cues.dataEnd; {
-		point, ok, err := readMatroskaElement(reader, offset, cues.dataEnd)
+	err := walkMatroskaElements(reader, cues.dataStart, cues.dataEnd, func(point matroskaElement) (bool, error) {
+		if point.id != matroskaCuePointID {
+			return true, nil
+		}
+		cue, ok, err := readMatroskaCuePoint(reader, point, videoTrack)
 		if err != nil || !ok {
-			return matroskaCue{}, false, err
+			return err == nil, err
 		}
-		if point.id == matroskaCuePointID {
-			cue, cueFound, parseErr := readMatroskaCuePoint(reader, point, videoTrack)
-			if parseErr != nil {
-				return matroskaCue{}, false, parseErr
-			}
-			if cueFound {
-				if !found {
-					selected = cue
-					found = true
-				}
-				if cue.time <= target && cue.time >= selected.time {
-					selected = cue
-				}
-				if cue.time > target && selected.time <= target {
-					break
-				}
-			}
+		if !found || (cue.time <= target && cue.time >= selected.time) {
+			selected, found = cue, true
 		}
-		offset = point.dataEnd
+		// Cues are in time order, so the first cue past target ends the search.
+		return cue.time <= target || selected.time > target, nil
+	})
+	if err != nil {
+		return matroskaCue{}, false, err
 	}
 	return selected, found, nil
 }
@@ -320,53 +294,59 @@ func readMatroskaCuePoint(reader io.ReaderAt, point matroskaElement, videoTrack 
 		return cue, false, err
 	}
 
-	for offset := point.dataStart; offset < point.dataEnd; {
-		positions, ok, readErr := readMatroskaElement(reader, offset, point.dataEnd)
-		if readErr != nil || !ok {
-			return cue, false, readErr
+	found := false
+	err = walkMatroskaElements(reader, point.dataStart, point.dataEnd, func(positions matroskaElement) (bool, error) {
+		if positions.id != matroskaCueTrackPositionsID {
+			return true, nil
 		}
-		if positions.id == matroskaCueTrackPositionsID {
-			trackElement, hasTrack, findErr := findMatroskaChild(reader, positions, matroskaCueTrackID)
-			if findErr != nil {
-				return cue, false, findErr
-			}
-			clusterElement, hasCluster, findErr := findMatroskaChild(reader, positions, matroskaCueClusterPositionID)
-			if findErr != nil {
-				return cue, false, findErr
-			}
-			if hasTrack && hasCluster {
-				cue.track, err = readMatroskaUint(reader, trackElement)
-				if err != nil {
-					return cue, false, err
-				}
-				if cue.track == videoTrack {
-					cue.clusterPosition, err = readMatroskaUint(reader, clusterElement)
-					if err != nil {
-						return cue, false, err
-					}
-					return cue, true, nil
-				}
-			}
+		trackElement, hasTrack, err := findMatroskaChild(reader, positions, matroskaCueTrackID)
+		if err != nil {
+			return false, err
 		}
-		offset = positions.dataEnd
-	}
-	return cue, false, nil
+		clusterElement, hasCluster, err := findMatroskaChild(reader, positions, matroskaCueClusterPositionID)
+		if err != nil || !hasTrack || !hasCluster {
+			return err == nil, err
+		}
+		cue.track, err = readMatroskaUint(reader, trackElement)
+		if err != nil || cue.track != videoTrack {
+			return err == nil, err
+		}
+		cue.clusterPosition, err = readMatroskaUint(reader, clusterElement)
+		found = err == nil
+		return false, err
+	})
+	return cue, found, err
 }
 
 // findMatroskaElement returns the first element with id among the elements
 // in [start, end), reading only the headers before it.
 func findMatroskaElement(reader io.ReaderAt, start, end int64, id uint64) (matroskaElement, bool, error) {
+	var found matroskaElement
+	ok := false
+	err := walkMatroskaElements(reader, start, end, func(element matroskaElement) (bool, error) {
+		if element.id == id {
+			found, ok = element, true
+		}
+		return !ok, nil
+	})
+	return found, ok, err
+}
+
+// walkMatroskaElements calls visit with each element in [start, end) in order,
+// reading only their headers, until visit returns false or an error.
+func walkMatroskaElements(reader io.ReaderAt, start, end int64, visit func(matroskaElement) (bool, error)) error {
 	for offset := start; offset < end; {
 		element, ok, err := readMatroskaElement(reader, offset, end)
 		if err != nil || !ok {
-			return matroskaElement{}, false, err
+			return err
 		}
-		if element.id == id {
-			return element, true, nil
+		more, err := visit(element)
+		if err != nil || !more {
+			return err
 		}
 		offset = element.dataEnd
 	}
-	return matroskaElement{}, false, nil
+	return nil
 }
 
 // findMatroskaChild returns parent's first child element with id.
