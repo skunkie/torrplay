@@ -179,34 +179,44 @@ export const TorrentPlayerDialog = ({
     const preloadRequest: PreloadRequest = { filePath: currentSelectedFile.path };
     const playbackPositionSeconds = getPlaybackPositionSeconds(currentTorrent.hash, currentSelectedFile.path);
     if (playbackPositionSeconds > 0) preloadRequest.playbackPositionSeconds = playbackPositionSeconds;
-    startPreload(currentTorrent.hash, preloadRequest)
-      .then(resp => {
-        if (!isMounted) return;
-        setPreloadProgress(current => Math.max(current, resp.progress || 0));
-        setCompletedBytes(current => Math.max(current, resp.completedBytes || 0));
-        setTargetBytes(current => Math.max(current, resp.targetBytes || 0));
-        setDownloadRate(resp.downloadRate || 0);
-        setActivePeers(resp.activePeers || 0);
-        setTotalPeers(resp.totalPeers || 0);
 
-        if (shouldStopWaitingForPreload(resp.status)) {
-          stopWaitingForPreload(resp.status);
+    // applyStatus shows a preload status, and reports whether the player has
+    // stopped waiting for the preload, because it ended, is queued, or is
+    // ready. Progress never moves backwards, but the target follows the
+    // server, which drops a resume window it cannot place.
+    const applyStatus = (status: PreloadResponse): boolean => {
+      const progress = status.progress || 0;
+      setPreloadProgress(current => Math.max(current, progress));
+      setCompletedBytes(current => Math.max(current, status.completedBytes || 0));
+      setTargetBytes(status.targetBytes || 0);
+      setDownloadRate(status.downloadRate || 0);
+      setActivePeers(status.activePeers || 0);
+      setTotalPeers(status.totalPeers || 0);
+
+      if (shouldStopWaitingForPreload(status.status)) {
+        stopWaitingForPreload(status.status);
+        preloadedFileRef.current = currentSelectedFile.path;
+        setIsPreloading(false);
+        return true;
+      }
+
+      if (status.status === 'ready' || progress >= 1) {
+        stopPreloadPolling();
+        setPreloadProgress(1.0);
+        setCompletedBytes(status.targetBytes || status.completedBytes || 0);
+        setTimeout(() => {
+          if (!isMounted) return;
           preloadedFileRef.current = currentSelectedFile.path;
           setIsPreloading(false);
-          return;
-        }
+        }, 300);
+        return true;
+      }
+      return false;
+    };
 
-        if (resp.status === 'ready' || (resp.progress && resp.progress >= 1)) {
-          setPreloadProgress(1.0);
-          setCompletedBytes(resp.targetBytes || resp.completedBytes || 0);
-          setTargetBytes(resp.targetBytes || 0);
-          setTimeout(() => {
-            if (!isMounted) return;
-            preloadedFileRef.current = currentSelectedFile.path;
-            setIsPreloading(false);
-          }, 300);
-          return;
-        }
+    startPreload(currentTorrent.hash, preloadRequest)
+      .then(resp => {
+        if (!isMounted || applyStatus(resp)) return;
 
         const playWithoutWaiting = () => {
           stopPreloadPolling();
@@ -223,32 +233,7 @@ export const TorrentPlayerDialog = ({
         const poll = async () => {
           try {
             const statusResp = await getPreload(currentTorrent.hash);
-            if (!isMounted) return;
-            const progress = statusResp.progress || 0;
-            setPreloadProgress(current => Math.max(current, progress));
-            setCompletedBytes(current => Math.max(current, statusResp.completedBytes || 0));
-            setTargetBytes(current => Math.max(current, statusResp.targetBytes || 0));
-            setDownloadRate(statusResp.downloadRate || 0);
-            setActivePeers(statusResp.activePeers || 0);
-            setTotalPeers(statusResp.totalPeers || 0);
-
-            if (shouldStopWaitingForPreload(statusResp.status)) {
-              stopWaitingForPreload(statusResp.status);
-              preloadedFileRef.current = currentSelectedFile.path;
-              setIsPreloading(false);
-              return;
-            }
-
-            if (statusResp.status === 'ready' || progress >= 1) {
-              stopPreloadPolling();
-              setPreloadProgress(1.0);
-              setTimeout(() => {
-                if (!isMounted) return;
-                preloadedFileRef.current = currentSelectedFile.path;
-                setIsPreloading(false);
-              }, 300);
-              return;
-            }
+            if (!isMounted || applyStatus(statusResp)) return;
 
             const completed = statusResp.completedBytes || 0;
             if (completed > lastCompletedBytes) {

@@ -2,13 +2,14 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { render } from '@testing-library/react';
+import { render, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 
 import { TorrentPlayerDialog } from '@/components/torrent-player-dialog';
 import type { VideoPlayerProps } from '@/components/video-player';
+import * as torrentsApi from '@/lib/api/torrents';
 import { savePlaybackPositionSeconds } from '@/lib/playback-position';
-import type { PreloadRequest, Torrent } from '@/lib/types/api';
+import type { PreloadRequest, PreloadResponse, Torrent } from '@/lib/types/api';
 
 const observedPreloadBadges = vi.hoisted(() => [] as VideoPlayerProps['preloadBadge'][]);
 const observedPositionKeys = vi.hoisted(() => [] as VideoPlayerProps['positionKey'][]);
@@ -131,4 +132,28 @@ it('preloads the head and tail only without a saved playback position', () => {
   );
 
   expect(startPreloadMock).toHaveBeenCalledWith('1234567890', { filePath: 'movie.mp4' });
+});
+
+it('shows the latest preload target when the server shrinks it', async () => {
+  // A resume window that cannot be placed leaves the head and tail only.
+  const status = (targetBytes: number): PreloadResponse => ({
+    fileIndex: 0, targetBytes, completedBytes: 100, progress: 100 / targetBytes,
+    status: 'preloading', activePeers: 1, downloadRate: 10, totalPeers: 1,
+  });
+  startPreloadMock.mockClear();
+  startPreloadMock.mockResolvedValueOnce(status(1000) as never);
+  const getPreloadSpy = vi.spyOn(torrentsApi, 'getPreload').mockResolvedValue(status(500));
+  observedPreloadBadges.length = 0;
+
+  render(
+    <TorrentPlayerDialog
+      torrent={makeTorrent()}
+      open={true}
+      onOpenChange={vi.fn()}
+      enablePreload={true}
+    />,
+  );
+
+  await waitFor(() => expect(observedPreloadBadges[observedPreloadBadges.length - 1]?.targetBytes).toBe(500));
+  getPreloadSpy.mockRestore();
 });
