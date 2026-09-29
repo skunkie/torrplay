@@ -559,6 +559,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
         onSelectSubtitleTrack={handleSelectSubtitleTrack}
         playlistNavigation={playlistNavigation}
         preloadBadge={preloadBadge}
+        mediaUnavailable={isPreloading || matroskaUnsupported}
+        keepVisible={!!playbackErrorMessage}
       />
     </MediaPlayer>
   );

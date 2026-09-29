@@ -31,11 +31,12 @@ const subtitleTracks: SubtitleTrackInfo[] = [
   { id: 'subs/english.srt', src: 'http://localhost/subs/english.srt', label: 'English (SRT)' },
 ];
 
-function renderControls() {
+function renderControls(props: Partial<React.ComponentProps<typeof VideoPlayerControls>> = {}) {
   return render(
     <MediaPlayer src='http://test-server/movie.mp4'>
       <MediaProvider />
       <VideoPlayerControls
+        {...props}
         onSeek={vi.fn()}
         isFullscreen={false}
         onToggleFullscreen={vi.fn()}
@@ -71,6 +72,39 @@ describe('VideoPlayerControls', () => {
     await userEvent.click(screen.getByRole('button', { name: /select audio track/i }));
     expect(screen.getByText(/Audio Tracks \(1\)/i)).toBeInTheDocument();
     expect(screen.queryByText(/Subtitles \(1\)/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('VideoPlayerControls visibility', () => {
+  // controlsLayer returns the layer holding every control, whose opacity
+  // shows or hides them.
+  const controlsLayer = () => screen.getByRole('button', { name: 'Close player' }).parentElement!;
+
+  it('offers closing, playlist navigation, and fullscreen at all times without a source', () => {
+    renderControls({ mediaUnavailable: true, onExit: vi.fn(), playlistNavigation: { onNext: vi.fn() } });
+
+    expect(controlsLayer()).toHaveClass('opacity-100');
+    for (const name of ['Close player', 'Previous video', 'Next video', 'Enter fullscreen']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
+    for (const name of [/play or pause/i, /seek backward/i, /seek forward/i, /mute or unmute/i, /select audio track/i]) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole('slider', { name: 'Seek' })).not.toBeInTheDocument();
+  });
+
+  it('keeps every control shown when asked, as for a source that failed to load', () => {
+    renderControls({ keepVisible: true, onExit: vi.fn() });
+
+    expect(controlsLayer()).toHaveClass('opacity-100');
+    expect(screen.getByRole('button', { name: /play or pause/i })).toBeInTheDocument();
+  });
+
+  it('leaves showing the controls to Vidstack otherwise', () => {
+    renderControls({ onExit: vi.fn() });
+
+    expect(controlsLayer()).toHaveClass('opacity-0');
+    expect(controlsLayer()).not.toHaveClass('opacity-100');
   });
 });
 
