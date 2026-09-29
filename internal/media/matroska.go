@@ -344,17 +344,7 @@ func findMatroskaTopLevel(reader io.ReaderAt, start, end int64, id uint64) (matr
 }
 
 func findMatroskaChild(reader io.ReaderAt, parent matroskaElement, id uint64) (matroskaElement, bool, error) {
-	for offset := parent.dataStart; offset < parent.dataEnd; {
-		element, ok, err := readMatroskaElement(reader, offset, parent.dataEnd)
-		if err != nil || !ok {
-			return matroskaElement{}, false, err
-		}
-		if element.id == id {
-			return element, true, nil
-		}
-		offset = element.dataEnd
-	}
-	return matroskaElement{}, false, nil
+	return findMatroskaTopLevel(reader, parent.dataStart, parent.dataEnd, id)
 }
 
 func readMatroskaElement(reader io.ReaderAt, offset, limit int64) (matroskaElement, bool, error) {

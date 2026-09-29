@@ -165,17 +165,29 @@ func readMP4Track(reader io.ReaderAt, trak mp4Box, movieScale uint32) (mp4Sample
 	for _, box := range boxes {
 		switch box.typ {
 		case "co64":
-			table.chunkOffsets, err = readMP4Offsets(reader, box, true)
+			table.chunkOffsets, err = readMP4Table(reader, box, 8, binary.BigEndian.Uint64)
 		case "stco":
-			table.chunkOffsets, err = readMP4Offsets(reader, box, false)
+			table.chunkOffsets, err = readMP4Table(reader, box, 4, func(entry []byte) uint64 {
+				return uint64(binary.BigEndian.Uint32(entry))
+			})
 		case "stsc":
-			table.stsc, err = readMP4SampleToChunk(reader, box)
+			table.stsc, err = readMP4Table(reader, box, 12, func(entry []byte) mp4SampleToChunk {
+				return mp4SampleToChunk{
+					firstChunk:      binary.BigEndian.Uint32(entry),
+					samplesPerChunk: binary.BigEndian.Uint32(entry[4:]),
+				}
+			})
 		case "stss":
-			table.stss, err = readMP4Uint32Table(reader, box)
+			table.stss, err = readMP4Table(reader, box, 4, binary.BigEndian.Uint32)
 		case "stsz":
 			table.uniformSize, table.sampleSizes, err = readMP4SampleSizes(reader, box)
 		case "stts":
-			table.stts, err = readMP4TimeToSample(reader, box)
+			table.stts, err = readMP4Table(reader, box, 8, func(entry []byte) mp4TimeToSample {
+				return mp4TimeToSample{
+					count: binary.BigEndian.Uint32(entry),
+					delta: binary.BigEndian.Uint32(entry[4:]),
+				}
+			})
 		}
 		if err != nil {
 			return table, true, err
@@ -368,96 +380,29 @@ func walkMP4Boxes(reader io.ReaderAt, start, end int64, visit func(mp4Box) bool)
 	return nil
 }
 
-func readMP4EntryCount(reader io.ReaderAt, box mp4Box, entrySize int64) (uint32, int64, error) {
+// readMP4Table reads the table of a full box, whose count of entrySize-byte
+// entries follows its version and flags, decoding each entry with decode. A
+// table larger than maxMP4TableBytes is refused before it is allocated or
+// read.
+func readMP4Table[T any](reader io.ReaderAt, box mp4Box, entrySize int64, decode func([]byte) T) ([]T, error) {
 	header := make([]byte, 8)
 	if err := readAtFull(reader, header, box.dataStart); err != nil {
-		return 0, 0, err
-	}
-	count := binary.BigEndian.Uint32(header[4:8])
-	bytes := int64(count) * entrySize
-	if bytes > maxMP4TableBytes {
-		return 0, 0, errInvalidContainer
-	}
-	if _, valid := checkedEnd(box.dataStart+8, bytes, box.dataEnd); !valid {
-		return 0, 0, errInvalidContainer
-	}
-	return count, box.dataStart + 8, nil
-}
-
-func readMP4Uint32Table(reader io.ReaderAt, box mp4Box) ([]uint32, error) {
-	count, offset, err := readMP4EntryCount(reader, box, 4)
-	if err != nil {
 		return nil, err
 	}
-	buffer := make([]byte, int(count)*4)
-	if err := readAtFull(reader, buffer, offset); err != nil {
+	size := int64(binary.BigEndian.Uint32(header[4:8])) * entrySize
+	if size > maxMP4TableBytes {
+		return nil, errInvalidContainer
+	}
+	if _, valid := checkedEnd(box.dataStart+8, size, box.dataEnd); !valid {
+		return nil, errInvalidContainer
+	}
+	buffer := make([]byte, size)
+	if err := readAtFull(reader, buffer, box.dataStart+8); err != nil {
 		return nil, err
 	}
-	values := make([]uint32, count)
-	for index := range values {
-		values[index] = binary.BigEndian.Uint32(buffer[index*4 : index*4+4])
-	}
-	return values, nil
-}
-
-func readMP4Offsets(reader io.ReaderAt, box mp4Box, is64Bit bool) ([]uint64, error) {
-	entrySize := int64(4)
-	if is64Bit {
-		entrySize = 8
-	}
-	count, offset, err := readMP4EntryCount(reader, box, entrySize)
-	if err != nil {
-		return nil, err
-	}
-	buffer := make([]byte, int64(count)*entrySize)
-	if err := readAtFull(reader, buffer, offset); err != nil {
-		return nil, err
-	}
-	values := make([]uint64, count)
-	for index := range values {
-		if is64Bit {
-			values[index] = binary.BigEndian.Uint64(buffer[index*8 : index*8+8])
-		} else {
-			values[index] = uint64(binary.BigEndian.Uint32(buffer[index*4 : index*4+4]))
-		}
-	}
-	return values, nil
-}
-
-func readMP4TimeToSample(reader io.ReaderAt, box mp4Box) ([]mp4TimeToSample, error) {
-	count, offset, err := readMP4EntryCount(reader, box, 8)
-	if err != nil {
-		return nil, err
-	}
-	buffer := make([]byte, int(count)*8)
-	if err := readAtFull(reader, buffer, offset); err != nil {
-		return nil, err
-	}
-	entries := make([]mp4TimeToSample, count)
+	entries := make([]T, size/entrySize)
 	for index := range entries {
-		entries[index] = mp4TimeToSample{
-			count: binary.BigEndian.Uint32(buffer[index*8 : index*8+4]),
-			delta: binary.BigEndian.Uint32(buffer[index*8+4 : index*8+8]),
-		}
-	}
-	return entries, nil
-}
-
-func readMP4SampleToChunk(reader io.ReaderAt, box mp4Box) ([]mp4SampleToChunk, error) {
-	count, offset, err := readMP4EntryCount(reader, box, 12)
-	if err != nil {
-		return nil, err
-	}
-	buffer := make([]byte, int(count)*12)
-	if err := readAtFull(reader, buffer, offset); err != nil {
-		return nil, err
-	}
-	entries := make([]mp4SampleToChunk, count)
-	for index := range entries {
-		entries[index] = mp4SampleToChunk{
-			firstChunk:      binary.BigEndian.Uint32(buffer[index*12 : index*12+4]),
-			samplesPerChunk: binary.BigEndian.Uint32(buffer[index*12+4 : index*12+8]),
-		}
+		entries[index] = decode(buffer[int64(index)*entrySize:])
 	}
 	return entries, nil
 }
@@ -490,46 +435,22 @@ func readMP4SampleSizes(reader io.ReaderAt, box mp4Box) (uint32, []uint32, error
 }
 
 func readMP4EditList(reader io.ReaderAt, box mp4Box) ([]mp4Edit, error) {
-	header := make([]byte, 8)
-	if err := readAtFull(reader, header, box.dataStart); err != nil {
+	version := make([]byte, 1)
+	if err := readAtFull(reader, version, box.dataStart); err != nil {
 		return nil, err
 	}
-	version := header[0]
-	count := binary.BigEndian.Uint32(header[4:8])
-	entrySize := int64(12)
-	if version == 1 {
-		entrySize = 20
-	}
-	if int64(count)*entrySize > maxMP4TableBytes {
-		return nil, errInvalidContainer
-	}
-	if _, valid := checkedEnd(box.dataStart+8, int64(count)*entrySize, box.dataEnd); !valid {
-		return nil, errInvalidContainer
-	}
-	buffer := make([]byte, int64(count)*entrySize)
-	if err := readAtFull(reader, buffer, box.dataStart+8); err != nil {
-		return nil, err
-	}
-	edits := make([]mp4Edit, count)
-	for index := range edits {
-		entry := buffer[int64(index)*entrySize:]
-		if version == 1 {
-			mediaTime := int64(binary.BigEndian.Uint32(entry[8:12])) << 32
-			mediaTime |= int64(binary.BigEndian.Uint32(entry[12:16]))
-			edits[index] = mp4Edit{
-				duration:  binary.BigEndian.Uint64(entry[:8]),
-				mediaTime: mediaTime,
+	if version[0] == 1 {
+		return readMP4Table(reader, box, 20, func(entry []byte) mp4Edit {
+			return mp4Edit{
+				duration:  binary.BigEndian.Uint64(entry),
+				mediaTime: int64(binary.BigEndian.Uint64(entry[8:])), //nolint:gosec // The media time is a signed 64-bit field.
 			}
-		} else {
-			mediaTime := int64(binary.BigEndian.Uint32(entry[4:8]))
-			if mediaTime >= 1<<31 {
-				mediaTime -= 1 << 32
-			}
-			edits[index] = mp4Edit{
-				duration:  uint64(binary.BigEndian.Uint32(entry[:4])),
-				mediaTime: mediaTime,
-			}
+		})
+	}
+	return readMP4Table(reader, box, 12, func(entry []byte) mp4Edit {
+		return mp4Edit{
+			duration:  uint64(binary.BigEndian.Uint32(entry)),
+			mediaTime: int64(int32(binary.BigEndian.Uint32(entry[4:]))), //nolint:gosec // The media time is a signed 32-bit field.
 		}
-	}
-	return edits, nil
+	})
 }
