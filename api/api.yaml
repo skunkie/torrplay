@@ -2342,7 +2342,7 @@ components:
         target_bytes:
           type: integer
           format: int64
-          description: Target buffer size in bytes for head and tail preloading.
+          description: Size in bytes of the file data the preload caches, its head and tail and, for a preload at a playback position, the data there. A resume window that cannot be placed leaves the head and tail only.
           minimum: 0
           example: 31457280
         total_peers:

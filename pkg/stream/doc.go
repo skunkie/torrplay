@@ -28,11 +28,11 @@
 // where the player stopped. A player that fetches a file in consecutive range
 // requests, or reconnects after a pause, then finds those pieces cached by the
 // time its next request's reader reaches them. The next reader of the same
-// file closes it after taking over its readahead window, and a reader released
-// while another reader of its file is active closes at once, so a file has at
-// most one lingering reader. Other viewers' readers never close it, because
-// the engine is shared; readers still lingering after LingerTimeout are
-// closed. Readers of a dropped torrent close on release, or within a second
+// file closes it once that reader has its own readahead window, and a reader
+// released while another reader of its file is active closes at once, so a
+// file has at most one lingering reader. Other viewers' readers never close
+// it, because the engine is shared; readers still lingering after
+// LingerTimeout are closed. Readers of a dropped torrent close on release, or within a second
 // when the torrent is dropped while they linger. OnStreamingChange reports when
 // the pool gains its first reader and when its last reader, lingering ones
 // included, closes.

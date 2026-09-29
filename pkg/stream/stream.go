@@ -326,7 +326,7 @@ type streamReader struct {
 	// acquiring the stream's lock.
 	lastOffset int64
 	lastPiece  int64
-	readahead  int64 // current readahead in bytes (updated by refreshReadaheadLocked and Acquire)
+	readahead  int64 // current readahead in bytes (updated by Acquire, refreshReadaheadLocked, and the ramp in updateReaderPosition)
 	// runStart is the offset where the reader's current sequential reading
 	// began, at its first read or its last seek, or -1 before its first read.
 	runStart int64
@@ -430,7 +430,8 @@ func New(cfg Config) *Pool {
 // with cancellation tied to ctx. The caller MUST call the returned release function
 // (typically via defer) when done reading. The release function is safe to call
 // multiple times. MemoryStorage readers share the budget configured by SetReadaheadBudget;
-// FileStorage readers use Config.FileReadaheadBytes. Acquire returns an error
+// FileStorage readers use Config.FileReadaheadBytes. With Config.ReadaheadRampBytes,
+// a reader ramps up to that readahead as it reads. Acquire returns an error
 // for an invalid file or mode, or after the pool has been closed.
 func (p *Pool) Acquire(ctx context.Context, file *torrent.File, mode StorageMode) (io.ReadSeeker, ReleaseFunc, error) {
 	if file == nil || file.Torrent() == nil {
