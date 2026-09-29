@@ -1147,11 +1147,11 @@ func (p *Pool) cachedPreloadExpiredLocked(pl *preload, now time.Time) bool {
 
 // expirePreloads removes preloads whose torrent closed, preloads holding a
 // cache whose file has not been read within the ready TTL, read preloads whose
-// file has no reader left, and failed or evicted preloads that have reported their final
-// state for the ready TTL. It fails running preloads whose torrent completed
-// no data within the stall timeout. A preload whose own pieces wait behind
-// other viewers' playback of the torrent is not stalled, because the engine is
-// shared: it downloads with the bandwidth playback leaves.
+// file has no reader left, and failed or evicted preloads that have reported
+// their final state for the ready TTL. It fails running preloads whose torrent
+// completed no data within the stall timeout. A preload whose own pieces wait
+// behind other viewers' playback of the torrent is not stalled, because the
+// engine is shared: it downloads with the bandwidth playback leaves.
 func (p *Pool) expirePreloads() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
