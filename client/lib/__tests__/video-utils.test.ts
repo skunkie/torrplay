@@ -2,9 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+  canPlayMatroska,
   formatSubtitleLabel,
   getInitialVideoFile,
   getSubtitleFiles,
@@ -13,6 +14,7 @@ import {
   getSubtitleType,
   getVideoFiles,
   getVideoType,
+  isMatroskaFile,
 } from '../video-utils';
 
 describe('video-utils', () => {
@@ -207,6 +209,26 @@ describe('video-utils', () => {
     it('returns empty array when video or files is null/empty', () => {
       expect(getSubtitleTracksForVideo(null, files, 'fakehash')).toEqual([]);
       expect(getSubtitleTracksForVideo({ name: 'm.mkv', path: 'm.mkv', length: 100 }, [], 'fakehash')).toEqual([]);
+    });
+  });
+
+  describe('isMatroskaFile', () => {
+    it('matches MKV file names in any case', () => {
+      expect(isMatroskaFile('Movie.MKV')).toBe(true);
+      expect(isMatroskaFile('movie.webm')).toBe(false);
+      expect(isMatroskaFile(undefined)).toBe(false);
+    });
+  });
+
+  describe('canPlayMatroska', () => {
+    it('follows what the video element reports for Matroska', () => {
+      const canPlayType = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType');
+      canPlayType.mockReturnValue('');
+      expect(canPlayMatroska()).toBe(false);
+      canPlayType.mockReturnValue('maybe');
+      expect(canPlayMatroska()).toBe(true);
+      expect(canPlayType).toHaveBeenCalledWith('video/x-matroska');
+      canPlayType.mockRestore();
     });
   });
 });

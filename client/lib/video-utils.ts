@@ -60,6 +60,15 @@ export const getVideoType = (filename?: string): VideoMimeType | undefined => {
   return undefined;
 };
 
+// isMatroskaFile reports whether filename names a Matroska (MKV) file.
+export const isMatroskaFile = (filename?: string): boolean =>
+  !!filename && filename.toLowerCase().endsWith('.mkv');
+
+// canPlayMatroska reports whether the browser's video element may play a
+// Matroska file. Safari cannot play Matroska and reports so.
+export const canPlayMatroska = (): boolean =>
+  typeof document !== 'undefined' && document.createElement('video').canPlayType('video/x-matroska') !== '';
+
 export const getSubtitleType = (filename?: string): 'vtt' | 'srt' | 'ssa' | 'ass' | undefined => {
   if (!filename) return undefined;
   const lower = filename.toLowerCase();
