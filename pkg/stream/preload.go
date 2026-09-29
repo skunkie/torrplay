@@ -81,7 +81,7 @@ type PreloadStatus struct {
 var ErrPreloadDoesNotFit = errors.New("preload does not fit the memory limit")
 
 const (
-	defaultPreloadReadyTTL     = 5 * time.Minute
+	defaultPreloadReadyTTL     = 10 * time.Second
 	defaultPreloadStallTimeout = 2 * time.Minute
 
 	// maxConcurrentPreloads caps preloads that are downloading. Preloads share

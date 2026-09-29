@@ -249,7 +249,7 @@ func TestPool_Preload(t *testing.T) {
 		_, err := pool.Preload(file, MemoryStorage)
 		require.NoError(t, err)
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
-		readyAt := time.Now().Add(-time.Minute)
+		readyAt := time.Now().Add(-defaultPreloadReadyTTL / 2)
 		pool.mu.Lock()
 		pool.preloads[to.InfoHash()].readyAt = readyAt
 		pool.mu.Unlock()

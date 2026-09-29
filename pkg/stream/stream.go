@@ -101,10 +101,10 @@ type Config struct {
 	// PreloadReadyTTL is how long a preload whose file has not been read stays
 	// cached after it first became ready, including while it waits to download
 	// a lost piece again, and how long a failed or evicted preload keeps
-	// reporting its final state. A preload whose file was read is released once the
-	// file has no reader left, including a lingering one, whatever the TTL.
-	// Zero defaults to 5 minutes. Negative values keep unread and finished
-	// preloads until they are replaced, cancelled, or evicted.
+	// reporting its final state. A preload whose file was read is released
+	// once the file has no reader left, including a lingering one, whatever
+	// the TTL. Zero defaults to 10 seconds. Negative values keep unread and
+	// finished preloads until they are replaced, cancelled, or evicted.
 	PreloadReadyTTL time.Duration
 	// PreloadStallTimeout is how long a running preload may go while neither
 	// it nor anything else of its torrent completes data before it fails,
