@@ -158,9 +158,10 @@ interface VideoPlayerControlsProps {
   preloadBadge?: PreloadBadgeInfo | null,
   // mediaUnavailable reports that the player has no source, while preloading
   // or for a file it cannot play, so only closing, playlist navigation, and
-  // fullscreen are offered. keepVisible keeps the controls shown, as for a
-  // source that failed to load. Vidstack shows its controls only once media
-  // can play, so without either they would stay hidden.
+  // fullscreen are offered. keepVisible keeps the controls shown for a source
+  // that failed to load, without the play and seek buttons, which cannot
+  // reload it and would cover the error message. Vidstack shows its controls
+  // only once media can play, so without either they would stay hidden.
   mediaUnavailable?: boolean,
   keepVisible?: boolean
 }
@@ -252,7 +253,7 @@ export function VideoPlayerControls({
             <span className='sr-only'>Close player</span>
           </button>
         )}
-        {!mediaUnavailable && (
+        {!mediaUnavailable && !keepVisible && (
           <div className='absolute inset-0 flex w-full items-center justify-center gap-x-2 sm:gap-x-4 group-data-[fullscreen]:gap-x-3 sm:group-data-[fullscreen]:gap-x-12'>
             <button
               type='button'

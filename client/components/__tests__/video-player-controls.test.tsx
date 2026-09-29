@@ -93,11 +93,16 @@ describe('VideoPlayerControls visibility', () => {
     expect(screen.queryByRole('slider', { name: 'Seek' })).not.toBeInTheDocument();
   });
 
-  it('keeps every control shown when asked, as for a source that failed to load', () => {
+  it('keeps the controls shown without the play and seek buttons for a source that failed to load', () => {
     renderControls({ keepVisible: true, onExit: vi.fn() });
 
     expect(controlsLayer()).toHaveClass('opacity-100');
-    expect(screen.getByRole('button', { name: /play or pause/i })).toBeInTheDocument();
+    // They cannot reload the source and would cover the centered error message.
+    for (const name of [/play or pause/i, /seek backward/i, /seek forward/i]) {
+      expect(screen.queryByRole('button', { name })).not.toBeInTheDocument();
+    }
+    expect(screen.getByRole('button', { name: /select audio track/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Enter fullscreen' })).toBeInTheDocument();
   });
 
   it('leaves showing the controls to Vidstack otherwise', () => {
