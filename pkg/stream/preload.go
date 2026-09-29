@@ -63,8 +63,10 @@ type PreloadStatus struct {
 	FileIndex int
 	// FilePath is the preloaded file's path within its torrent.
 	FilePath string
-	// PlaybackPosition is the playback position whose data the preload's resume
-	// window caches, or zero for a preload without one.
+	// PlaybackPosition is the playback position the preload plans a resume
+	// window at, or zero for a preload without one. It stays set when the
+	// position cannot be resolved and the preload keeps its head and tail
+	// only.
 	PlaybackPosition time.Duration
 	// State is the preload's lifecycle state.
 	State PreloadState
@@ -188,9 +190,10 @@ func (r preloadReservation) protection() storage.Protection {
 }
 
 // Preload starts caching the head and tail of file, replacing any preload of
-// another file of the same torrent, and returns the preload's status. A
-// request for the file already being preloaded, or already cached, returns
-// that preload unchanged. Memory-storage preloads reserve their whole pieces
+// another file of the same torrent, or of the same file at a resume position,
+// and returns the preload's status. A request for the file already being
+// preloaded, or already cached, without a resume window returns that preload
+// unchanged. Memory-storage preloads reserve their whole pieces
 // within the preload share of the readahead budget; file-storage preloads are
 // written to disk and reserve nothing. Preloads never pause for playback:
 // playback readers claim and read ahead at higher priorities, so preloads

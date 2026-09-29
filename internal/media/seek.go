@@ -18,8 +18,9 @@ import (
 var errInvalidContainer = errors.New("invalid media container")
 
 // ResolvePlaybackOffset resolves a presentation timestamp to a byte offset by
-// reading the media container's own seek index. Unsupported or unindexed files
-// return ok=false so callers can retain their ordinary beginning preload.
+// reading the media container's own seek index. It reports ok=false for an
+// unsupported or unindexed file, for which callers preload the file's head and
+// tail only.
 func ResolvePlaybackOffset(reader io.ReaderAt, size int64, filePath string, positionSeconds float64) (offset int64, ok bool, err error) {
 	if reader == nil || size <= 0 || positionSeconds <= 0 || math.IsNaN(positionSeconds) || math.IsInf(positionSeconds, 0) {
 		return 0, false, nil
@@ -102,6 +103,9 @@ func scaleToUnits(value, unitsPerValue float64) uint64 {
 	return uint64(scaled)
 }
 
+// readAtFull fills buffer from reader at offset, tolerating io.EOF only when
+// the buffer is full. A reader that makes no progress fails with
+// io.ErrNoProgress.
 func readAtFull(reader io.ReaderAt, buffer []byte, offset int64) error {
 	read := 0
 	for read < len(buffer) {
@@ -120,6 +124,8 @@ func readAtFull(reader io.ReaderAt, buffer []byte, offset int64) error {
 	return nil
 }
 
+// checkedEnd returns start+size, or false when either is negative or the sum
+// would pass limit.
 func checkedEnd(start, size, limit int64) (int64, bool) {
 	if start < 0 || size < 0 || start > limit || size > limit-start {
 		return 0, false

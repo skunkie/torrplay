@@ -470,7 +470,7 @@ paths:
       tags:
         - v1
       summary: Start or update torrent preloading.
-      description: Declares the active file being preloaded for immediate streaming. Idempotent if called repeatedly for the same file.
+      description: Declares the active file being preloaded for immediate streaming. Idempotent if called repeatedly for the same file and playback position.
       operationId: putTorrentPreload
       parameters:
         - $ref: "#/components/parameters/Hash"

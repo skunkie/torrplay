@@ -42,6 +42,9 @@ const maxMatroskaCuesBytes = 32 << 20
 // maxMatroskaSeekHeads bounds the chain of SeekHeads followed from the first.
 const maxMatroskaSeekHeads = 4
 
+// matroskaElement is an EBML element: its ID, the file offset of its header,
+// and the file range [dataStart, dataEnd) of its data. An element of unknown
+// size ends at the end of its parent.
 type matroskaElement struct {
 	dataEnd   int64
 	dataStart int64
@@ -49,12 +52,19 @@ type matroskaElement struct {
 	offset    int64
 }
 
+// matroskaCue is a CuePoint's time, in timestamp-scale units, and the track
+// and segment-relative position of the Cluster it points to.
 type matroskaCue struct {
 	clusterPosition uint64
 	time            uint64
 	track           uint64
 }
 
+// resolveMatroskaOffset resolves positionSeconds to the file offset of the
+// Cluster whose Cue for the first video track is the last at or before it.
+// It finds the segment's Info, Tracks, and Cues before its first Cluster or
+// through its SeekHead, and reports false when Tracks, a video track, or Cues
+// are missing. Without Info, the default timestamp scale applies.
 func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float64) (int64, bool, error) {
 	segment, found, err := findMatroskaElement(reader, 0, size, matroskaSegmentID)
 	if err != nil || !found {
@@ -130,6 +140,11 @@ func resolveMatroskaOffset(reader io.ReaderAt, size int64, positionSeconds float
 	return resolved, true, nil
 }
 
+// scanMatroskaSegment returns the segment's top-level elements before its
+// first Cluster, keyed by ID, and the segment-relative positions its
+// SeekHeads list, following a SeekHead listed by another up to
+// maxMatroskaSeekHeads times. It never reads past the first Cluster, so the
+// file's clusters are not walked.
 func scanMatroskaSegment(reader io.ReaderAt, segment matroskaElement) (map[uint64]matroskaElement, map[uint64]uint64, error) {
 	elements := make(map[uint64]matroskaElement)
 	seekTargets := make(map[uint64]uint64)
@@ -190,6 +205,8 @@ func scanMatroskaSegment(reader io.ReaderAt, segment matroskaElement) (map[uint6
 	return elements, seekTargets, nil
 }
 
+// readMatroskaSeekHead returns the segment-relative position of each element
+// a SeekHead lists, keyed by element ID.
 func readMatroskaSeekHead(reader io.ReaderAt, seekHead matroskaElement) (map[uint64]uint64, error) {
 	targets := make(map[uint64]uint64)
 	for offset := seekHead.dataStart; offset < seekHead.dataEnd; {
@@ -223,6 +240,8 @@ func readMatroskaSeekHead(reader io.ReaderAt, seekHead matroskaElement) (map[uin
 	return targets, nil
 }
 
+// findMatroskaVideoTrack returns the track number of the first video track
+// in Tracks, or false when there is none.
 func findMatroskaVideoTrack(reader io.ReaderAt, tracks matroskaElement) (uint64, bool, error) {
 	for offset := tracks.dataStart; offset < tracks.dataEnd; {
 		entry, ok, err := readMatroskaElement(reader, offset, tracks.dataEnd)
@@ -254,6 +273,9 @@ func findMatroskaVideoTrack(reader io.ReaderAt, tracks matroskaElement) (uint64,
 	return 0, false, nil
 }
 
+// findMatroskaCue returns the last cue for videoTrack at or before target, in
+// timestamp-scale units, or the first cue when all are after it. It reports
+// false when no cue is for the track.
 func findMatroskaCue(reader io.ReaderAt, cues matroskaElement, videoTrack, target uint64) (matroskaCue, bool, error) {
 	var selected matroskaCue
 	found := false
@@ -285,6 +307,8 @@ func findMatroskaCue(reader io.ReaderAt, cues matroskaElement, videoTrack, targe
 	return selected, found, nil
 }
 
+// readMatroskaCuePoint returns a CuePoint's time and its position for
+// videoTrack, or false when the point has no position for the track.
 func readMatroskaCuePoint(reader io.ReaderAt, point matroskaElement, videoTrack uint64) (matroskaCue, bool, error) {
 	var cue matroskaCue
 	timeElement, hasTime, err := findMatroskaChild(reader, point, matroskaCueTimeID)
@@ -329,6 +353,8 @@ func readMatroskaCuePoint(reader io.ReaderAt, point matroskaElement, videoTrack 
 	return cue, false, nil
 }
 
+// findMatroskaElement returns the first element with id among the elements
+// in [start, end), reading only the headers before it.
 func findMatroskaElement(reader io.ReaderAt, start, end int64, id uint64) (matroskaElement, bool, error) {
 	for offset := start; offset < end; {
 		element, ok, err := readMatroskaElement(reader, offset, end)
@@ -343,10 +369,14 @@ func findMatroskaElement(reader io.ReaderAt, start, end int64, id uint64) (matro
 	return matroskaElement{}, false, nil
 }
 
+// findMatroskaChild returns parent's first child element with id.
 func findMatroskaChild(reader io.ReaderAt, parent matroskaElement, id uint64) (matroskaElement, bool, error) {
 	return findMatroskaElement(reader, parent.dataStart, parent.dataEnd, id)
 }
 
+// readMatroskaElement reads the header of the element at offset, which must
+// end by limit. It reports false at or past limit and errInvalidContainer for
+// a malformed header or an element that overruns limit.
 func readMatroskaElement(reader io.ReaderAt, offset, limit int64) (matroskaElement, bool, error) {
 	if offset < 0 || offset >= limit {
 		return matroskaElement{}, false, nil
@@ -382,6 +412,10 @@ func readMatroskaElement(reader io.ReaderAt, offset, limit int64) (matroskaEleme
 	return matroskaElement{dataEnd: dataEnd, dataStart: dataStart, id: id, offset: offset}, true, nil
 }
 
+// readMatroskaVint decodes the variable-length integer at the start of
+// buffer: an element ID, or with isSize a data size without its length
+// marker. It returns the value, its length in bytes, whether a size is the
+// reserved unknown size, and false when buffer holds no valid integer.
 func readMatroskaVint(buffer []byte, isSize bool) (uint64, int, bool, bool) {
 	if len(buffer) == 0 || buffer[0] == 0 {
 		return 0, 0, false, false
@@ -410,6 +444,7 @@ func readMatroskaVint(buffer []byte, isSize bool) (uint64, int, bool, bool) {
 	return value, length, unknown, true
 }
 
+// readMatroskaUint reads an unsigned integer element of up to eight bytes.
 func readMatroskaUint(reader io.ReaderAt, element matroskaElement) (uint64, error) {
 	size := element.dataEnd - element.dataStart
 	if size <= 0 || size > 8 {

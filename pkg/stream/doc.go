@@ -8,7 +8,8 @@
 //
 // It multiplexes multiple concurrent readers per torrent file, keeps a released
 // reader reading ahead briefly for the player's next request, caches the head
-// and tail of files before they are played, and coordinates with the storage
+// and tail of files, and the data where playback resumes, before they are
+// played, and coordinates with the storage
 // layer via the ProtectionRegistry interface to protect actively-read and
 // preloaded pieces from eviction.
 //
@@ -43,9 +44,10 @@
 // tail boundaries when they fit the budget, through the ProtectionRegistry
 // interface; file-storage pieces live on disk and need no protection. When the
 // reader is released, its protection is cleared immediately, so a lingering
-// reader's pieces are eviction candidates again. A seek is reported when the next read starts, so
-// the destination is protected before the read can block, while positions that
-// are never read, such as the size probe of http.ServeContent, are skipped.
+// reader's pieces are eviction candidates again. A seek is reported when the
+// next read starts, so the destination is protected before the read can
+// block, while positions that are never read, such as the size probe of
+// http.ServeContent, are skipped.
 //
 // # Piece-Priority Bumping
 //
@@ -88,8 +90,8 @@
 //
 // Preload caches the head and tail of a file, where containers keep their
 // metadata and seek indexes, so its playback starts without waiting for them.
-// A torrent has at most one preload, and a request for another of its files
-// replaces it. Preloads never pause for playback, because the engine is shared
+// A torrent has at most one preload, and a request for another of its files,
+// or for the same file at another resume position, replaces it. Preloads never pause for playback, because the engine is shared
 // by every viewer: they have no reader, claim their pieces at
 // PiecePriorityHigh, and a watcher marks them ready once every piece is
 // complete. At most two preloads download at a time, in request order.

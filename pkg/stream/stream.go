@@ -89,7 +89,9 @@ type Config struct {
 	// Logger receives pool lifecycle and diagnostic messages. Nil uses slog.Default.
 	Logger *slog.Logger
 	// LingerTimeout is how long a released reader stays open, still reading
-	// ahead, for its player's next request. Zero defaults to 30 seconds.
+	// ahead, for its player's next request, and how long its reading is
+	// remembered for the readahead ramp of the next reader of its file. Zero
+	// defaults to 30 seconds.
 	LingerTimeout time.Duration
 	// OnStreamingChange, when set, is called with true when the pool gains its
 	// first reader, active or lingering, and with false when its last reader
@@ -198,6 +200,8 @@ type streamReadSeeker struct {
 	seekPending bool
 }
 
+// newStreamReadSeeker returns a stream of reader, a file of length bytes,
+// that reports each position it reads from to onPosition.
 func newStreamReadSeeker(reader io.ReadSeeker, length int64, onPosition func(int64)) *streamReadSeeker {
 	return &streamReadSeeker{
 		buf:        bufio.NewReaderSize(reader, readBufferSize),
