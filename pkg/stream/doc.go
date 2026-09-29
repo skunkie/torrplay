@@ -100,7 +100,8 @@
 // torrent reader, which downloads the pieces holding the container's seek
 // index first. The window is placed there, starting an eighth of its size
 // before the offset, and downloads with the head and tail; the preload is not
-// ready until it completes. When the position cannot be resolved,
+// ready until it completes. Index pieces the lookup read outside the head and
+// tail are kept as well, each taking a piece from the window. When the position cannot be resolved,
 // the preload is ready with its head and tail.
 //
 // A memory-storage preload reserves its whole pieces in the preload share of

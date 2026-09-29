@@ -175,6 +175,9 @@ type preloadReservation struct {
 	// windowEnd of a placed resume window is protected as well.
 	hasWindow              bool
 	windowStart, windowEnd int
+	// index holds the seek index pieces outside the head and tail that a
+	// placed resume window was resolved from, protected as well.
+	index []int
 	// id identifies the reservation's protection in the registry. It is drawn
 	// from the reader ID sequence, so it never collides with a reader's.
 	id uint64
@@ -188,6 +191,9 @@ func (r preloadReservation) protection() storage.Protection {
 	}
 	if r.hasWindow {
 		active = append(active, storage.PieceRange{Start: r.windowStart, End: r.windowEnd})
+	}
+	for _, piece := range r.index {
+		active = append(active, storage.PieceRange{Start: piece, End: piece})
 	}
 	return storage.Protection{Active: active}
 }
@@ -495,11 +501,12 @@ func (pl *preload) awaitingWindow() bool {
 
 // resolveResumeOffset resolves the preload's playback position to a
 // file-relative byte offset through Config.SeekIndex, reading the file with a
-// torrent reader that stops when ctx ends. It returns false when the pool has
-// no SeekIndex or the position cannot be resolved.
-func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, bool) {
+// torrent reader that stops when ctx ends. It also returns the pieces the seek
+// index was read from. It returns false when the pool has no SeekIndex or the
+// position cannot be resolved.
+func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, []int, bool) {
 	if p.cfg.SeekIndex == nil {
-		return 0, false
+		return 0, nil, false
 	}
 	reader := pl.file.NewReader()
 	defer func() { _ = reader.Close() }()
@@ -507,7 +514,8 @@ func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, boo
 	// The index is read in small scattered pieces, which a readahead would
 	// only add downloads to.
 	reader.SetReadahead(0)
-	offset, ok, err := p.cfg.SeekIndex(&readerAt{reader: reader}, pl.file, pl.position)
+	indexReader := &readerAt{file: pl.file, pieces: make(map[int]struct{}), reader: reader}
+	offset, ok, err := p.cfg.SeekIndex(indexReader, pl.file, pl.position)
 	if err != nil {
 		if ctx.Err() == nil {
 			p.logger.Debug("failed to resolve preload playback position",
@@ -516,13 +524,16 @@ func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, boo
 				slog.Duration("position", pl.position),
 				slog.Any("err", err))
 		}
-		return 0, false
+		return 0, nil, false
 	}
-	return offset, ok && offset >= 0 && offset < pl.file.Length()
+	return offset, slices.Sorted(maps.Keys(indexReader.pieces)), ok && offset >= 0 && offset < pl.file.Length()
 }
 
-// readerAt reads at offsets of a torrent reader by seeking it first.
+// readerAt reads at offsets of a torrent reader of file by seeking it first,
+// and records the torrent pieces it reads.
 type readerAt struct {
+	file   *torrent.File
+	pieces map[int]struct{}
 	reader torrent.Reader
 }
 
@@ -532,6 +543,11 @@ func (r *readerAt) ReadAt(b []byte, off int64) (int, error) {
 		return 0, err
 	}
 	n, err := io.ReadFull(r.reader, b)
+	if pieceLength := filePieceLength(r.file); n > 0 && pieceLength > 0 {
+		for index := (r.file.Offset() + off) / pieceLength; index*pieceLength < r.file.Offset()+off+int64(n); index++ {
+			r.pieces[int(index)] = struct{}{}
+		}
+	}
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		// A read cut short by the end of the file reports io.EOF, as
 		// io.ReaderAt requires.
@@ -541,25 +557,16 @@ func (r *readerAt) ReadAt(b []byte, off int64) (int, error) {
 }
 
 // placeWindowLocked places a preload's resume window at the file-relative
-// offset, or records that it has none when ok is false. The window takes the
-// preload's windowPieces whole pieces, starts an eighth of its size before
-// offset, and stays between the head and the tail. A placed window's pieces
-// join the preload's pieces, claims, and protection. Must be called with p.mu
-// held.
-func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) {
+// offset, or records that it has none when ok is false. The seek index pieces
+// the offset was resolved from that lie outside the head and tail are kept as
+// they are, each taking a piece from the window. The window takes the rest of
+// the preload's windowPieces whole pieces, starts an eighth of its size before
+// offset, and stays between the head and the tail. The window's and the index
+// pieces join the preload's pieces, claims, and protection. Must be called
+// with p.mu held.
+func (p *Pool) placeWindowLocked(pl *preload, offset int64, indexPieces []int, ok bool) {
 	pl.windowPlaced = true
-	pieceLength := max(pl.file.Torrent().Info().PieceLength, 1)
-	fileOffset := pl.file.Offset()
-	windowBytes := int64(pl.windowPieces) * pieceLength
-	ceiling := pl.windowCeiling()
-	if ok {
-		start := max(min(offset-windowBytes/8, ceiling-windowBytes), pl.headEnd)
-		startPiece := (fileOffset + start) / pieceLength
-		pl.windowStart = max(startPiece*pieceLength-fileOffset, pl.headEnd)
-		pl.windowEnd = min((startPiece+int64(pl.windowPieces))*pieceLength-fileOffset, ceiling)
-	}
-	if pl.windowEnd <= pl.windowStart {
-		pl.windowStart, pl.windowEnd = 0, 0
+	if !ok {
 		pl.targetBytes = pl.rangeBytes()
 		p.logger.Debug("preload has no resume window",
 			slog.String("hash", pl.infoHash.HexString()),
@@ -567,19 +574,48 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) {
 			slog.Duration("position", pl.position))
 		return
 	}
-	pl.targetBytes = pl.rangeBytes()
-	windowStartPiece := int((fileOffset + pl.windowStart) / pieceLength)
-	windowEndPiece := int((fileOffset + pl.windowEnd - 1) / pieceLength)
-	var added []int
-	for index := windowStartPiece; index <= windowEndPiece; index++ {
-		if _, found := slices.BinarySearch(pl.pieces, index); !found {
-			added = append(added, index)
+	var index []int
+	for _, piece := range indexPieces {
+		if _, found := slices.BinarySearch(pl.pieces, piece); !found {
+			index = append(index, piece)
 		}
 	}
+	pieceLength := max(pl.file.Torrent().Info().PieceLength, 1)
+	fileOffset := pl.file.Offset()
+	windowPieces := max(pl.windowPieces-len(index), 0)
+	windowBytes := int64(windowPieces) * pieceLength
+	ceiling := pl.windowCeiling()
+	if windowPieces > 0 {
+		start := max(min(offset-windowBytes/8, ceiling-windowBytes), pl.headEnd)
+		startPiece := (fileOffset + start) / pieceLength
+		if offset < ceiling {
+			// Aligning the start down to a whole piece must not leave out the
+			// piece the offset lies in, unless the tail holds it.
+			startPiece = max(startPiece, (fileOffset+offset)/pieceLength-int64(windowPieces)+1)
+		}
+		pl.windowStart = max(startPiece*pieceLength-fileOffset, pl.headEnd)
+		pl.windowEnd = min((startPiece+int64(windowPieces))*pieceLength-fileOffset, ceiling)
+	}
+	if pl.windowEnd <= pl.windowStart {
+		pl.windowStart, pl.windowEnd = 0, 0
+	}
+	pl.targetBytes = pl.rangeBytes()
+	added := index
+	if pl.windowEnd > pl.windowStart {
+		windowStartPiece := int((fileOffset + pl.windowStart) / pieceLength)
+		windowEndPiece := int((fileOffset + pl.windowEnd - 1) / pieceLength)
+		for piece := windowStartPiece; piece <= windowEndPiece; piece++ {
+			_, held := slices.BinarySearch(pl.pieces, piece)
+			if !held && !slices.Contains(index, piece) {
+				added = append(added, piece)
+			}
+		}
+		pl.reservation.hasWindow = true
+		pl.reservation.windowStart, pl.reservation.windowEnd = windowStartPiece, windowEndPiece
+	}
+	pl.reservation.index = index
 	pl.pieces = append(pl.pieces, added...)
 	slices.Sort(pl.pieces)
-	pl.reservation.hasWindow = true
-	pl.reservation.windowStart, pl.reservation.windowEnd = windowStartPiece, windowEndPiece
 	if pl.reserved && p.cfg.Registry != nil {
 		p.cfg.Registry.SetProtection(pl.infoHash, pl.reservation.id, pl.reservation.protection())
 	}
@@ -590,7 +626,8 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, ok bool) {
 		slog.Duration("position", pl.position),
 		slog.Int64("offset", offset),
 		slog.Int64("windowStart", pl.windowStart),
-		slog.Int64("windowEnd", pl.windowEnd))
+		slog.Int64("windowEnd", pl.windowEnd),
+		slog.Int("indexPieces", len(index)))
 }
 
 // preloadMemoryLimit returns the bytes one memory-storage preload may protect,
@@ -776,10 +813,10 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 			// apart from the watcher, which keeps reporting progress.
 			pl.resolving = true
 			p.preloadWatchers.Go(func() {
-				offset, ok := p.resolveResumeOffset(ctx, pl)
+				offset, indexPieces, ok := p.resolveResumeOffset(ctx, pl)
 				p.mu.Lock()
 				if ctx.Err() == nil && p.preloads[pl.infoHash] == pl {
-					p.placeWindowLocked(pl, offset, ok)
+					p.placeWindowLocked(pl, offset, indexPieces, ok)
 				}
 				p.mu.Unlock()
 				select {

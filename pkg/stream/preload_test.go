@@ -1316,6 +1316,60 @@ func TestPool_PreloadAt(t *testing.T) {
 		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
 	})
 
+	t.Run("keeps the index pieces it read outside the head and tail", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "large index")
+		reg := newProtectionRegistry()
+		pool := New(Config{
+			Logger:   testLogger(),
+			Registry: reg,
+			SeekIndex: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
+				// An index that spans the first three pieces.
+				if _, err := r.ReadAt(make([]byte, 140), 0); err != nil {
+					return 0, false, err
+				}
+				return 320, true, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 1, 2)
+		// Pieces 1 and 2 take both window pieces, so the window is gone.
+		require.Eventually(t, func() bool { return slices.Equal(protected(reg), []int{0, 1, 2, 9}) }, 5*time.Second, time.Millisecond)
+		assert.Equal(t, []int{0, 1, 2, 9}, claimed(pool, to))
+		writePieces(t, to, data, 9)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+	})
+
+	t.Run("keeps the piece of the offset in a one-piece window", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "one piece window")
+		reg := newProtectionRegistry()
+		pool := New(Config{
+			Logger:   testLogger(),
+			Registry: reg,
+			SeekIndex: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
+				// An index that spans the first two pieces leaves one window
+				// piece. Offset 320 starts piece 5, and a window starting 8
+				// bytes earlier would begin in piece 4.
+				if _, err := r.ReadAt(make([]byte, 70), 0); err != nil {
+					return 0, false, err
+				}
+				return 320, true, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 1)
+		require.Eventually(t, func() bool { return slices.Equal(protected(reg), []int{0, 1, 5, 9}) }, 5*time.Second, time.Millisecond)
+	})
+
 	t.Run("keeps its window between the head and the tail", func(t *testing.T) {
 		c := newTestTorrentClient(t)
 		to, file, data := addHashedTorrent(t, c, "late")
