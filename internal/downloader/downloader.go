@@ -365,10 +365,11 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 	d.metrics.SetDownloadingTorrents(downloadingCount)
 }
 
-// startDownload starts the background download of to, unless the pass that
-// calls it has ended or a file is being streamed; then it pauses every
-// download and returns false, and the pass ends. It checks and starts under
-// d.mu, so a Stop that closed stop meanwhile pauses the new download too.
+// startDownload starts the background download of to. It returns false, and
+// the pass that calls it ends, when the pass was woken or stop was closed, or
+// when a file is being streamed, in which case it also pauses every download.
+// It checks and starts under d.mu, so a Stop that closes stop afterwards
+// pauses the new download too.
 func (d *Downloader) startDownload(ctx context.Context, stop <-chan struct{}, to *torrent.Torrent) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -396,6 +397,7 @@ func (d *Downloader) startDownload(ctx context.Context, stop <-chan struct{}, to
 	// allowed again.
 	to.AllowDataDownload()
 	d.downloading[to.InfoHash()] = struct{}{}
+	d.metrics.SetDownloadingTorrents(float64(len(d.downloading)))
 	return true
 }
 

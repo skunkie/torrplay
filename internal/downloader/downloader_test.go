@@ -229,12 +229,14 @@ func TestDownloader_ProcessTorrents(t *testing.T) {
 		defer downloader.Stop()
 		<-waiting
 		require.True(t, downloader.IsDownloading(to.InfoHash()))
+		assert.Equal(t, float64(1), testutil.ToFloat64(downloader.metrics.DownloadingTorrents), "a started download must count before its pass ends")
 
 		streaming.Store(true)
 		downloader.Wake()
 		require.Eventually(t, func() bool { return !downloader.IsDownloading(to.InfoHash()) }, time.Second, time.Millisecond,
 			"a stream must pause background downloads without waiting for another torrent's metadata")
 		assertNothingWanted(t, to)
+		assert.Equal(t, float64(0), testutil.ToFloat64(downloader.metrics.DownloadingTorrents))
 	})
 
 	t.Run("starts nothing once a stream starts during the pass", func(t *testing.T) {
