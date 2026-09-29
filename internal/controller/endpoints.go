@@ -2020,7 +2020,7 @@ func (c *Controller) watchStorageWrites(to *torrent.Torrent, fileStorage bool) {
 // storage fails a write while it cannot free room, so the torrent keeps
 // downloading, unless its pieces are larger than the whole memory limit: their
 // writes can never succeed, so the torrent stops downloading and its reads
-// fail, and logged records that once.
+// fail. The stop is logged once per torrent through logged.
 func (c *Controller) memoryWriteFailed(to *torrent.Torrent, err error, logged *sync.Once) {
 	if !errors.Is(err, memstorage.ErrInsufficientMemory) || !c.piecesExceedMemoryLimit(to) {
 		return

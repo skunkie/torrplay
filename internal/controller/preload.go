@@ -220,7 +220,7 @@ func (c *Controller) preloadActive(ih metainfo.Hash) bool {
 }
 
 // startPreload preloads file in the current stream pool for playback that
-// resumes at position, or from the start when position is zero. It does
+// resumes at position, or preloads its head and tail when position is zero. It does
 // nothing while the torrent client is reconfiguring or when to is not the
 // current client's instance of its torrent. It reports whether the torrent now
 // has a preload.

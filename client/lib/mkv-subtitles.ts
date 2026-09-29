@@ -880,15 +880,15 @@ export async function loadEmbeddedSubtitleTrackVtt(
   const startTime = playback?.currentTime() ?? 0;
 
   // indexedCluster returns the offset of the last indexed cluster starting at
-  // or before target seconds and after after, or undefined when the index has
-  // none.
-  const indexedCluster = async (target: number, after = -1): Promise<number | undefined> => {
+  // or before target seconds, or undefined when the index has none or that
+  // cluster does not lie past currentOffset.
+  const indexedCluster = async (target: number, currentOffset = -1): Promise<number | undefined> => {
     let found: number | undefined;
     for (const entry of await readSubtitleIndex(reader, metadata!)) {
       if (entry.time > target) break;
       found = entry.offset;
     }
-    if (found === undefined || found <= after) return undefined;
+    if (found === undefined || found <= currentOffset) return undefined;
     // Ignore a bad index entry rather than parsing arbitrary bytes as a cluster.
     return (await reader.element(found))?.id === ID_CLUSTER ? found : undefined;
   };
