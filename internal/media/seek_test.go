@@ -18,7 +18,7 @@ import (
 
 func TestResolvePlaybackOffset(t *testing.T) {
 	t.Run("mp4", func(t *testing.T) {
-		file := buildIndexedMP4(t)
+		file := buildIndexedMP4(t, nil)
 		for _, tc := range []struct {
 			position float64
 			want     int64
@@ -31,6 +31,44 @@ func TestResolvePlaybackOffset(t *testing.T) {
 			require.NoError(t, err)
 			require.True(t, ok, "position %v", tc.position)
 			assert.Equal(t, tc.want, offset, "position %v", tc.position)
+		}
+	})
+
+	t.Run("mp4 edit list", func(t *testing.T) {
+		// A two-second empty edit, whose media time is -1, precedes the
+		// track's media from its start.
+		v0 := slices.Concat(uint32Bytes(2000), uint32Bytes(math.MaxUint32), make([]byte, 4),
+			uint32Bytes(10000), uint32Bytes(0), make([]byte, 4))
+		v1 := slices.Concat(uint64Bytes(2000), uint64Bytes(math.MaxUint64), make([]byte, 4),
+			uint64Bytes(10000), uint64Bytes(0), make([]byte, 4))
+		for _, tt := range []struct {
+			name    string
+			version byte
+			entries []byte
+		}{
+			{name: "version 0", version: 0, entries: v0},
+			{name: "version 1", version: 1, entries: v1},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				elst := mp4TestBox("elst", slices.Concat([]byte{tt.version, 0, 0, 0}, uint32Bytes(2), tt.entries))
+				file := buildIndexedMP4(t, mp4TestBox("edts", elst))
+				for _, position := range []struct {
+					seconds float64
+					want    int64
+				}{
+					// Within the empty edit, playback starts at the media's start.
+					{seconds: 1, want: 1000},
+					// Six seconds in is media time 4, before sync sample 6.
+					{seconds: 6, want: 1000},
+					// 7.2 seconds in is media time 5.2, at sync sample 6.
+					{seconds: 7.2, want: 2000},
+				} {
+					offset, ok, err := ResolvePlaybackOffset(bytes.NewReader(file), int64(len(file)), "movie.mp4", position.seconds)
+					require.NoError(t, err)
+					require.True(t, ok, "position %v", position.seconds)
+					assert.Equal(t, position.want, offset, "position %v", position.seconds)
+				}
+			})
 		}
 	})
 
@@ -80,7 +118,7 @@ func TestResolvePlaybackOffset(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, secondClusterOffset, offset)
 
-		mp4 := buildIndexedMP4(t)
+		mp4 := buildIndexedMP4(t, nil)
 		offset, ok, err = ResolvePlaybackOffset(bytes.NewReader(mp4), int64(len(mp4)), "movie.mkv", 4)
 		require.NoError(t, err)
 		require.True(t, ok)
@@ -156,7 +194,10 @@ func (r *furthestReader) ReadAt(b []byte, off int64) (int, error) {
 	return r.ReaderAt.ReadAt(b, off)
 }
 
-func buildIndexedMP4(t *testing.T) []byte {
+// buildIndexedMP4 returns an MP4 file with a video track of ten one-second
+// samples, sync samples 1 and 6, and five samples each in chunks at offsets
+// 1000 and 2000. A non-nil edts is the track's edit box.
+func buildIndexedMP4(t *testing.T, edts []byte) []byte {
 	t.Helper()
 	mvhd := mp4TestBox("mvhd", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, uint32Bytes(1000)...))
 	mdhd := mp4TestBox("mdhd", append([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, uint32Bytes(1000)...))
@@ -171,7 +212,7 @@ func buildIndexedMP4(t *testing.T) []byte {
 	stbl := mp4TestBox("stbl", append(append(append(append(stts, stss...), stsc...), stsz...), stco...))
 	minf := mp4TestBox("minf", stbl)
 	mdia := mp4TestBox("mdia", append(append(mdhd, hdlr...), minf...))
-	trak := mp4TestBox("trak", mdia)
+	trak := mp4TestBox("trak", append(slices.Clone(edts), mdia...))
 	moov := mp4TestBox("moov", append(mvhd, trak...))
 	ftyp := mp4TestBox("ftyp", []byte("isom0000"))
 	file := make([]byte, 0, len(ftyp)+len(moov))
@@ -197,6 +238,10 @@ func mp4TestBox(typ string, payload []byte) []byte {
 	binary.BigEndian.PutUint32(box[:4], uint32(8+len(payload)))
 	copy(box[4:8], typ)
 	return append(box, payload...)
+}
+
+func uint64Bytes(value uint64) []byte {
+	return binary.BigEndian.AppendUint64(nil, value)
 }
 
 func uint32Bytes(value uint32) []byte {
