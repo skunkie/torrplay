@@ -86,17 +86,17 @@ it('shows a network-specific error instead of a misleading codec message', () =>
   );
 });
 
-it('explains that the browser cannot play MKV files when it reports no Matroska support', () => {
+it('explains that MKV files cannot be played where the video element reports no Matroska support', () => {
   const canPlayType = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('');
   render(<VideoPlayer options={{
-    src: { src: 'http://test-server/movie.mkv', type: 'video/mp4' },
-    title: 'Movie.mkv',
+    src: { src: 'http://test-server/api/v1/stream/hash?path=Show%2FMovie.mkv&token=t', type: 'video/mp4' },
+    title: 'Movie',
   }} />);
 
   fireEvent.click(screen.getByRole('button', { name: 'Fail playback (network)' }));
 
   expect(screen.getByRole('alert')).toHaveTextContent(
-    'This browser cannot play MKV files. Open the file in Chrome or in an external player.',
+    'MKV files cannot be played here. Open the file in an external player.',
   );
   canPlayType.mockRestore();
 });

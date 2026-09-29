@@ -14,7 +14,7 @@ import {
   getSubtitleType,
   getVideoFiles,
   getVideoType,
-  isMatroskaFile,
+  isMatroskaStream,
 } from '../video-utils';
 
 describe('video-utils', () => {
@@ -212,11 +212,13 @@ describe('video-utils', () => {
     });
   });
 
-  describe('isMatroskaFile', () => {
-    it('matches MKV file names in any case', () => {
-      expect(isMatroskaFile('Movie.MKV')).toBe(true);
-      expect(isMatroskaFile('movie.webm')).toBe(false);
-      expect(isMatroskaFile(undefined)).toBe(false);
+  describe('isMatroskaStream', () => {
+    it('reads the file from the path parameter or the URL path', () => {
+      expect(isMatroskaStream('/api/v1/stream/hash?path=Show%2FMovie.MKV&token=t')).toBe(true);
+      expect(isMatroskaStream('http://host/stremio/play/hash/0/Movie.mkv')).toBe(true);
+      expect(isMatroskaStream('/api/v1/stream/hash?path=movie.webm')).toBe(false);
+      expect(isMatroskaStream('/api/v1/stream/hash?path=movie.mp4&title=a.mkv')).toBe(false);
+      expect(isMatroskaStream(undefined)).toBe(false);
     });
   });
 

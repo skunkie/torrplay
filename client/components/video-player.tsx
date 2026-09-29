@@ -27,7 +27,7 @@ import {
 } from '@/lib/mkv-audio';
 import { isMkvOrWebmStream } from '@/lib/mkv-subtitles';
 import { getPlaybackPositionSeconds, type PlaybackPositionKey, savePlaybackPositionSeconds } from '@/lib/playback-position';
-import { canPlayMatroska, isMatroskaFile, type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
+import { canPlayMatroska, isMatroskaStream, type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 import { getVidstackCurrentTime, getVidstackVideoElement } from '@/lib/vidstack-media';
 
 import { useVideoPlayerControls, VideoPlayerCaptions, VideoPlayerControls } from './video-player-controls';
@@ -41,14 +41,14 @@ const PLAYBACK_ERROR_MESSAGES: Record<number, string> = {
   4: 'This video container or codec is not supported by the internal player.',
 };
 
-// MATROSKA_UNSUPPORTED_MESSAGE explains a failed MKV file in a browser that
-// cannot play Matroska, such as Safari, which reports only that the resource
-// failed to load.
+// MATROSKA_UNSUPPORTED_MESSAGE explains a failed MKV file where the video
+// element cannot play Matroska, as in Safari, every iOS browser, and the macOS
+// app's WebKit view, which report only that the resource failed to load.
 const MATROSKA_UNSUPPORTED_MESSAGE =
-  'This browser cannot play MKV files. Open the file in Chrome or in an external player.';
+  'MKV files cannot be played here. Open the file in an external player.';
 
-function getPlaybackErrorMessage(detail: MediaErrorDetail, filename?: string): string {
-  if (isMatroskaFile(filename) && !canPlayMatroska()) {
+function getPlaybackErrorMessage(detail: MediaErrorDetail, streamUrl?: string): string {
+  if (isMatroskaStream(streamUrl) && !canPlayMatroska()) {
     return MATROSKA_UNSUPPORTED_MESSAGE;
   }
   if (detail.code && PLAYBACK_ERROR_MESSAGES[detail.code]) {
@@ -523,7 +523,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onRateChange={handleRateChange}
       onError={detail => setPlaybackError({
         source: streamUrl,
-        message: getPlaybackErrorMessage(detail, options.title),
+        message: getPlaybackErrorMessage(detail, streamUrl),
       })}
       playsInline
     >
