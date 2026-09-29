@@ -858,6 +858,51 @@ func TestUpdateSettingsRollsBackFailedJWTSecretRotation(t *testing.T) {
 	assert.Equal(t, secretBefore, secretAfter)
 }
 
+func TestUpdateSettingsEnforcesCredentialLengths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		auth  api.Auth
+		valid bool
+	}{
+		{name: "short username", auth: api.Auth{Username: new("abc")}},
+		{name: "shortest username", auth: api.Auth{Username: new("abcd")}, valid: true},
+		{name: "longest username", auth: api.Auth{Username: new(strings.Repeat("u", 64))}, valid: true},
+		{name: "long username", auth: api.Auth{Username: new(strings.Repeat("u", 65))}},
+		{name: "short password", auth: api.Auth{Password: new("abc")}},
+		{name: "shortest password", auth: api.Auth{Password: new("abcd")}, valid: true},
+		{name: "longest password", auth: api.Auth{Password: new(strings.Repeat("p", 128))}, valid: true},
+		{name: "long password", auth: api.Auth{Password: new(strings.Repeat("p", 129))}},
+		// Lengths count characters, as the settings dialog does, not bytes.
+		{name: "short password of multibyte characters", auth: api.Auth{Password: new("äöü")}},
+		{name: "shortest password of multibyte characters", auth: api.Auth{Password: new("äöüß")}, valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+				s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Bearer), Username: new("admin"), Password: new("password")}
+			})
+			defer cleanup()
+			secret, err := controller.db.GetJWTSecret()
+			require.NoError(t, err)
+			token, err := auth.GenerateToken("admin", []byte(secret))
+			require.NoError(t, err)
+
+			rr := testutil.NewRequest().Patch("/api/v1/settings").
+				WithHeader("Authorization", "Bearer "+token).
+				WithJsonBody(api.Settings{Auth: &tc.auth}).
+				GoWithHTTPHandler(t, controller.router).Recorder
+			if tc.valid {
+				assert.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+				return
+			}
+			assert.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			stored, err := controller.db.GetSettings()
+			require.NoError(t, err)
+			assert.Equal(t, "admin", utils.Val(stored.Auth.Username), "rejected credentials must not be stored")
+			assert.Equal(t, "password", utils.Val(stored.Auth.Password), "rejected credentials must not be stored")
+		})
+	}
+}
+
 func TestController_GetToken(t *testing.T) {
 	requestToken := func(t *testing.T, controller *Controller, password string) *httptest.ResponseRecorder {
 		t.Helper()
