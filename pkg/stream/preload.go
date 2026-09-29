@@ -559,7 +559,7 @@ func (r *readerAt) ReadAt(b []byte, off int64) (int, error) {
 // placeWindowLocked places a preload's resume window at the file-relative
 // offset, or records that it has none when ok is false. The seek index pieces
 // the offset was resolved from that lie outside the head and tail are kept as
-// they are, each taking a piece from the window. The window takes the rest of
+// they are, each taking a piece from the window, up to all of its pieces. The window takes the rest of
 // the preload's windowPieces whole pieces, starts an eighth of its size before
 // offset, and stays between the head and the tail. The window's and the index
 // pieces join the preload's pieces, claims, and protection. Must be called
@@ -580,6 +580,9 @@ func (p *Pool) placeWindowLocked(pl *preload, offset int64, indexPieces []int, o
 			index = append(index, piece)
 		}
 	}
+	// The reservation holds windowPieces pieces beyond the head and tail, so
+	// an index larger than that is kept only in part.
+	index = index[:min(len(index), pl.windowPieces)]
 	pieceLength := max(pl.file.Torrent().Info().PieceLength, 1)
 	fileOffset := pl.file.Offset()
 	windowPieces := max(pl.windowPieces-len(index), 0)
@@ -795,10 +798,12 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 			}
 		}
 		p.mu.Unlock()
-		// Changes to the added pieces delivered before they were watched are
-		// applied after this read, in order, so their tracked states still
-		// end at the latest ones.
-		maps.Copy(pieces, completedPieces(to, added))
+		if len(added) > 0 {
+			// Changes to the added pieces delivered before they were watched
+			// are applied after this read, in order, so their tracked states
+			// still end at the latest ones.
+			maps.Copy(pieces, completedPieces(to, added))
+		}
 
 		p.mu.Lock()
 		if ctx.Err() != nil {

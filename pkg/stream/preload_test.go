@@ -1324,8 +1324,8 @@ func TestPool_PreloadAt(t *testing.T) {
 			Logger:   testLogger(),
 			Registry: reg,
 			SeekIndex: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
-				// An index that spans the first three pieces.
-				if _, err := r.ReadAt(make([]byte, 140), 0); err != nil {
+				// An index that spans the first five pieces.
+				if _, err := r.ReadAt(make([]byte, 300), 0); err != nil {
 					return 0, false, err
 				}
 				return 320, true, nil
@@ -1336,8 +1336,9 @@ func TestPool_PreloadAt(t *testing.T) {
 
 		_, err := pool.PreloadAt(file, MemoryStorage, position)
 		require.NoError(t, err)
-		writePieces(t, to, data, 0, 1, 2)
-		// Pieces 1 and 2 take both window pieces, so the window is gone.
+		writePieces(t, to, data, 0, 1, 2, 3, 4)
+		// Pieces 1 and 2 take both window pieces, so the window is gone, and
+		// the reservation holds no more of the index.
 		require.Eventually(t, func() bool { return slices.Equal(protected(reg), []int{0, 1, 2, 9}) }, 5*time.Second, time.Millisecond)
 		assert.Equal(t, []int{0, 1, 2, 9}, claimed(pool, to))
 		writePieces(t, to, data, 9)
