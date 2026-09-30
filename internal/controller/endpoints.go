@@ -173,6 +173,9 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		)
 		return
 	}
+	if utils.Val(req.Storage) == "" {
+		req.Storage = new(api.Memory)
+	}
 
 	switch {
 	case req.Hash != nil:
@@ -194,7 +197,7 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		spec := torrent.TorrentSpecFromMetaInfo(meta)
 		to, err = c.loadTorrentSpec(spec, utils.Val(req.Storage))
 	} else {
-		to, err = c.addTorrentByMagnet(*req.Magnet)
+		to, err = c.addTorrentByMagnetWithStorage(*req.Magnet, utils.Val(req.Storage))
 	}
 	if err != nil {
 		api.HandleError(w, err)
@@ -1145,9 +1148,18 @@ func (c *Controller) addTorrentByHash(ih metainfo.Hash) (*torrent.Torrent, error
 // the stored storage type to ensure consistency. If the torrent is not in
 // the database, it defaults to memory storage.
 func (c *Controller) addTorrentByMagnet(uri string) (*torrent.Torrent, error) {
+	return c.addTorrentByMagnetWithStorage(uri, api.Memory)
+}
+
+// addTorrentByMagnetWithStorage adds a torrent by magnet URI. Existing database
+// torrents retain their configured storage; new torrents use defaultStorage.
+func (c *Controller) addTorrentByMagnetWithStorage(uri string, defaultStorage api.TorrentStorage) (*torrent.Torrent, error) {
 	magnetV2, err := metainfo.ParseMagnetV2Uri(uri)
 	if err != nil || magnetV2.InfoHash.Value.IsZero() {
 		return nil, api.NewError(fmt.Sprintf("invalid magnet URI: %v", err), http.StatusBadRequest)
+	}
+	if defaultStorage == "" {
+		defaultStorage = api.Memory
 	}
 
 	ih := magnetV2.InfoHash.Value
@@ -1156,7 +1168,7 @@ func (c *Controller) addTorrentByMagnet(uri string) (*torrent.Torrent, error) {
 		if !errors.Is(err, database.ErrTorrentNotFound) {
 			return nil, err
 		}
-		return c.loadTorrent(uri, api.Memory)
+		return c.loadTorrent(uri, defaultStorage)
 	}
 
 	return c.loadTorrent(uri, utils.Val(t.Storage))
@@ -1286,7 +1298,9 @@ func (c *Controller) createTorrentInDBLocked(to *torrent.Torrent, req api.Torren
 	}
 
 	t := torrentToMetadata(to)
-	t.Magnet = *req.Magnet
+	if reqMagnet := utils.Val(req.Magnet); reqMagnet != "" {
+		t.Magnet = reqMagnet
+	}
 	t.Storage = req.Storage
 
 	if req.Category != nil {
