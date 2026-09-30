@@ -1485,13 +1485,23 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 && len(spec.InfoBytes) == 0 {
 		spec.InfoBytes = t.InfoBytes
 	}
+	c.mu.RLock()
+	client := c.client
+	fileStoragePath := utils.Val(c.settings.Load().FileStoragePath)
+	logger := c.logger.Load()
+	pieceCompletion := c.pieceCompletion
+	trackers := slices.Clone(c.trackers)
+	c.mu.RUnlock()
+	if client == nil {
+		return nil, errors.New("torrent client is unavailable")
+	}
 
 	c.torrentTracker.mu.RLock()
 	info, ok := c.torrentTracker.torrents[spec.InfoHash]
 	c.torrentTracker.mu.RUnlock()
 
 	if ok && info.storageType == storageType {
-		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+		if to, ok := client.Torrent(spec.InfoHash); ok {
 			c.torrentTracker.mu.Lock()
 			info.lastUsedAt = time.Now()
 			c.torrentTracker.torrents[spec.InfoHash] = info
@@ -1501,7 +1511,7 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 	}
 
 	if ok && info.storageType != storageType {
-		if to, ok := c.client.Torrent(spec.InfoHash); ok {
+		if to, ok := client.Torrent(spec.InfoHash); ok {
 			if len(spec.InfoBytes) == 0 && to.Info() != nil {
 				spec.InfoBytes = to.Metainfo().InfoBytes
 			}
@@ -1510,22 +1520,21 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 		}
 	}
 
-	utils.AddTrackersToSpec(spec, c.trackers)
+	utils.AddTrackersToSpec(spec, trackers)
 
-	if storageType == api.File && c.settings.Load().FileStoragePath != nil && *c.settings.Load().FileStoragePath != "" {
-		fileStoragePath := *c.settings.Load().FileStoragePath
+	if storageType == api.File && fileStoragePath != "" {
 		if _, err := os.Stat(fileStoragePath); os.IsNotExist(err) {
 			if err := os.MkdirAll(fileStoragePath, 0o755); err != nil {
-				c.logger.Load().Warn("failed to create file storage directory, falling back to memory storage", "error", err)
+				logger.Warn("failed to create file storage directory, falling back to memory storage", "error", err)
 			}
 		}
 
 		if _, err := os.Stat(fileStoragePath); err == nil {
 			opts := storage.NewFileClientOpts{
 				ClientBaseDir:   fileStoragePath,
-				PieceCompletion: c.pieceCompletion,
+				PieceCompletion: pieceCompletion,
 				UsePartFiles:    generics.Option[bool]{Value: false, Ok: true},
-				Logger:          c.logger.Load(),
+				Logger:          logger,
 			}
 			spec.Storage = storage.NewFileOpts(opts)
 		}
@@ -1723,13 +1732,8 @@ func (c *Controller) streamPoolForGeneration(to *torrent.Torrent, generation uin
 }
 
 func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) error {
-	c.mu.Lock()
-	c.posterOpMu.Lock()
-
 	t, err := c.db.GetTorrent(ih)
 	if err != nil {
-		c.posterOpMu.Unlock()
-		c.mu.Unlock()
 		st := http.StatusInternalServerError
 		if errors.Is(err, database.ErrTorrentNotFound) {
 			st = http.StatusNotFound
@@ -1737,7 +1741,16 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 		return api.NewError(err.Error(), st)
 	}
 
-	var needsUpdate, needsDrop bool
+	settings := c.settings.Load()
+	fileStoragePath := settings.FileStoragePath
+	dlnaEnabled := *settings.EnableDlna
+
+	var (
+		needsUpdate bool
+		needsDrop   bool
+		infoBytes   []byte
+	)
+
 	if utils.Differ(t.Category, req.Category) {
 		needsUpdate = true
 		t.Category = req.Category
@@ -1772,9 +1785,7 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 
 	oldStorage := t.Storage
 	if utils.Differ(t.Storage, req.Storage) {
-		if utils.Val(req.Storage) == api.File && (c.settings.Load().FileStoragePath == nil || *c.settings.Load().FileStoragePath == "") {
-			c.posterOpMu.Unlock()
-			c.mu.Unlock()
+		if utils.Val(req.Storage) == api.File && (fileStoragePath == nil || *fileStoragePath == "") {
 			return api.NewError("file storage is not configured", http.StatusBadRequest)
 		}
 		needsUpdate = true
@@ -1782,22 +1793,28 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 		t.Storage = req.Storage
 
 		if utils.Val(t.Storage) == api.File {
-			if len(t.InfoBytes) == 0 {
+			infoBytes = t.InfoBytes
+			if len(infoBytes) == 0 {
 				if clientTo, ok := c.client.Torrent(ih); ok && clientTo.Info() != nil {
-					t.InfoBytes = clientTo.Metainfo().InfoBytes
+					infoBytes = clientTo.Metainfo().InfoBytes
 				}
 			}
-			to, err := c.loadTorrent(t.Magnet, api.File)
-			if err != nil {
-				return api.NewError(err.Error(), http.StatusInternalServerError)
+			if len(infoBytes) == 0 {
+				to, err := c.loadTorrent(t.Magnet, api.File)
+				if err != nil {
+					return api.NewError(err.Error(), http.StatusInternalServerError)
+				}
+				select {
+				case <-to.GotInfo():
+					meta := to.Metainfo()
+					infoBytes = meta.InfoBytes
+				case <-time.After(c.runtimeConfig.gotInfoTimeout):
+					to.Drop()
+					<-to.Closed()
+					return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+				}
 			}
-			select {
-			case <-to.GotInfo():
-				meta := to.Metainfo()
-				t.InfoBytes = meta.InfoBytes
-			case <-time.After(c.runtimeConfig.gotInfoTimeout):
-				return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
-			}
+			t.InfoBytes = infoBytes
 		} else {
 			t.InfoBytes = nil
 		}
@@ -1809,22 +1826,20 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 	}
 
 	if !needsUpdate {
-		c.posterOpMu.Unlock()
-		c.mu.Unlock()
 		return nil
 	}
 
 	t.UpdatedAt = new(time.Now())
-	if err := c.db.UpdateTorrent(t); err != nil {
-		c.posterOpMu.Unlock()
-		c.mu.Unlock()
-		return api.NewError("failed to update torrent with hash "+ih.HexString(), http.StatusInternalServerError)
-	}
 
-	dlnaEnabled := *c.settings.Load().EnableDlna
-
+	c.mu.Lock()
+	c.posterOpMu.Lock()
+	err = c.db.UpdateTorrent(t)
 	c.posterOpMu.Unlock()
 	c.mu.Unlock()
+
+	if err != nil {
+		return api.NewError("failed to update torrent with hash "+ih.HexString(), http.StatusInternalServerError)
+	}
 
 	if needsDrop {
 		if to, ok := c.client.Torrent(ih); ok {
@@ -1834,8 +1849,8 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 	}
 
 	if utils.Val(oldStorage) == api.File && utils.Val(t.Storage) == api.Memory {
-		if runtime.GOOS != "windows" && c.settings.Load().FileStoragePath != nil && *c.settings.Load().FileStoragePath != "" {
-			torrentStoragePath := filepath.Join(*c.settings.Load().FileStoragePath, t.Name)
+		if runtime.GOOS != "windows" && fileStoragePath != nil && *fileStoragePath != "" {
+			torrentStoragePath := filepath.Join(*fileStoragePath, t.Name)
 			if err := os.RemoveAll(torrentStoragePath); err != nil {
 				c.logger.Load().Error("failed to delete torrent file storage", "path", torrentStoragePath, "error", err)
 			}

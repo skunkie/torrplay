@@ -167,6 +167,8 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 		})
 	}
 
+	t.Cleanup(cleanup)
+
 	return ctrl, cleanup
 }
 
@@ -1123,8 +1125,10 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, dbTorrent.InfoBytes, "InfoBytes should be saved for new torrent with file storage")
 
-	err = ctrl.db.DeleteTorrent(resp.Hash)
-	require.NoError(t, err)
+	delReq := httptest.NewRequest(http.MethodDelete, "/api/v1/torrents/"+resp.Hash.HexString(), http.NoBody)
+	delW := httptest.NewRecorder()
+	ctrl.router.ServeHTTP(delW, delReq)
+	require.Equal(t, http.StatusNoContent, delW.Code)
 
 	body, writer = createMultipartForm(t, map[string]string{
 		"storage": string(api.Memory),
@@ -1499,6 +1503,68 @@ func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
 
 	assert.True(t, exists, "active torrent should not be dropped during cleanup")
 	assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
+}
+
+func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
+		c.settings.Load().FileStoragePath = nil
+	})
+	defer cleanup()
+
+	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+	primeSampleMetadata(t, ctrl, ih)
+	magnet := samples[ih]
+	req := api.TorrentAdd{Magnet: &magnet}
+	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// Attempt to switch to File storage with unconfigured path
+	updateReq := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+	rr = testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", ih)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusBadRequest, rr.Code)
+
+	// Verify that controller is not deadlocked and can handle subsequent requests
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestUpdateTorrentUnlocksWhenStorageSwitchTimesOut(t *testing.T) {
+	runtimeConfig := testControllerRuntimeConfig()
+	runtimeConfig.gotInfoTimeout = 100 * time.Millisecond
+
+	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig, func(c *Controller) {
+		c.settings.Load().FileStoragePath = new(t.TempDir())
+	})
+	defer cleanup()
+
+	// Add a dummy torrent directly into the database with an unresolvable magnet link (empty InfoBytes)
+	deadHash := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")
+	deadMagnet := "magnet:?xt=urn:btih:1111111111111111111111111111111111111111&dn=DeadTorrent"
+	err := ctrl.db.CreateTorrent(&database.Torrent{
+		Torrent: api.Torrent{
+			Hash:    deadHash,
+			Name:    "DeadTorrent",
+			Magnet:  deadMagnet,
+			Storage: utils.Ptr(api.Memory),
+		},
+	})
+	require.NoError(t, err)
+
+	// Attempt to update storage from Memory to File - this will trigger loadTorrent and time out on <-to.GotInfo()
+	updateReq := api.TorrentUpdate{
+		Storage: utils.Ptr(api.File),
+	}
+	rr := testutil.NewRequest().Patch(fmt.Sprintf("/api/v1/torrents/%s", deadHash)).WithJsonBody(updateReq).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
+
+	// Verify that controller is not deadlocked and can handle subsequent requests
+	rr = testutil.NewRequest().Get("/api/v1/settings").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	rr = testutil.NewRequest().Get("/api/v1/torrents").GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
 }
 
 func TestCalcReadaheadPct(t *testing.T) {
