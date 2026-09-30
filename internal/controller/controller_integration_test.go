@@ -9,6 +9,7 @@ package controller
 import (
 	"bytes"
 	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -69,28 +70,7 @@ func newLocalWebseedFixture(t *testing.T, block bool) localWebseedFixture {
 	}))
 	t.Cleanup(server.Close)
 
-	const pieceLength = 16 * 1024
-	pieces := make([]byte, 0, ((len(payload)+pieceLength-1)/pieceLength)*sha1.Size)
-	for offset := 0; offset < len(payload); offset += pieceLength {
-		end := min(offset+pieceLength, len(payload))
-		sum := sha1.Sum(payload[offset:end])
-		pieces = append(pieces, sum[:]...)
-	}
-	info := metainfo.Info{
-		Name:        "Sintel",
-		PieceLength: pieceLength,
-		Pieces:      pieces,
-		Files: []metainfo.FileInfo{{
-			Length: int64(len(payload)),
-			Path:   []string{"Sintel.mp4"},
-		}},
-	}
-	infoBytes, err := bencode.Marshal(info)
-	require.NoError(t, err)
-	meta := &metainfo.MetaInfo{
-		InfoBytes: infoBytes,
-		UrlList:   metainfo.UrlList{server.URL + "/"},
-	}
+	meta := localWebseedMetaInfo(t, payload, server.URL)
 
 	var releaseOnce sync.Once
 	return localWebseedFixture{
@@ -98,6 +78,43 @@ func newLocalWebseedFixture(t *testing.T, block bool) localWebseedFixture {
 		payload:   payload,
 		requested: requested,
 		release:   func() { releaseOnce.Do(func() { close(release) }) },
+	}
+}
+
+// localWebseedPieceLength is the piece length of local webseed fixtures.
+const localWebseedPieceLength = 16 * 1024
+
+// localWebseedMetaInfo describes a single-file torrent of payload served by
+// the webseed at serverURL.
+func localWebseedMetaInfo(t *testing.T, payload []byte, serverURL string) *metainfo.MetaInfo {
+	t.Helper()
+	return webseedMetaInfo(t, payload, serverURL, "Sintel.mp4")
+}
+
+// webseedMetaInfo describes a single-file torrent of payload, with the file
+// name, served by the webseed at serverURL.
+func webseedMetaInfo(t *testing.T, payload []byte, serverURL, name string) *metainfo.MetaInfo {
+	t.Helper()
+	pieces := make([]byte, 0, ((len(payload)+localWebseedPieceLength-1)/localWebseedPieceLength)*sha1.Size)
+	for offset := 0; offset < len(payload); offset += localWebseedPieceLength {
+		end := min(offset+localWebseedPieceLength, len(payload))
+		sum := sha1.Sum(payload[offset:end])
+		pieces = append(pieces, sum[:]...)
+	}
+	info := metainfo.Info{
+		Name:        "Sintel",
+		PieceLength: localWebseedPieceLength,
+		Pieces:      pieces,
+		Files: []metainfo.FileInfo{{
+			Length: int64(len(payload)),
+			Path:   []string{name},
+		}},
+	}
+	infoBytes, err := bencode.Marshal(info)
+	require.NoError(t, err)
+	return &metainfo.MetaInfo{
+		InfoBytes: infoBytes,
+		UrlList:   metainfo.UrlList{serverURL + "/"},
 	}
 }
 
@@ -272,6 +289,7 @@ func TestIntegrationDeleteWhileStreamingUsesStateSynchronization(t *testing.T) {
 	for range otherHashes {
 		assert.Equal(t, http.StatusNoContent, <-otherDeletes)
 	}
+	assert.True(t, ctrl.hasTorrentReaders(ih), "deleting unrelated torrents interrupted the active stream")
 
 	deleteDone := make(chan int, 1)
 	go func() {
@@ -291,4 +309,139 @@ func TestIntegrationDeleteWhileStreamingUsesStateSynchronization(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("stream did not exit after torrent deletion")
 	}
+}
+
+func TestIntegrationPreloadReportsPiecesCompletedAheadOfReader(t *testing.T) {
+	payload := bytes.Repeat([]byte("torrplay-local-webseed\n"), 4096)
+	// The webseed fetches the whole file in one sequential response. Serving
+	// a corrupt first piece lets the rest of the file complete while that
+	// piece fails verification, and the sequential preload reader cannot
+	// return any data until it completes.
+	corrupted := bytes.Clone(payload)
+	clear(corrupted[:localWebseedPieceLength])
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "video.mp4", time.Time{}, bytes.NewReader(corrupted))
+	}))
+	defer server.Close()
+
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, localWebseedFixture{
+		meta:    localWebseedMetaInfo(t, payload, server.URL),
+		payload: payload,
+	})
+	apiServer := httptest.NewServer(ctrl.router)
+	defer apiServer.Close()
+
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", apiServer.URL, ih), bytes.NewBufferString(`{"file_index":0}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	remaining := int64(len(payload) - localWebseedPieceLength)
+	var partial api.PreloadResponse
+	require.Eventually(t, func() bool {
+		getResp, getErr := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", apiServer.URL, ih))
+		if getErr != nil {
+			return false
+		}
+		defer getResp.Body.Close()
+		var state api.PreloadResponse
+		if json.NewDecoder(getResp.Body).Decode(&state) != nil || state.Status != api.Preloading || state.CompletedBytes < remaining {
+			return false
+		}
+		partial = state
+		return true
+	}, 5*time.Second, 10*time.Millisecond, "pieces after the corrupt first piece must count toward progress")
+	assert.Equal(t, remaining, partial.CompletedBytes)
+	assert.Equal(t, int64(len(payload)), partial.TargetBytes)
+	assert.InDelta(t, float64(remaining)/float64(len(payload)), partial.Progress, 0.001)
+	ctrl.cancelPreload(ih)
+}
+
+func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, false)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, fixture)
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	tsPreloadResponse, err := http.Get(fmt.Sprintf("%s/stream/Sintel.mp4?link=%s&preload&stat&index=0", server.URL, ih))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, tsPreloadResponse.StatusCode)
+	var tsStatus api.TSTorrentResponse
+	require.NoError(t, json.NewDecoder(tsPreloadResponse.Body).Decode(&tsStatus))
+	require.NoError(t, tsPreloadResponse.Body.Close())
+	assert.Equal(t, tsStatPreload, tsStatus.Stat)
+	assert.Equal(t, "Torrent preload", tsStatus.StatString)
+	assert.Positive(t, tsStatus.PreloadSize)
+
+	invalidPlayback := httptest.NewRecorder()
+	ctrl.streamFile(invalidPlayback, httptest.NewRequest(http.MethodGet, "/stream/invalid", http.NoBody), ih, 99)
+	assert.Equal(t, http.StatusBadRequest, invalidPlayback.Code)
+	_, stillPreloading := ctrl.preloadStatus(ih)
+	assert.True(t, stillPreloading, "invalid playback should not cancel the active preload")
+	ctrl.cancelPreload(ih)
+
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih), bytes.NewBufferString(`{"file_index":0}`))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var readyState api.PreloadResponse
+	require.Eventually(t, func() bool {
+		getResp, getErr := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
+		if getErr != nil {
+			return false
+		}
+		defer getResp.Body.Close()
+		var state api.PreloadResponse
+		if json.NewDecoder(getResp.Body).Decode(&state) != nil || state.Status != api.Ready {
+			return false
+		}
+		readyState = state
+		return true
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.Equal(t, float32(1), readyState.Progress)
+	assert.Equal(t, int64(len(fixture.payload)), readyState.TargetBytes)
+	assert.Equal(t, readyState.TargetBytes, readyState.CompletedBytes)
+	assert.Positive(t, readyState.DownloadRate, "webseed payload rate must be included")
+
+	streamRequest, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, ih), http.NoBody)
+	require.NoError(t, err)
+	streamRequest.Header.Set("Range", "bytes=0-1023")
+	streamResponse, err := http.DefaultClient.Do(streamRequest)
+	require.NoError(t, err)
+	require.NoError(t, streamResponse.Body.Close())
+	assert.Equal(t, http.StatusPartialContent, streamResponse.StatusCode)
+
+	// Playback keeps using the ready preload; its lingering reader pins the
+	// cache between the player's range requests.
+	assert.True(t, ctrl.streamPool.Load().HasReaders(ih), "the released reader must linger")
+	retainedResponse, err := http.Get(fmt.Sprintf("%s/api/v1/torrents/%s/preload", server.URL, ih))
+	require.NoError(t, err)
+	var retainedState api.PreloadResponse
+	require.NoError(t, json.NewDecoder(retainedResponse.Body).Decode(&retainedState))
+	require.NoError(t, retainedResponse.Body.Close())
+	assert.Equal(t, api.Ready, retainedState.Status, "a preload being played remains ready")
+	assert.Equal(t, 0, retainedState.FileIndex)
+	assert.Equal(t, float32(1), retainedState.Progress)
+	assert.Equal(t, readyState.TargetBytes, retainedState.TargetBytes)
+	assert.Equal(t, readyState.CompletedBytes, retainedState.CompletedBytes)
+
+	// Without a preload, the fully downloaded torrent is ready as a whole.
+	ctrl.cancelPreload(ih)
+	complete := ctrl.preloadResponse(ih)
+	assert.Equal(t, api.Ready, complete.Status)
+	assert.Equal(t, preloadNoFileIndex, complete.FileIndex)
+	assert.Nil(t, complete.FilePath)
+	assert.Equal(t, float32(1), complete.Progress)
+	assert.Equal(t, int64(len(fixture.payload)), complete.CompletedBytes)
+	assert.Equal(t, complete.CompletedBytes, complete.TargetBytes)
 }

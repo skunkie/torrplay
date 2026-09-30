@@ -144,6 +144,7 @@ interface TorrentStats {
   piecesDirtiedGood: number,
   totalPeers: number,
   completedSize: number,
+  writtenBytes: number,
   inMemory: number,
   inMemorySize: number,
   memoryStats: MemoryStats,

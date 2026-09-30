@@ -25,6 +25,8 @@ import (
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/getkin/kin-openapi/openapi3filter"
+	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -457,6 +459,7 @@ func TestGetTorrentStatistics(t *testing.T) {
 	assert.GreaterOrEqual(t, result.ActivePeers, 0)
 	assert.GreaterOrEqual(t, result.BytesRead, int64(0))
 	assert.GreaterOrEqual(t, result.BytesWritten, int64(0))
+	assert.GreaterOrEqual(t, result.WrittenBytes, int64(0))
 	assert.GreaterOrEqual(t, result.PiecesComplete, 0)
 }
 
@@ -858,6 +861,35 @@ func TestUpdateTorrentFileViewedStatus(t *testing.T) {
 	require.NotNil(t, viewedFile, "file not found in torrent")
 	assert.Nil(t, viewedFile.ViewedAt)
 	assert.NotNil(t, updatedTorrent.UpdatedAt)
+}
+
+func TestLoggerAndSettingsReadsDoNotRaceSettingsUpdate(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	done := make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Go(func() {
+		authErr := &openapi3filter.SecurityRequirementsError{}
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			// Both read the logger or settings without holding c.mu.
+			ctrl.cleanupExpiredTorrents()
+			ctrl.ErrorHandler(context.Background(), authErr, httptest.NewRecorder(), nil, nethttpmiddleware.ErrorHandlerOpts{})
+		}
+	})
+
+	// A log level change replaces both the settings and the logger.
+	for _, level := range []string{"DEBUG", "INFO"} {
+		rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]string{"log_level": level}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+		require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	}
+	close(done)
+	readers.Wait()
 }
 
 func TestUpdateSettings(t *testing.T) {

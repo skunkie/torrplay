@@ -93,6 +93,8 @@ export function TorrentStatsDialogLayout({
                 <>
                   <StatGridItem label='Completed'
                     value={formatBytes(stats.completedSize)} />
+                  <StatGridItem label='Written Bytes'
+                    value={formatBytes(stats.writtenBytes)} />
                   <StatGridItem label='In Memory'
                     value={formatBytes(stats.inMemorySize)} />
                 </>

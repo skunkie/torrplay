@@ -52,21 +52,62 @@
 // asynchronous piece-priority bump in the torrent client: the nearest
 // PriorityWindowFraction of the readahead pieces receive PiecePriorityNow, so
 // they download before the rest of the readahead window, which the torrent
-// client orders by rarity. Stale priority updates are discarded when a reader moves or
+// client orders by rarity. Preloads claim their pieces at PiecePriorityHigh,
+// below every playback reader's readahead, so they download with the bandwidth
+// playback leaves. Stale priority updates are discarded when a reader moves or
 // is released. Pool-level claim aggregation preserves the highest priority
-// requested by overlapping readers.
+// requested by overlapping readers and preloads.
 //
 // # Readahead Rebalancing
 //
-// When a reader is acquired or released, or the budget changes, the pool redistributes the memory readahead
+// When a reader is acquired or released, a preload reserves or releases its
+// share, or the budget changes, the pool redistributes the memory readahead
 // budget among active memory-storage readers. Storage protects
 // whole pieces, so the division is made in pieces: head and tail boundaries use
 // at most half of the budget and shrink, or are dropped, until their pieces fit,
 // and each reader's readahead is the largest whole number of pieces whose active
 // range fits its share. With large pieces and a small budget, a reader may protect
-// only the piece it is reading. File-storage readers retain their
+// only the piece it is reading. A file whose held preload reservation covers
+// both its head and tail gets no reader boundaries, because the preload already
+// protects them within that reservation. File-storage readers retain their
 // configured FileReadaheadBytes while active. Lingering readers hold no share
 // of the budget.
+//
+// # Preloads
+//
+// Preload caches the head and tail of a file, where containers keep their
+// metadata and seek indexes, so its playback starts without waiting for them. A
+// torrent has at most one preload, and a request for another of its files
+// replaces it. Preloads never pause for playback, because the engine is shared
+// by every viewer: they have no reader, claim their pieces at PiecePriorityHigh,
+// and a watcher marks them ready once every piece is complete. At most two
+// preloads download at a time, in request order.
+//
+// A memory-storage preload reserves its whole pieces in the preload share of
+// the readahead budget, reported by PreloadCapacity, and protects them from
+// eviction until it is removed. The rest of the budget is always kept for
+// playback readers, so a new stream is never starved by held preloads. When
+// the share is full, a queued preload evicts the oldest preload holding its
+// cache, ready or waiting for a slot after losing a piece; those of files
+// being read stay pinned. A preload that cannot fit and has
+// nothing to wait for fails, and so does a running preload whose torrent
+// completes no data within PreloadStallTimeout, such as one without peers, so
+// it cannot hold its slot forever. A preload waiting behind other viewers'
+// playback of its torrent does not stall. A smaller SetReadaheadBudget evicts
+// preloads until they fit, cheapest first. A ready preload that loses a piece
+// to eviction downloads it again, reporting queued while both preload slots
+// are busy, unless it is due for removal anyway, in which case it is removed.
+//
+// A ready preload serves one playback of its file: once the file has been read
+// and has no reader left, including a lingering one, the preload is released,
+// so the linger timeout is its grace period between the player's requests. A
+// preload whose file is never read expires PreloadReadyTTL after it first
+// became ready, even while it waits to download a lost piece again, and a
+// failed or evicted preload reports its final state for as long. File-storage
+// preloads write to disk and reserve nothing.
+//
+// Expiry runs every second while the pool has readers or preloads, and every
+// five seconds when it has neither.
 //
 // # Thread Safety
 //

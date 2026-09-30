@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -1195,6 +1196,28 @@ func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	return &s
 }
 
+// peerTransferRates sums live payload rates across native peers and webseeds.
+func peerTransferRates(to *torrent.Torrent) (downloadRate, uploadRate float64) {
+	if to == nil {
+		return 0, 0
+	}
+	add := func(stats torrent.PeerStats) {
+		if !math.IsNaN(stats.DownloadRate) && !math.IsInf(stats.DownloadRate, 0) {
+			downloadRate += stats.DownloadRate
+		}
+		if !math.IsNaN(stats.LastWriteUploadRate) && !math.IsInf(stats.LastWriteUploadRate, 0) {
+			uploadRate += stats.LastWriteUploadRate
+		}
+	}
+	for _, peer := range to.PeerConns() {
+		add(peer.Stats())
+	}
+	for _, peer := range to.WebseedPeerConns() {
+		add(peer.Stats())
+	}
+	return downloadRate, uploadRate
+}
+
 func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, error) {
 	if to == nil {
 		return nil, errors.New("cannot build stats from a nil torrent")
@@ -1203,8 +1226,8 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		return nil, errors.New("torrent info not available")
 	}
 
-	t, err := c.db.GetTorrent(to.InfoHash())
-	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
+	mode, _ := c.torrentStorageMode(to.InfoHash())
+	isFileStorage := mode == stream.FileStorage
 
 	stats := to.Stats()
 	resp := &api.TorrentStats{
@@ -1232,6 +1255,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 
 	if isFileStorage {
 		resp.CompletedSize = to.BytesCompleted()
+		resp.WrittenBytes = to.BytesCompleted()
 		resp.InMemory = 0
 		resp.InMemorySize = 0
 		memoryStats := c.storageClient.Load().MemoryStats()
@@ -1272,6 +1296,7 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 
 		resp.Pieces = pieces
 		resp.CompletedSize = storageStats.CompletedBytes
+		resp.WrittenBytes = storageStats.WrittenBytes
 		resp.InMemory = storageStats.ResidentPieces
 		resp.InMemorySize = storageStats.ResidentBytes
 		resp.MemoryStats = storageMemoryStats(storageStats.Global)
@@ -1357,6 +1382,7 @@ func (c *Controller) deleteTorrentLocked(ih metainfo.Hash) error {
 		return api.NewError(dbErr.Error(), st)
 	}
 
+	c.cancelPreload(ih)
 	if isClientTorrent {
 		to.Drop()
 		<-to.Closed()
@@ -1808,7 +1834,7 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 		if utils.Val(t.Storage) == api.File {
 			infoBytes = t.InfoBytes
 			if len(infoBytes) == 0 {
-				if clientTo, ok := c.client.Torrent(ih); ok && clientTo.Info() != nil {
+				if clientTo, ok := c.clientTorrent(ih); ok && clientTo.Info() != nil {
 					infoBytes = clientTo.Metainfo().InfoBytes
 				}
 			}
@@ -1855,7 +1881,7 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 	}
 
 	if needsDrop {
-		if to, ok := c.client.Torrent(ih); ok {
+		if to, ok := c.clientTorrent(ih); ok {
 			to.Drop()
 			<-to.Closed()
 		}

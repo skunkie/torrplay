@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
-	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -433,6 +432,15 @@ func TestPool_ExpireInterval(t *testing.T) {
 	p.readers[1] = &streamReader{readerID: 1}
 	p.mu.Unlock()
 	assert.Equal(t, busyExpireInterval, p.expireInterval(), "a pool with readers checks often")
+
+	p.mu.Lock()
+	delete(p.readers, 1)
+	p.preloads[metainfo.Hash{1}] = &preload{}
+	p.mu.Unlock()
+	assert.Equal(t, busyExpireInterval, p.expireInterval(), "a pool with preloads checks often")
+	p.mu.Lock()
+	delete(p.preloads, metainfo.Hash{1})
+	p.mu.Unlock()
 }
 
 // byteReadahead returns the readahead the pool assigns to a reader without
@@ -824,6 +832,58 @@ func TestPool_SetReadaheadBudget(t *testing.T) {
 		if _, lingering := p.readers[uint64(2)]; !lingering {
 			t.Fatal("a budget change must not close a lingering reader")
 		}
+	})
+	t.Run("gives up the cheapest reservations first", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger()})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1 << 20)
+		read, readFile, readData := addHashedTorrent(t, c, "read")
+		idle, idleFile, idleData := addHashedTorrent(t, c, "idle")
+		writePieces(t, read, readData, allPieces(read)...)
+		writePieces(t, idle, idleData, allPieces(idle)...)
+		running, runningFile := addSizedTorrent(t, c, "running", 64, 640)
+		for _, file := range []*torrent.File{readFile, idleFile} {
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+		waitForPreloadState(t, pool, read.InfoHash(), PreloadReady)
+		waitForPreloadState(t, pool, idle.InfoHash(), PreloadReady)
+		_, err := pool.Preload(runningFile, MemoryStorage)
+		require.NoError(t, err)
+		_, release, err := pool.Acquire(context.Background(), readFile, MemoryStorage)
+		require.NoError(t, err)
+		defer release()
+
+		// Each budget's preload share holds one reservation fewer.
+		for _, step := range []struct {
+			budget  int64
+			evicted metainfo.Hash
+		}{
+			{budget: 2 * 1300, evicted: idle.InfoHash()},
+			{budget: 2 * 700, evicted: running.InfoHash()},
+			{budget: 0, evicted: read.InfoHash()},
+		} {
+			pool.SetReadaheadBudget(step.budget)
+			assert.Equal(t, PreloadEvicted, preloadState(pool, step.evicted))
+		}
+	})
+
+	t.Run("a larger budget starts queued preloads", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		pool := New(Config{Logger: testLogger()})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(1500)
+		_, firstFile := addSizedTorrent(t, c, "first", 64, 640)
+		second, secondFile := addSizedTorrent(t, c, "second", 64, 640)
+		for _, file := range []*torrent.File{firstFile, secondFile} {
+			_, err := pool.Preload(file, MemoryStorage)
+			require.NoError(t, err)
+		}
+		require.Equal(t, PreloadQueued, preloadState(pool, second.InfoHash()))
+
+		pool.SetReadaheadBudget(1 << 20)
+		assert.Equal(t, PreloadRunning, preloadState(pool, second.InfoHash()))
 	})
 }
 
@@ -1448,39 +1508,4 @@ func TestPoolAcquireSetsReadaheadShare(t *testing.T) {
 	for _, sr := range pool.readers {
 		assert.Equal(t, readaheadForShare(plan.share, filePieceLength(sr.file)), sr.readahead, "a reader gets its readahead share")
 	}
-}
-
-// addHashedTorrent adds a single-file torrent named name of ten 64-byte pieces
-// that carry real hashes of deterministic data, so pieces written to storage
-// can be verified. It returns the torrent, its file, and the data.
-func addHashedTorrent(t *testing.T, c *torrent.Client, name string) (*torrent.Torrent, *torrent.File, []byte) {
-	t.Helper()
-	const pieceLength, length = 64, 640
-	data := make([]byte, length)
-	for i := range data {
-		data[i] = byte(i*31 + len(name))
-	}
-	var pieces []byte
-	for start := int64(0); start < length; start += pieceLength {
-		sum := sha1.Sum(data[start:min(start+pieceLength, length)])
-		pieces = append(pieces, sum[:]...)
-	}
-	infoBytes, err := bencode.Marshal(metainfo.Info{Name: name, PieceLength: pieceLength, Length: length, Pieces: pieces})
-	require.NoError(t, err)
-	to, file := addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
-	return to, file, data
-}
-
-// addSizedTorrent adds a single-file torrent without data, for tests that only
-// plan or schedule preloads.
-func addSizedTorrent(t *testing.T, c *torrent.Client, name string, pieceLength, length int64) (*torrent.Torrent, *torrent.File) {
-	t.Helper()
-	infoBytes, err := bencode.Marshal(metainfo.Info{
-		Name:        name,
-		PieceLength: pieceLength,
-		Length:      length,
-		Pieces:      make([]byte, (length+pieceLength-1)/pieceLength*sha1.Size),
-	})
-	require.NoError(t, err)
-	return addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
 }

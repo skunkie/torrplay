@@ -136,7 +136,8 @@ type Controller struct {
 	// settingsUpdateMu serializes settings updates from read through apply.
 	settingsUpdateMu sync.Mutex
 	// torrentClientUnavailable is set while the torrent client, storage, and
-	// piece completion are being replaced, and stays set if replacement fails.
+	// stream pool are being replaced, and stays set if the replacement fails.
+	// Streams and preloads are rejected while it is set.
 	torrentClientUnavailable atomic.Bool
 	torrentConfigMu          sync.Mutex
 	torrentGeneration        atomic.Uint64
@@ -755,8 +756,9 @@ func (c *Controller) cleanupExpiredTorrents() {
 			}
 
 			c.logger.Load().Debug("mark torrent as expired", "hash", ih, "age", sub)
+			c.cancelPreload(ih)
 			delete(c.torrentTracker.torrents, ih)
-			if to, ok := c.client.Torrent(ih); ok {
+			if to, ok := c.clientTorrent(ih); ok {
 				go func(t *torrent.Torrent, hash metainfo.Hash, age time.Duration) {
 					t.Drop()
 					<-t.Closed()
@@ -781,7 +783,7 @@ func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
 // It takes no controller lock, so callers may hold c.mu.
 func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloading bool) {
 	if pool := c.streamPool.Load(); pool != nil {
-		isStreaming = pool.HasReaders(ih)
+		isStreaming = pool.HasReaders(ih) || c.preloadActive(ih)
 	}
 	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
 		isDownloading = activeDownloader.IsActive(ih)
@@ -798,6 +800,24 @@ func (c *Controller) resolveHTTPPort() int {
 	}
 
 	return c.port
+}
+
+// clientTorrent looks up a torrent in the active client. It reports false when
+// no client is configured.
+func (c *Controller) clientTorrent(ih metainfo.Hash) (*torrent.Torrent, bool) {
+	client := c.currentClient()
+	if client == nil {
+		return nil, false
+	}
+	return client.Torrent(ih)
+}
+
+// currentClient returns the active torrent client, or nil before the first
+// configuration. Callers that already hold c.mu must read c.client directly.
+func (c *Controller) currentClient() *torrent.Client {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.client
 }
 
 func (c *Controller) configureTorrentClient() error {
