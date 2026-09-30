@@ -1280,6 +1280,19 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalSize = storageStats.TrackedBytes
 	}
 
+	if pool := c.streamPool.Load(); pool != nil {
+		readers := pool.ReaderPositions(to.InfoHash())
+		apiReaders := make([]api.ReaderInfo, len(readers))
+		for i, ri := range readers {
+			apiReaders[i] = api.ReaderInfo{
+				End:      ri.End,
+				Position: ri.Position,
+				Start:    ri.Start,
+			}
+		}
+		resp.Readers = &apiReaders
+	}
+
 	return resp, nil
 }
 

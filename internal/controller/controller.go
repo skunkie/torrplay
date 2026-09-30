@@ -841,6 +841,8 @@ func (c *Controller) configureTorrentClient() error {
 		_ = oldStorageClient.Close()
 		<-oldStorageClient.Closed()
 	}
+
+	// Close old stream pool.
 	if oldPool != nil {
 		oldPool.Close()
 	}

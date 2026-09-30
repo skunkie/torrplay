@@ -166,7 +166,7 @@ func finishBlockedIntegrationStream(t *testing.T, fixture localWebseedFixture, d
 	case err := <-done:
 		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("stream did not finish cleanly")
+		t.Fatal("stream did not finish after releasing the local webseed")
 	}
 }
 

@@ -4,7 +4,7 @@
 
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { getTorrentStats } from '@/lib/api/stats';
@@ -25,16 +25,22 @@ export function TorrentStatsDialog({ torrent, open, onOpenChange }: TorrentStats
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { liveUpdatesPaused } = useLiveUpdates();
+  const torrentRef = useRef(torrent);
+  const initializedRef = useRef(false);
+  const activeTorrentHashRef = useRef<string | null>(null);
+
+  torrentRef.current = torrent;
 
   const loadStats = useCallback(async (isInitialLoad: boolean) => {
-    if (!torrent) return;
+    const currentTorrent = torrentRef.current;
+    if (!currentTorrent) return;
 
     if (isInitialLoad) {
       setLoading(true);
     }
     setError(null);
     try {
-      const data = await getTorrentStats(torrent.hash);
+      const data = await getTorrentStats(currentTorrent.hash);
       setStats(data);
     } catch (err) {
       setStats(null); // Clear stats on error
@@ -48,16 +54,26 @@ export function TorrentStatsDialog({ torrent, open, onOpenChange }: TorrentStats
         setLoading(false);
       }
     }
-  }, [torrent]);
+  }, []);
+
+  useEffect(() => {
+    if (!open || !torrent) return;
+
+    if (torrent.hash === activeTorrentHashRef.current) return;
+
+    // Reset state only when opening for a different torrent
+    setStats(null);
+    setError(null);
+    setLoading(true);
+    initializedRef.current = true;
+    activeTorrentHashRef.current = torrent.hash;
+
+    loadStats(true);
+  }, [open, torrent, loadStats]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (open && torrent) {
-      // Reset state when dialog is opened for a new torrent
-      setStats(null);
-      setError(null);
-
-      loadStats(true);
+    if (open && initializedRef.current) {
       if (!liveUpdatesPaused) {
         interval = setInterval(() => loadStats(false), 2000);
       }
@@ -67,7 +83,7 @@ export function TorrentStatsDialog({ torrent, open, onOpenChange }: TorrentStats
         clearInterval(interval);
       }
     };
-  }, [open, torrent, loadStats, liveUpdatesPaused]);
+  }, [open, loadStats, liveUpdatesPaused]);
 
   const handleCopy = (value: string, label: string) => {
     navigator.clipboard.writeText(value).then(() => {
