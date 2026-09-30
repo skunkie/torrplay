@@ -248,11 +248,21 @@ func (c *Controller) GetLogs(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+// storageMemoryStats maps a storage MemoryStats snapshot to the API type.
+func storageMemoryStats(s memstorage.MemoryStats) api.MemoryStats {
+	return api.MemoryStats{
+		ActiveTorrents: s.TorrentsUsingMemory,
+		MaxMemory:      s.LimitBytes,
+		TotalPieces:    s.TrackedPieces,
+		UsedMemory:     s.UsedBytes,
+	}
+}
+
 func (c *Controller) GetMemoryStats(w http.ResponseWriter, _ *http.Request) {
-	stats := c.storageClient.Load().GetMemoryStats()
+	stats := c.storageClient.Load().MemoryStats()
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(api.MemoryStats(stats)); err != nil {
+	if err := json.NewEncoder(w).Encode(storageMemoryStats(stats)); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -1217,7 +1227,8 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.CompletedSize = to.BytesCompleted()
 		resp.InMemory = 0
 		resp.InMemorySize = 0
-		resp.MemoryStats = api.MemoryStats(c.storageClient.Load().GetMemoryStats())
+		memoryStats := c.storageClient.Load().MemoryStats()
+		resp.MemoryStats = storageMemoryStats(memoryStats)
 		resp.MemoryUsagePercentage = 0
 
 		pieces := make([]api.PieceInfo, to.NumPieces())
@@ -1234,27 +1245,32 @@ func (c *Controller) buildTorrentStats(to *torrent.Torrent) (*api.TorrentStats, 
 		resp.TotalPieces = to.NumPieces()
 		resp.TotalSize = to.Length()
 	} else {
-		storageStats, err := c.storageClient.Load().GetTorrentMemoryStats(to.InfoHash())
+		storageStats, err := c.storageClient.Load().TorrentStats(to.InfoHash())
 		if err != nil {
-			storageStats = &memstorage.TorrentMemoryStats{}
+			storageStats = memstorage.TorrentStats{}
 		}
 
 		var pieces []api.PieceInfo
 		if storageStats.Pieces != nil {
 			pieces = make([]api.PieceInfo, 0, len(storageStats.Pieces))
 			for _, p := range storageStats.Pieces {
-				pieces = append(pieces, api.PieceInfo(p))
+				pieces = append(pieces, api.PieceInfo{
+					Complete: p.Complete,
+					InMemory: p.Resident,
+					Index:    p.Index,
+					Size:     p.SizeBytes,
+				})
 			}
 		}
 
 		resp.Pieces = pieces
-		resp.CompletedSize = storageStats.CompletedSize
-		resp.InMemory = storageStats.InMemory
-		resp.InMemorySize = storageStats.InMemorySize
-		resp.MemoryStats = api.MemoryStats(storageStats.MemoryStats)
-		resp.MemoryUsagePercentage = storageStats.MemoryUsagePercentage
+		resp.CompletedSize = storageStats.CompletedBytes
+		resp.InMemory = storageStats.ResidentPieces
+		resp.InMemorySize = storageStats.ResidentBytes
+		resp.MemoryStats = storageMemoryStats(storageStats.Global)
+		resp.MemoryUsagePercentage = storageStats.MemoryUsageFraction() * 100
 		resp.TotalPieces = storageStats.TotalPieces
-		resp.TotalSize = storageStats.TotalSize
+		resp.TotalSize = storageStats.TrackedBytes
 	}
 
 	return resp, nil

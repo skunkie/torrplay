@@ -834,13 +834,16 @@ func (c *Controller) configureTorrentClient() error {
 		c.runtimeConfig.configureClient(clientConfig)
 	}
 
-	storageClient := memstorage.NewClient(*currentSettings.MaxMemory, logger)
+	storageClient := memstorage.New(*currentSettings.MaxMemory, logger)
 	clientConfig.DefaultStorage = storageClient
 
 	client, err := torrent.NewClient(clientConfig)
 	if err != nil {
 		return fmt.Errorf("failed to initiate torrent client: %w", err)
 	}
+	// Evicted pieces must stop counting as downloaded, or a torrent read in
+	// full looks complete to the client, which then drops its peers.
+	storageClient.SetEvictionHandler(memstorage.ClientEvictionHandler(client))
 
 	c.mu.Lock()
 	c.client = client

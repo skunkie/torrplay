@@ -5,6 +5,7 @@
 package storage
 
 import (
+	"cmp"
 	"container/list"
 	"context"
 	"crypto/sha1"
@@ -12,114 +13,258 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 )
 
-// ErrPieceNotAvailable is returned when trying to read a piece that is not in memory.
+// ErrPieceNotAvailable is returned when reading or hashing a piece that has
+// never been written or has been evicted.
 var ErrPieceNotAvailable = errors.New("piece not available in memory")
+
+// ErrPieceIncomplete is returned when reading or hashing piece bytes that have
+// not been written, such as when an in-progress piece was evicted and only its
+// later chunks were written to a fresh buffer. Reporting it as a storage error
+// keeps the torrent client from blaming, and banning, the peers that sent the
+// data.
+var ErrPieceIncomplete = errors.New("piece data is incomplete in memory")
 
 // ErrInsufficientMemory is returned when memory allocation fails even after attempting
 // to evict existing pieces to free up space.
 var ErrInsufficientMemory = errors.New("insufficient memory after eviction")
 
-// Client implements the storage.Client interface from anacrolix/torrent.
-// It provides a piece-level in-memory storage solution with a global memory limit
-// and an LRU eviction policy for multiple torrents.
-type Client struct {
-	mu        sync.RWMutex
-	maxMemory int64
-	// used is the total memory currently consumed by piece data.
-	used int64
+// ErrClientClosed is returned when an operation is attempted on a closed Client.
+var ErrClientClosed = errors.New("storage client is closed")
 
-	// pieces stores the metadata and data for each piece across all torrents.
-	pieces map[pieceKey]*pieceData
-	// lru is the global least-recently-used list for all pieces.
-	lru *list.List
+// ErrTorrentClosed is returned when an operation is attempted through a
+// TorrentImpl that has already been closed.
+var ErrTorrentClosed = errors.New("storage torrent is closed")
+
+// ErrTorrentNotManaged is returned when statistics are requested for a torrent
+// that is not currently managed by the client.
+var ErrTorrentNotManaged = errors.New("torrent is not managed by storage")
+
+// Client implements the storage.Client interface from anacrolix/torrent.
+type Client struct {
+	// allocationCond wakes allocations that are temporarily blocked behind
+	// unpublished buffers. It uses mu as its locker.
+	allocationCond *sync.Cond
+	// allocations tracks reservations until their buffers are published or refunded.
+	allocations sync.WaitGroup
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
-
+	// closed is protected by mu and rejects new work before closeCh is signaled.
+	closed bool
+	// evictedPending holds pieces evicted, or found missing when marked
+	// complete, since the eviction handler last ran. It is protected by mu
+	// and nil until a handler is registered.
+	evictedPending map[pieceKey]struct{}
+	// evictedSignal wakes the eviction notifier. It is nil until a handler is
+	// registered.
+	evictedSignal chan struct{}
+	// lru is the global least-recently-used list for all pieces.
+	lru       *list.List
+	logger    *slog.Logger
+	maxMemory int64
+	mu        sync.RWMutex
+	// notifier tracks the goroutine that runs the eviction handler.
+	notifier sync.WaitGroup
+	// pieces stores the metadata and data for each piece across all torrents.
+	pieces map[pieceKey]*pieceData
+	// pendingAllocations counts reservations whose buffers have not yet been
+	// published or refunded. It is protected by mu.
+	pendingAllocations int
+	// protections holds the piece ranges each owner, such as a stream reader
+	// or a preload, protects from eviction.
+	protections map[protectionKey]Protection
 	// torrents tracks the state for each torrent being managed.
 	torrents map[metainfo.Hash]*torrentState
-
-	logger *slog.Logger
+	// used is the total memory currently consumed by piece data.
+	used int64
 }
 
-// MemoryStats represents global memory usage statistics.
+// MemoryStats contains global storage memory statistics.
 type MemoryStats struct {
-	ActiveTorrents int   // Number of active torrents using memory.
-	MaxMemory      int64 // Maximum memory allowed in bytes.
-	TotalPieces    int   // Total number of pieces in memory.
-	UsedMemory     int64 // Current memory used in bytes.
+	// LimitBytes is the configured global memory limit in bytes.
+	LimitBytes int64
+	// TorrentsUsingMemory is the number of torrents currently consuming piece-buffer memory.
+	TorrentsUsingMemory int
+	// TrackedPieces is the number of piece records currently tracked across all torrents.
+	// A record may temporarily represent an in-flight allocation whose data is not yet published.
+	TrackedPieces int
+	// UsedBytes is the number of bytes currently reserved for piece data.
+	UsedBytes int64
 }
 
-// PieceInfo represents information about a torrent piece that we are actively managing.
-type PieceInfo struct {
-	Complete bool  // Whether the piece is marked as complete.
-	InMemory bool  // Whether the piece data is currently in memory.
-	Index    int   // Piece index.
-	Size     int64 // Piece size in bytes.
+// PieceStats describes a torrent piece currently tracked by the storage client.
+type PieceStats struct {
+	// Complete reports whether the piece is marked complete.
+	Complete bool
+	// Index is the absolute piece index within the torrent.
+	Index int
+	// Resident reports whether the piece data is resident in memory.
+	Resident bool
+	// SizeBytes is the expected piece size in bytes.
+	SizeBytes int64
+	// WrittenBytes is the number of bytes written into the resident piece buffer.
+	WrittenBytes int64
 }
 
-// TorrentMemoryStats contains statistics about a torrent that the storage is actively managing.
-type TorrentMemoryStats struct {
-	CompletedSize         int64       // Total size of completed pieces.
-	InMemory              int         // Number of pieces currently in memory.
-	InMemorySize          int64       // Total size of pieces currently in memory.
-	MemoryStats           MemoryStats // Global memory usage statistics.
-	MemoryUsagePercentage float64     // Percentage of maximum memory used by this torrent (0-100)
-	Pieces                []PieceInfo // All pieces we are managing (both completed and not completed).
-	TotalPieces           int         // Total number of pieces in the torrent, from metadata.
-	TotalSize             int64       // Total size of all managed pieces in bytes.
+// TorrentStats contains storage statistics for a managed torrent.
+type TorrentStats struct {
+	// CompletedBytes is the total expected size of tracked pieces marked complete.
+	CompletedBytes int64
+	// Global is the global memory snapshot captured with these torrent statistics.
+	Global MemoryStats
+	// Pieces contains all piece records currently tracked for the torrent.
+	Pieces []PieceStats
+	// ResidentBytes is the total resident piece-data size in bytes.
+	ResidentBytes int64
+	// ResidentPieces is the number of tracked pieces whose data is resident in memory.
+	ResidentPieces int
+	// TrackedBytes is the total expected size of all tracked pieces.
+	TrackedBytes int64
+	// TotalPieces is the torrent's total piece count from metadata.
+	TotalPieces int
+	// WrittenBytes is the total number of bytes written into resident piece buffers.
+	WrittenBytes int64
 }
 
 // pieceKey is a unique identifier for a piece within a specific torrent.
 type pieceKey struct {
-	hash  metainfo.Hash
-	index int
+	infoHash metainfo.Hash
+	index    int
 }
 
 // pieceData holds the data and state for a single torrent piece.
 type pieceData struct {
-	data      []byte        // The actual piece data, nil if not in memory.
-	complete  bool          // True if the piece has been successfully downloaded and verified.
-	lruElem   *list.Element // Pointer to the piece's element in the global LRU list.
-	mu        sync.RWMutex
-	pieceSize int64 // The expected size of the piece.
+	allocDone     chan struct{} // Closed when the single in-flight allocation finishes.
+	allocating    bool
+	data          []byte        // The actual piece data, nil if not in memory.
+	complete      bool          // True if the piece has been successfully downloaded and verified.
+	evicted       bool          // True if the piece was evicted or unlinked from tracking.
+	lruElem       *list.Element // Pointer to the piece's element in the global LRU list.
+	lastTouchNano atomic.Int64  // Unix timestamp in nanoseconds of last LRU move.
+	mu            sync.RWMutex
+	pieceSize     int64 // The expected size of the piece.
+	torrent       *torrentState
+	writtenBytes  int64 // Unique bytes covered by writtenRanges.
+	writtenRanges []byteRange
 }
 
-// torrentState holds the state specific to a single torrent.
+type byteRange struct {
+	start int64
+	end   int64
+}
+
+// downloadingPieceGrace is how long after its last write an incomplete piece
+// counts as still downloading, and so is spared while other pieces can be
+// evicted instead. Writes refresh it at most once per touchMinInterval.
+const downloadingPieceGrace = 30 * time.Second
+
+// evictionLevel is how deep eviction may reach into protected pieces. Each
+// level also evicts the pieces of the levels before it.
+type evictionLevel uint8
+
+const (
+	// evictUnprotected evicts pieces outside every protected range.
+	evictUnprotected evictionLevel = iota
+	// evictBoundaries also evicts file boundary pieces.
+	evictBoundaries
+	// evictActive also evicts active range pieces, as a last resort.
+	evictActive
+)
+
+// protectionKey identifies one owner's protection within a torrent.
+type protectionKey struct {
+	infoHash metainfo.Hash
+	ownerID  uint64
+}
+
+// PieceRange is an inclusive range of torrent piece indexes.
+type PieceRange struct {
+	End   int
+	Start int
+}
+
+// contains reports whether the range holds piece index.
+func (r PieceRange) contains(index int) bool {
+	return index >= r.Start && index <= r.End
+}
+
+// Protection holds the piece ranges one owner protects from standard LRU
+// eviction.
+type Protection struct {
+	// Active holds ranges being read or preloaded. Their pieces are evicted
+	// only as a last resort under severe memory pressure.
+	Active []PieceRange
+	// Boundaries holds the head and tail ranges of a streamed file, which keep
+	// container metadata such as MP4 moov atoms or Matroska cues resident.
+	// Their pieces are evicted before those of active ranges.
+	Boundaries []PieceRange
+}
+
+// torrentState holds the state specific to a single torrent. Client.mu
+// guards its fields.
 type torrentState struct {
-	mu          sync.RWMutex
-	pieceHashes []metainfo.Hash // The SHA1 hashes of all pieces in the torrent.
-	pieceMemory int64           // Memory used by this torrent.
+	openHandles int   // Number of live TorrentImpl handles.
+	pieceMemory int64 // Memory used by this torrent.
+	totalPieces int   // Total number of pieces from torrent metadata.
 }
 
-// NewClient creates a new memory-limited storage client.
-func NewClient(maxMemory int64, logger *slog.Logger) *Client {
+type torrentHandle struct {
+	closed    atomic.Bool
+	closeErr  error
+	closeOnce sync.Once
+}
+
+// New creates a storage client with the given memory limit in bytes.
+// Negative limits are treated as zero. A nil logger uses slog.Default.
+func New(maxMemory int64, logger *slog.Logger) *Client {
+	if maxMemory < 0 {
+		maxMemory = 0
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	c := &Client{
-		maxMemory: maxMemory,
-		pieces:    make(map[pieceKey]*pieceData),
-		torrents:  make(map[metainfo.Hash]*torrentState),
-		lru:       list.New(),
-		closeCh:   make(chan struct{}),
-		logger:    logger,
+		maxMemory:   maxMemory,
+		pieces:      make(map[pieceKey]*pieceData),
+		torrents:    make(map[metainfo.Hash]*torrentState),
+		protections: make(map[protectionKey]Protection),
+		lru:         list.New(),
+		closeCh:     make(chan struct{}),
+		logger:      logger,
 	}
-
+	c.allocationCond = sync.NewCond(&c.mu)
 	return c
 }
 
-// Close stops the client and cleans up, evicting all pieces from memory.
+// Close stops the client and evicts all pieces from memory.
+// It is safe to call multiple times.
 func (c *Client) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.closed {
+		c.mu.Unlock()
+		<-c.closeCh
+		c.notifier.Wait()
+		return nil
+	}
+	c.closed = true
+	c.mu.Unlock()
+
+	// No new reservations can start after closed is set. Let existing owners
+	// finish and refund their reservations before signaling shutdown.
+	c.allocations.Wait()
+
+	c.mu.Lock()
 
 	// Clear all pieces.
 	for key, pd := range c.pieces {
@@ -128,11 +273,15 @@ func (c *Client) Close() error {
 
 	c.pieces = make(map[pieceKey]*pieceData)
 	c.torrents = make(map[metainfo.Hash]*torrentState)
+	c.protections = make(map[protectionKey]Protection)
 	c.lru.Init()
 	c.used = 0
-
 	close(c.closeCh)
+	c.mu.Unlock()
 
+	// The notifier may be running the handler, which can call back into the
+	// client, so wait for it only after releasing mu.
+	c.notifier.Wait()
 	return nil
 }
 
@@ -142,452 +291,642 @@ func (c *Client) Closed() <-chan struct{} {
 	return c.closeCh
 }
 
-// ForceEvict can be used to manually trigger eviction down to a target memory usage.
-func (c *Client) ForceEvict(target int64) {
-	c.evictDownTo(target)
+// SetEvictionHandler registers handler to be told about every piece that
+// eviction removes, and about every piece that is already gone when the
+// torrent engine marks it complete. The engine caches piece completion, and
+// marks a hashed piece complete even when storing that fails, so without this
+// it keeps treating such pieces as downloaded: it skips them when reading
+// ahead, and once every piece of a torrent has been downloaded it considers
+// the torrent complete and may drop its peers. Pieces removed because their
+// torrent closed are not reported. The handler runs on a background goroutine
+// without any client lock held, so it may call back into the client.
+// Notifications for the same piece are coalesced. Only the first handler is
+// kept, and none is started after Close. Close stops the goroutine.
+func (c *Client) SetEvictionHandler(handler func(infoHash metainfo.Hash, index int)) {
+	if handler == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed || c.evictedSignal != nil {
+		return
+	}
+	c.evictedPending = make(map[pieceKey]struct{})
+	c.evictedSignal = make(chan struct{}, 1)
+	c.notifier.Go(func() { c.runEvictionNotifier(handler) })
 }
 
-// GetCompletedPieces returns a slice of piece indices that are marked as complete.
-// Returns nil if the torrent doesn't exist.
-func (c *Client) GetCompletedPieces(hash metainfo.Hash) []int {
-	info, err := c.GetTorrentMemoryStats(hash)
-	if err != nil {
-		return nil
+// ClientEvictionHandler returns an eviction handler that makes client re-read
+// the completion of each evicted piece, so it downloads the piece again when
+// it is next needed.
+func ClientEvictionHandler(client *torrent.Client) func(infoHash metainfo.Hash, index int) {
+	return func(infoHash metainfo.Hash, index int) {
+		to, ok := client.Torrent(infoHash)
+		if !ok || to.Info() == nil || index < 0 || index >= to.NumPieces() {
+			return
+		}
+		select {
+		case <-to.Closed():
+			return
+		default:
+		}
+		to.Piece(index).UpdateCompletion()
 	}
+}
 
-	completed := make([]int, 0, len(info.Pieces))
-	for _, piece := range info.Pieces {
-		if piece.Complete {
-			completed = append(completed, piece.Index)
+// runEvictionNotifier delivers pending eviction notifications to handler until
+// the client closes.
+func (c *Client) runEvictionNotifier(handler func(infoHash metainfo.Hash, index int)) {
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case <-c.evictedSignal:
+		}
+		c.mu.Lock()
+		pending := c.evictedPending
+		c.evictedPending = make(map[pieceKey]struct{})
+		c.mu.Unlock()
+		for key := range pending {
+			select {
+			case <-c.closeCh:
+				return
+			default:
+			}
+			handler(key.infoHash, key.index)
 		}
 	}
-
-	return completed
 }
 
-// GetCompletedProgress returns the percentage of managed pieces that are complete.
-// Returns 0 if torrent doesn't exist or has no managed pieces.
-func (c *Client) GetCompletedProgress(hash metainfo.Hash) float64 {
-	c.mu.RLock()
-	torrentState, ok := c.torrents[hash]
-	if !ok {
-		c.mu.RUnlock()
-		return 0
+// queueEvictionLocked records a piece for the eviction handler. c.mu must be
+// held.
+func (c *Client) queueEvictionLocked(key pieceKey) {
+	if c.evictedSignal == nil {
+		return
 	}
-	c.mu.RUnlock()
-
-	torrentState.mu.RLock()
-	totalPieces := len(torrentState.pieceHashes)
-	torrentState.mu.RUnlock()
-
-	if totalPieces == 0 {
-		return 0
+	c.evictedPending[key] = struct{}{}
+	select {
+	case c.evictedSignal <- struct{}{}:
+	default:
 	}
-
-	info, err := c.GetTorrentMemoryStats(hash)
-	if err != nil {
-		return 0
-	}
-
-	// Count completed pieces.
-	completedCount := 0
-	for _, piece := range info.Pieces {
-		if piece.Complete {
-			completedCount++
-		}
-	}
-
-	return float64(completedCount) / float64(totalPieces)
 }
 
-// GetIncompletePieces returns a slice of piece indices that are not marked as complete.
-// Returns nil if the torrent doesn't exist.
-func (c *Client) GetIncompletePieces(hash metainfo.Hash) []int {
-	info, err := c.GetTorrentMemoryStats(hash)
-	if err != nil {
-		return nil
-	}
-
-	incomplete := make([]int, 0, len(info.Pieces))
-	for _, piece := range info.Pieces {
-		if !piece.Complete {
-			incomplete = append(incomplete, piece.Index)
-		}
-	}
-
-	return incomplete
-}
-
-// GetMemoryStats returns current global memory usage statistics.
-func (c *Client) GetMemoryStats() MemoryStats {
+// MemoryStats returns current global memory usage statistics.
+func (c *Client) MemoryStats() MemoryStats {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.memoryStatsLocked()
+}
 
+// memoryStatsLocked returns a consistent global snapshot. c.mu must be held
+// for reading or writing by the caller.
+func (c *Client) memoryStatsLocked() MemoryStats {
 	var activeTorrents int
-	for ih := range c.torrents {
-		if used := c.GetTorrentMemoryUsage(ih); used > 0 {
+	for _, state := range c.torrents {
+		if state.pieceMemory > 0 {
 			activeTorrents++
 		}
 	}
 
 	return MemoryStats{
-		ActiveTorrents: activeTorrents,
-		MaxMemory:      c.maxMemory,
-		TotalPieces:    len(c.pieces),
-		UsedMemory:     c.used,
+		LimitBytes:          c.maxMemory,
+		TorrentsUsingMemory: activeTorrents,
+		TrackedPieces:       len(c.pieces),
+		UsedBytes:           c.used,
 	}
 }
 
-// GetMemoryUsageProgress returns the percentage of memory currently used by a torrent.
-// Returns 0 if torrent doesn't exist or has no managed pieces.
-func (c *Client) GetMemoryUsageProgress(hash metainfo.Hash) float64 {
-	info, err := c.GetTorrentMemoryStats(hash)
-	if err != nil || info.TotalPieces == 0 {
+// MemoryUsageFraction returns the fraction of the global memory limit used by
+// this torrent, in [0, 1].
+func (s TorrentStats) MemoryUsageFraction() float64 {
+	if s.Global.LimitBytes <= 0 {
 		return 0
 	}
-
-	return float64(info.InMemorySize) / float64(info.MemoryStats.MaxMemory)
+	return float64(s.ResidentBytes) / float64(s.Global.LimitBytes)
 }
 
-// GetPieceStatus returns detailed information about a specific piece that we are managing.
-// Returns nil if the piece is not being managed by the storage.
-func (c *Client) GetPieceStatus(hash metainfo.Hash, index int) *PieceInfo {
+// TorrentStats returns statistics for a managed torrent.
+// The piece statistics include records created by WriteAt that remain tracked.
+//
+// The returned stats are eventually consistent rather than atomic: the global snapshot and
+// piece-level fields are captured under separate lock acquisitions
+// to avoid holding c.mu.RLock() for the duration of piece iteration (which could starve writers
+// on torrents with thousands of pieces). Callers should treat the fields as a rough snapshot
+// suitable for progress bars and UI displays, not for assertions like ResidentBytes <= UsedBytes.
+//
+// It returns an error if the torrent is not managed.
+func (c *Client) TorrentStats(infoHash metainfo.Hash) (TorrentStats, error) {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	key := pieceKey{hash: hash, index: index}
-	pd, exists := c.pieces[key]
-	if !exists {
-		return nil
-	}
-
-	pd.mu.RLock()
-	defer pd.mu.RUnlock()
-
-	return &PieceInfo{
-		Complete: pd.complete,
-		InMemory: pd.data != nil,
-		Index:    index,
-		Size:     pd.pieceSize,
-	}
-}
-
-// GetPiecesInMemory returns a slice of piece indices that are currently in memory.
-// Returns nil if the torrent doesn't exist.
-func (c *Client) GetPiecesInMemory(hash metainfo.Hash) []int {
-	info, err := c.GetTorrentMemoryStats(hash)
-	if err != nil {
-		return nil
-	}
-
-	inMemory := make([]int, 0, len(info.Pieces))
-	for _, piece := range info.Pieces {
-		if piece.InMemory {
-			inMemory = append(inMemory, piece.Index)
-		}
-	}
-
-	return inMemory
-}
-
-// GetTorrentMemoryStats returns statistics only about a torrent that the storage is actively managing.
-// This includes pieces that have been created (via ReadAt or WriteAt) and are being tracked.
-// Returns error if the torrent doesn't exist.
-func (c *Client) GetTorrentMemoryStats(hash metainfo.Hash) (*TorrentMemoryStats, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 
 	// Check if torrent exists.
-	torrentState, exists := c.torrents[hash]
+	state, exists := c.torrents[infoHash]
 	if !exists {
-		return nil, fmt.Errorf("torrent %s is not managed by storage", hash)
+		c.mu.RUnlock()
+		return TorrentStats{}, fmt.Errorf("%w: %s", ErrTorrentNotManaged, infoHash)
 	}
 
-	torrentState.mu.RLock()
-	defer torrentState.mu.RUnlock()
+	totalPieces := state.totalPieces
 
-	info := &TorrentMemoryStats{
-		Pieces:      make([]PieceInfo, 0),
-		TotalPieces: len(torrentState.pieceHashes),
+	memoryStats := c.memoryStatsLocked()
+
+	// Collect piece keys belonging to this torrent, then release the global lock
+	// before reading per-piece data. This prevents starving the writers of
+	// c.mu: allocation, eviction, and LRU touches.
+	pieceKeys := make([]pieceKey, 0, totalPieces)
+	for key := range c.pieces {
+		if key.infoHash == infoHash {
+			pieceKeys = append(pieceKeys, key)
+		}
+	}
+	c.mu.RUnlock()
+
+	stats := TorrentStats{
+		Global:      memoryStats,
+		Pieces:      make([]PieceStats, 0, len(pieceKeys)),
+		TotalPieces: totalPieces,
 	}
 
-	// Get memory stats.
-	info.MemoryStats.MaxMemory = c.maxMemory
-	info.MemoryStats.UsedMemory = c.used
-	info.MemoryUsagePercentage = float64(info.InMemorySize) / float64(info.MemoryStats.MaxMemory) * 100
-
-	// Iterate through all pieces and collect only those belonging to this torrent.
-	for key, pd := range c.pieces {
-		if key.hash != hash {
+	// Acquire c.mu.RLock and pd.mu.RLock per-piece to read piece fields.
+	// The pd pointer remains valid even if the piece was concurrently evicted
+	// (Go's GC keeps the struct alive), and pd.mu.RLock() prevents a torn
+	// read of that piece's fields — though the piece may already be evicted
+	// by the time we read it, which is consistent with the eventually-consistent
+	// semantics documented on this function.
+	for _, key := range pieceKeys {
+		c.mu.RLock()
+		pd, ok := c.pieces[key]
+		if !ok {
+			c.mu.RUnlock()
 			continue
 		}
+		c.mu.RUnlock()
+
 		pd.mu.RLock()
 
-		pieceInfo := PieceInfo{
-			Index:    key.index,
-			Size:     pd.pieceSize,
-			Complete: pd.complete,
-			InMemory: pd.data != nil,
+		pieceStats := PieceStats{
+			Index:        key.index,
+			SizeBytes:    pd.pieceSize,
+			Complete:     pd.complete,
+			Resident:     pd.data != nil,
+			WrittenBytes: pd.writtenBytes,
 		}
 
-		// Add to pieces list.
-		info.Pieces = append(info.Pieces, pieceInfo)
-
-		// Update totals.
-		info.TotalSize += pd.pieceSize
+		stats.Pieces = append(stats.Pieces, pieceStats)
+		stats.TrackedBytes += pd.pieceSize
 
 		if pd.complete {
-			info.CompletedSize += pd.pieceSize
+			stats.CompletedBytes += pd.pieceSize
 		}
 
 		if pd.data != nil {
-			info.InMemory++
-			info.InMemorySize += int64(len(pd.data))
+			stats.ResidentPieces++
+			stats.ResidentBytes += int64(len(pd.data))
+			stats.WrittenBytes += pd.writtenBytes
 		}
 
 		pd.mu.RUnlock()
 	}
 
 	// Sort pieces by index for consistent output.
-	sort.Slice(info.Pieces, func(i, j int) bool {
-		return info.Pieces[i].Index < info.Pieces[j].Index
+	slices.SortFunc(stats.Pieces, func(a, b PieceStats) int {
+		return cmp.Compare(a.Index, b.Index)
 	})
 
-	return info, nil
-}
-
-// GetTorrentMemoryUsage returns memory usage for a specific torrent.
-func (c *Client) GetTorrentMemoryUsage(hash metainfo.Hash) int64 {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	if torrentState, exists := c.torrents[hash]; exists {
-		torrentState.mu.RLock()
-		defer torrentState.mu.RUnlock()
-		return torrentState.pieceMemory
-	}
-
-	return 0
+	return stats, nil
 }
 
 // OpenTorrent implements the storage.Client interface. It is called when a new
 // torrent is added to the torrent client.
-func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, hash metainfo.Hash) (storage.TorrentImpl, error) {
+func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash metainfo.Hash) (storage.TorrentImpl, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Extract piece hashes from torrent info.
-	// info.Pieces is a []byte containing concatenated SHA1 hashes (20 bytes each).
+	if c.closed {
+		return storage.TorrentImpl{}, ErrClientClosed
+	}
+
 	pieceCount := info.NumPieces()
-	pieceHashes := make([]metainfo.Hash, pieceCount)
 
-	for i := range pieceCount {
-		start := i * 20 // SHA1 is 20 bytes.
-		end := start + 20
-		if end > len(info.Pieces) {
-			// This shouldn't happen with a valid torrent file, but we check for safety.
-			c.logger.Error("invalid pieces length in torrent info",
-				slog.String("hash", hash.HexString()),
-				slog.Int("pieceIndex", i),
-				slog.Int("piecesLength", len(info.Pieces)))
-			return storage.TorrentImpl{}, errors.New("invalid pieces length in torrent info")
-		}
-
-		var h metainfo.Hash
-		copy(h[:], info.Pieces[start:end])
-		pieceHashes[i] = h
+	// Initialize or update torrent state. Piece hashes are deliberately not
+	// copied here: this backend indexes pieces by torrent and piece index, and
+	// pure v2 torrents can legitimately omit the v1-only Info.Pieces field.
+	state, exists := c.torrents[infoHash]
+	if !exists {
+		state = &torrentState{openHandles: 1, totalPieces: pieceCount}
+		c.torrents[infoHash] = state
+	} else {
+		state.openHandles++
+		state.totalPieces = pieceCount
 	}
-
-	// Initialize torrent state with piece hashes.
-	c.torrents[hash] = &torrentState{
-		pieceHashes: pieceHashes,
-	}
+	handle := &torrentHandle{}
 
 	return storage.TorrentImpl{
 		Piece: func(p metainfo.Piece) storage.PieceImpl {
 			return &pieceImpl{
-				client: c,
-				hash:   hash,
-				index:  p.Index(),
-				length: p.Length(),
+				client:    c,
+				infoHash:  infoHash,
+				index:     p.Index(),
+				pieceSize: p.Length(),
+				torrent:   state,
+				handle:    handle,
 			}
 		},
 		Close: func() error {
-			return c.closeTorrent(hash)
+			handle.closeOnce.Do(func() {
+				handle.closed.Store(true)
+				handle.closeErr = c.closeTorrent(infoHash, state)
+			})
+			return handle.closeErr
 		},
 	}, nil
 }
 
-// SetMaxMemory updates the maximum memory limit for the storage client.
-// If the new limit is lower than current usage, an eviction will be triggered
-// to bring memory usage within the new limit. This operation is thread-safe.
-func (c *Client) SetMaxMemory(maxMemory int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.maxMemory = maxMemory
-
-	// Trigger eviction if current usage exceeds the new limit.
-	if c.used > maxMemory {
-		c.evictDownToLocked(maxMemory)
+// releaseMemoryLocked releases a reservation. c.mu must be held by the caller.
+func (c *Client) releaseMemoryLocked(size int64, state *torrentState) {
+	c.used = max(c.used-size, 0)
+	if state != nil {
+		state.pieceMemory = max(state.pieceMemory-size, 0)
 	}
+}
 
-	c.logger.Debug("updated memory limit",
-		slog.Int64("newLimit", maxMemory),
-		slog.Int64("currentUsed", c.used))
+// torrentOpenErrLocked returns ErrClientClosed after Close, ErrTorrentClosed
+// when state is no longer the managed state of infoHash, and nil otherwise.
+// c.mu must be held.
+func (c *Client) torrentOpenErrLocked(infoHash metainfo.Hash, state *torrentState) error {
+	if c.closed {
+		return ErrClientClosed
+	}
+	if current, exists := c.torrents[infoHash]; !exists || current != state {
+		return ErrTorrentClosed
+	}
+	return nil
 }
 
 // allocateMemory reserves a given amount of memory for a piece. If the allocation
 // would exceed the memory limit, it attempts to evict least-recently-used pieces
-// to free up space. It returns ErrInsufficientMemory if enough space cannot be freed.
-func (c *Client) allocateMemory(size int64, hash metainfo.Hash) error {
-	c.mu.Lock()
+// to free up space. When eviction detaches an exact-size piece buffer, it returns
+// that buffer directly to the incoming allocation for reuse. The returned buffer
+// remains covered by the reservation added before this function returns.
+func (c *Client) allocateMemory(size int64, infoHash metainfo.Hash, state *torrentState) ([]byte, error) {
+	for {
+		c.mu.Lock()
 
-	// Check if we need to evict.
-	if c.used+size > c.maxMemory {
-		target := max(c.maxMemory-size, 0)
-
-		beforeEvict := c.used
-
-		// Evict pieces until we have enough space.
-		c.evictDownToLocked(target)
-
-		c.logger.Debug("memory allocation eviction",
-			slog.Int64("needed", size),
-			slog.Int64("before", beforeEvict),
-			slog.Int64("after", c.used))
-
-		// If still not enough memory, return error.
-		if c.used+size > c.maxMemory {
+		if err := c.torrentOpenErrLocked(infoHash, state); err != nil {
 			c.mu.Unlock()
-			return ErrInsufficientMemory
+			return nil, err
 		}
+
+		// Check if piece itself is larger than the total maxMemory limit.
+		if size > c.maxMemory {
+			c.mu.Unlock()
+			return nil, ErrInsufficientMemory
+		}
+
+		var reusable []byte
+		if c.used+size > c.maxMemory {
+			// Only an absolute lack of other capacity may evict an active
+			// range. An unpublished reservation will soon publish or refund
+			// its space, so wait for it below rather than discard pieces a
+			// reader is consuming.
+			deepest := evictBoundaries
+			if c.pendingAllocations == 0 {
+				deepest = evictActive
+			}
+			reusable = c.evictLocked(max(c.maxMemory-size, 0), deepest, size)
+
+			if c.used+size > c.maxMemory {
+				// Unprotected and boundary pieces have already been exhausted, so
+				// an unpublished reservation is the only memory that may be
+				// reclaimed without evicting an active range. Wait for one to
+				// publish or refund.
+				if c.pendingAllocations > 0 {
+					c.allocationCond.Wait()
+					c.mu.Unlock()
+					continue
+				}
+				c.mu.Unlock()
+				return nil, ErrInsufficientMemory
+			}
+		}
+
+		// Reserve the memory. The reservation remains pending until its buffer
+		// is published or refunded by completeAllocation.
+		c.used += size
+		state.pieceMemory += size
+		c.pendingAllocations++
+		c.allocations.Add(1)
+		c.mu.Unlock()
+
+		return reusable, nil
 	}
-
-	// Allocate the memory.
-	c.used += size
-
-	// Get torrent state before releasing the global lock.
-	torrentState, exists := c.torrents[hash]
-	c.mu.Unlock()
-
-	// Update torrent-specific memory usage.
-	if exists {
-		torrentState.mu.Lock()
-		torrentState.pieceMemory += size
-		torrentState.mu.Unlock()
-	}
-
-	return nil
 }
 
-// closeTorrent removes all pieces associated with a specific torrent from memory and
-// cleans up the torrent's state.
-func (c *Client) closeTorrent(hash metainfo.Hash) error {
+// completeAllocation finishes an unpublished reservation and wakes allocators
+// that may now be able to evict its published buffer or use its refunded space.
+func (c *Client) completeAllocation() {
+	c.mu.Lock()
+	c.pendingAllocations--
+	c.allocations.Done()
+	c.allocationCond.Broadcast()
+	c.mu.Unlock()
+}
+
+// closeTorrent releases one TorrentImpl handle. The final handle removes all
+// pieces associated with the torrent and cleans up its state.
+func (c *Client) closeTorrent(infoHash metainfo.Hash, state *torrentState) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if current, exists := c.torrents[infoHash]; !exists || current != state {
+		return nil
+	}
+	state.openHandles--
+	if state.openHandles > 0 {
+		return nil
+	}
 
 	// Remove all pieces for this torrent.
 	var totalEvicted int64
 	for key, pd := range c.pieces {
-		if key.hash == hash {
-			size := int64(len(pd.data))
-			c.evictPieceLocked(key, pd)
-			totalEvicted += size
+		if key.infoHash != infoHash || pd.torrent != state {
+			continue
+		}
+		// Read pd.data under the piece lock so len() is consistent with
+		// concurrent writes to the piece.
+		pd.mu.RLock()
+		size := int64(len(pd.data))
+		pd.mu.RUnlock()
+		c.evictPieceLocked(key, pd)
+		totalEvicted += size
+	}
+
+	// Remove the protections for this torrent.
+	for key := range c.protections {
+		if key.infoHash == infoHash {
+			delete(c.protections, key)
 		}
 	}
 
 	// Remove torrent state.
-	delete(c.torrents, hash)
+	delete(c.torrents, infoHash)
 
 	c.logger.Debug("closed torrent",
-		slog.String("hash", hash.HexString()),
+		slog.String("hash", infoHash.HexString()),
 		slog.Int64("evicted", totalEvicted))
 
 	return nil
 }
 
-// evictDownTo is a wrapper for evictDownToLocked that acquires the necessary lock.
-func (c *Client) evictDownTo(target int64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.evictDownToLocked(target)
-}
-
-// evictDownToLocked evicts pieces from the LRU list until the total memory usage
-// is at or below the target. It must be called with the client's mutex held.
-func (c *Client) evictDownToLocked(target int64) {
+// evictLocked evicts pieces, least recently used first, until memory usage
+// is at most target. It gives up unprotected pieces first, then file boundary
+// pieces, and last active range pieces, stopping after the deepest level. Within
+// each level, pieces still downloading are spared until nothing else is left,
+// because an evicted partial piece must be downloaded again in full. When
+// reuseSize is positive, the first detached buffer of exactly that length is
+// returned for immediate handoff to an incoming allocation. c.mu must be held.
+func (c *Client) evictLocked(target int64, deepest evictionLevel, reuseSize int64) []byte {
 	if c.used <= target {
-		return
+		return nil
 	}
 
-	evicted := int64(0)
-	targetEvict := c.used - target
+	before := c.used
+	downloadingSince := time.Now().Add(-downloadingPieceGrace).UnixNano()
+	var reusable []byte
+	for level := evictUnprotected; level <= deepest && c.used > target; level++ {
+		for _, since := range []int64{downloadingSince, 0} {
+			if c.used <= target {
+				break
+			}
+			if detached := c.evictPassLocked(target, level, reuseSize, since); reusable == nil && detached != nil {
+				reusable, reuseSize = detached, 0
+			}
+		}
+	}
 
-	// Iterate from the back of the LRU list (least recently used).
-	for e := c.lru.Back(); e != nil && evicted < targetEvict; {
+	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		c.logger.Debug("eviction completed",
+			slog.Int64("target", target),
+			slog.Int64("evicted", before-c.used),
+			slog.Int64("newUsed", c.used))
+	}
+	return reusable
+}
+
+// evictPassLocked walks the LRU list from its least recently used end and
+// evicts pieces the eviction level allows until target is reached. Incomplete
+// pieces touched after downloadingSince, in Unix nanoseconds, are skipped as
+// still downloading; zero spares none. c.mu must be held.
+func (c *Client) evictPassLocked(target int64, level evictionLevel, reuseSize, downloadingSince int64) []byte {
+	var reusable []byte
+	for e := c.lru.Back(); e != nil && c.used > target; {
 		key := e.Value.(pieceKey)
 		next := e.Prev() // Save the next element before potential removal.
 
 		if pd, ok := c.pieces[key]; ok {
-			size := int64(len(pd.data))
-			c.evictPieceLocked(key, pd)
-			evicted += size
+			dataLen := len(pd.data)
+			if dataLen == 0 {
+				e = next
+				continue
+			}
 
-			// Update torrent-specific memory usage.
-			if torrentState, exists := c.torrents[key.hash]; exists {
-				torrentState.mu.Lock()
-				torrentState.pieceMemory -= size
-				torrentState.mu.Unlock()
+			inActiveRange, inFileBoundary := c.pieceProtectionLocked(key)
+			switch level {
+			case evictUnprotected:
+				if inActiveRange || inFileBoundary {
+					e = next
+					continue
+				}
+			case evictBoundaries:
+				if inActiveRange {
+					e = next
+					continue
+				}
+			case evictActive:
+			}
+			if downloadingSince > 0 && pd.lastTouchNano.Load() > downloadingSince {
+				pd.mu.RLock()
+				downloading := !pd.complete
+				pd.mu.RUnlock()
+				if downloading {
+					e = next
+					continue
+				}
+			}
+			if level == evictActive && c.logger.Enabled(context.Background(), slog.LevelWarn) && inActiveRange {
+				c.logger.Warn("emergency eviction of active range piece under memory pressure",
+					slog.String("hash", key.infoHash.HexString()),
+					slog.Int("piece", key.index),
+					slog.Int64("size", int64(dataLen)))
+			}
+
+			c.queueEvictionLocked(key)
+			detached := c.evictPieceLocked(key, pd)
+			if reusable == nil && int64(dataLen) == reuseSize {
+				reusable = detached
 			}
 		}
 
 		e = next
 	}
-
-	c.logger.Debug("eviction completed",
-		slog.Int64("target", target),
-		slog.Int64("evicted", evicted),
-		slog.Int64("newUsed", c.used))
+	return reusable
 }
 
-// evictPieceLocked removes a piece's data from memory and the LRU list.
-// It must be called with the client's mutex held.
-func (c *Client) evictPieceLocked(key pieceKey, pd *pieceData) {
+// recordWrittenRange adds [start, end) to the piece's sorted, disjoint written
+// ranges, merging ranges it overlaps or touches. Ranges are updated in place,
+// so sequential writes extend one range without allocating.
+func (pd *pieceData) recordWrittenRange(start, end int64) {
+	if start >= end {
+		return
+	}
+
+	ranges := pd.writtenRanges
+	// first is the first range that overlaps or touches the new one, and last
+	// is one past the final such range.
+	first := sort.Search(len(ranges), func(i int) bool { return ranges[i].end >= start })
+	last := first
+	for last < len(ranges) && ranges[last].start <= end {
+		last++
+	}
+	if first == last {
+		ranges = slices.Insert(ranges, first, byteRange{start: start, end: end})
+	} else {
+		ranges[first] = byteRange{
+			start: min(start, ranges[first].start),
+			end:   max(end, ranges[last-1].end),
+		}
+		ranges = slices.Delete(ranges, first+1, last)
+	}
+
+	pd.writtenRanges = ranges
+	pd.writtenBytes = 0
+	for _, current := range ranges {
+		pd.writtenBytes += current.end - current.start
+	}
+}
+
+// rangeWritten reports whether [start, end) lies within a single written
+// range. Written ranges are merged when they touch, so a fully written span
+// is always covered by one range. pd.mu must be held.
+func (pd *pieceData) rangeWritten(start, end int64) bool {
+	if start >= end {
+		return true
+	}
+	i := sort.Search(len(pd.writtenRanges), func(i int) bool { return pd.writtenRanges[i].end > start })
+	return i < len(pd.writtenRanges) && pd.writtenRanges[i].start <= start && pd.writtenRanges[i].end >= end
+}
+
+// pieceProtectionLocked reports whether a piece falls inside any registered
+// active range or file boundary of its torrent. Must be called with c.mu held.
+func (c *Client) pieceProtectionLocked(key pieceKey) (inActiveRange, inFileBoundary bool) {
+	for k, protection := range c.protections {
+		if k.infoHash != key.infoHash {
+			continue
+		}
+		if !inActiveRange && slices.ContainsFunc(protection.Active, func(r PieceRange) bool { return r.contains(key.index) }) {
+			inActiveRange = true
+		}
+		if !inFileBoundary && slices.ContainsFunc(protection.Boundaries, func(r PieceRange) bool { return r.contains(key.index) }) {
+			inFileBoundary = true
+		}
+		if inActiveRange && inFileBoundary {
+			return true, true
+		}
+	}
+	return inActiveRange, inFileBoundary
+}
+
+// SetProtection replaces the piece ranges that the owner with ownerID, a
+// caller-chosen identifier unique within the torrent, protects from standard
+// LRU eviction. Ranges hold absolute piece indexes within the torrent. An
+// empty protection clears the owner's. Protection for a torrent the client no
+// longer manages is ignored.
+func (c *Client) SetProtection(infoHash metainfo.Hash, ownerID uint64, protection Protection) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	key := protectionKey{infoHash: infoHash, ownerID: ownerID}
+	// A late call from the stream pool can arrive after closeTorrent has
+	// already deleted the torrent state; drop it to prevent orphaned entries.
+	if _, exists := c.torrents[infoHash]; !exists || (len(protection.Active) == 0 && len(protection.Boundaries) == 0) {
+		delete(c.protections, key)
+		return
+	}
+	c.protections[key] = Protection{
+		Active:     slices.Clone(protection.Active),
+		Boundaries: slices.Clone(protection.Boundaries),
+	}
+}
+
+// ClearProtection removes the owner's protection, allowing its pieces to
+// become eviction candidates again.
+func (c *Client) ClearProtection(infoHash metainfo.Hash, ownerID uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	delete(c.protections, protectionKey{infoHash: infoHash, ownerID: ownerID})
+
+	c.logger.Debug("cleared protection",
+		slog.String("hash", infoHash.HexString()),
+		slog.Uint64("ownerID", ownerID))
+}
+
+// evictPieceLocked removes a piece's data from memory and the LRU list and
+// returns the detached data buffer. Callers may discard it or immediately hand
+// it to another fully-accounted allocation.
+// It must be called with the client's mutex held. Acquires pd.mu to safely
+// nil out the data slice, preventing a data race with concurrent ReadAt calls.
+func (c *Client) evictPieceLocked(key pieceKey, pd *pieceData) []byte {
+	pd.mu.Lock()
+	pd.evicted = true
+	data := pd.data
 	if pd.data != nil {
-		size := int64(len(pd.data))
-		c.used -= size
+		c.releaseMemoryLocked(int64(len(pd.data)), pd.torrent)
 		pd.data = nil
 	}
+	pd.mu.Unlock()
+
 	if pd.lruElem != nil {
 		c.lru.Remove(pd.lruElem)
 		pd.lruElem = nil
 	}
 	delete(c.pieces, key)
 
-	c.logger.Debug("evicted piece",
-		slog.String("hash", key.hash.HexString()),
-		slog.Int("piece", key.index))
+	if c.logger.Enabled(context.Background(), slog.LevelDebug) {
+		c.logger.Debug("evicted piece",
+			slog.String("hash", key.infoHash.HexString()),
+			slog.Int("piece", key.index))
+	}
+
+	return data
 }
 
 // pieceImpl implements the storage.PieceImpl interface.
 type pieceImpl struct {
-	client *Client
-	hash   metainfo.Hash
-	index  int
-	length int64
+	client    *Client
+	handle    *torrentHandle
+	infoHash  metainfo.Hash
+	index     int
+	pieceSize int64
+	torrent   *torrentState
 }
 
 // Completion implements the storage.PieceImpl interface.
+// It returns Ok: true so the torrent engine knows the status definitively without
+// halting downloads with an Err, and Complete: pd.complete (or false if untracked/evicted).
 func (p *pieceImpl) Completion() storage.Completion {
 	pd, err := p.getPieceData()
 	if err != nil {
-		return storage.Completion{}
+		// Piece was evicted or never existed: report as known-incomplete (Complete: false, Ok: true)
+		// so anacrolix/torrent removes it from the completed-pieces bitmap and allows downloading
+		// without triggering an error or halting the torrent.
+		return storage.Completion{Complete: false, Ok: true}
 	}
 
 	pd.mu.RLock()
 	defer pd.mu.RUnlock()
 
+	// Both untracked pieces (above) and in-flight/incomplete pieces (pd.complete == false)
+	// correctly report Complete: false with Ok: true.
 	return storage.Completion{
 		Complete: pd.complete,
 		Ok:       true,
@@ -598,20 +937,38 @@ func (p *pieceImpl) Completion() storage.Completion {
 func (p *pieceImpl) MarkComplete() error {
 	pd, err := p.getPieceData()
 	if err != nil {
+		if errors.Is(err, ErrPieceNotAvailable) {
+			p.reportMissingOnComplete()
+		}
 		return err
 	}
 
 	pd.mu.Lock()
-	defer pd.mu.Unlock()
-
 	// Only mark as complete if we have the data in memory.
 	if pd.data == nil {
+		// Queueing needs c.mu, which must never be taken while holding pd.mu.
+		pd.mu.Unlock()
+		p.reportMissingOnComplete()
 		return errors.New("cannot mark incomplete piece as complete without data")
 	}
-
 	pd.complete = true
+	pd.mu.Unlock()
 
 	return nil
+}
+
+// reportMissingOnComplete queues a piece that was evicted between hashing and
+// being marked complete. The torrent engine marks it complete regardless, so
+// the eviction handler must make it re-read the completion. c.mu and pd.mu
+// must not be held.
+func (p *pieceImpl) reportMissingOnComplete() {
+	c := p.client
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if current, exists := c.torrents[p.infoHash]; !exists || current != p.torrent {
+		return
+	}
+	c.queueEvictionLocked(p.key())
 }
 
 // MarkNotComplete implements the storage.PieceImpl interface.
@@ -635,7 +992,10 @@ func (p *pieceImpl) MarkNotComplete() error {
 
 // ReadAt implements the storage.PieceImpl interface.
 func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
-	pd := p.getOrCreatePieceData()
+	pd, err := p.getPieceData()
+	if err != nil {
+		return 0, ErrPieceNotAvailable
+	}
 
 	pd.mu.RLock()
 
@@ -646,12 +1006,12 @@ func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 	}
 
 	// Boundary checks.
-	if off < 0 || off >= p.length {
+	if off < 0 || off >= p.pieceSize {
 		pd.mu.RUnlock()
-		p.touchPiece()
+		p.touchPiece(pd)
 		return 0, io.EOF
 	}
-	remaining := p.length - off
+	remaining := p.pieceSize - off
 	if int64(len(b)) > remaining {
 		b = b[:remaining]
 		err = io.EOF
@@ -667,146 +1027,320 @@ func (p *pieceImpl) ReadAt(b []byte, off int64) (n int, err error) {
 		}
 	}
 
+	// Bytes never written since the buffer was allocated, such as chunks
+	// lost when an in-progress piece was evicted, read as zeros. Refuse them
+	// so no caller mistakes them for piece data.
+	if !pd.rangeWritten(off, end) {
+		pd.mu.RUnlock()
+		return 0, ErrPieceIncomplete
+	}
+
 	n = copy(b, pd.data[off:end])
 	if n < len(b) && err == nil {
 		err = io.EOF // Signal that not all requested bytes were returned.
 	}
 
 	pd.mu.RUnlock()
-	p.touchPiece()
+	p.touchPiece(pd)
 
 	return n, err
 }
 
-// SelfHash implements the storage.SelfHashing interface, computing the SHA1 hash
-// of the piece data in memory.
+// SelfHash implements the storage.SelfHashing interface, computing the SHA-1 hash
+// of the piece data in memory. It returns ErrPieceIncomplete unless every byte
+// of the current buffer has been written.
 func (p *pieceImpl) SelfHash() (metainfo.Hash, error) {
-	p.client.mu.RLock()
-	defer p.client.mu.RUnlock()
-
-	key := pieceKey{hash: p.hash, index: p.index}
-	pd, exists := p.client.pieces[key]
-	if !exists {
-		return metainfo.Hash{}, nil // No piece data, no hash.
+	pd, err := p.getPieceData()
+	if err != nil {
+		return metainfo.Hash{}, ErrPieceNotAvailable
 	}
 
 	pd.mu.RLock()
 	defer pd.mu.RUnlock()
 
 	if pd.data == nil {
-		return metainfo.Hash{}, errors.New("piece data not in memory")
+		return metainfo.Hash{}, ErrPieceNotAvailable
+	}
+	// Chunks lost to eviction would hash as zeros and look like corrupt peer
+	// data. anacrolix bans the sole contributor of a piece that fails its
+	// hash without a storage error, so report the gap as one instead.
+	if pd.writtenBytes < int64(len(pd.data)) {
+		return metainfo.Hash{}, ErrPieceIncomplete
 	}
 
-	// Compute SHA1 hash.
-	hash := sha1.Sum(pd.data)
+	// Compute the SHA-1 hash.
+	digest := sha1.Sum(pd.data)
 	var result metainfo.Hash
-	copy(result[:], hash[:])
+	copy(result[:], digest[:])
 
 	return result, nil
 }
 
+const maxWriteAllocRetries = 3
+
 // WriteAt implements the storage.PieceImpl interface.
 func (p *pieceImpl) WriteAt(b []byte, off int64) (n int, err error) {
-	pd := p.getOrCreatePieceData()
+	var lastErr error
+	for range maxWriteAllocRetries {
+		pd, getErr := p.getOrCreatePieceData()
+		if getErr != nil {
+			return 0, getErr
+		}
 
-	// Ensure data is allocated. This function will handle locking.
-	if err := p.ensureDataAllocated(pd); err != nil {
-		return 0, err
+		// Ensure data is allocated. This function will handle locking.
+		if err := p.ensureDataAllocated(pd); err != nil {
+			lastErr = err
+			if errors.Is(err, ErrPieceNotAvailable) {
+				// pd was evicted/unlinked while allocation was in flight.
+				// Retry with a fresh piece from getOrCreatePieceData.
+				continue
+			}
+			return 0, err
+		}
+
+		pd.mu.Lock()
+
+		// Detect if piece data was evicted between ensureDataAllocated and pd.mu.Lock().
+		if pd.data == nil || pd.evicted {
+			lastErr = ErrPieceNotAvailable
+			pd.mu.Unlock()
+			continue
+		}
+		if p.handle.closed.Load() {
+			pd.mu.Unlock()
+			return 0, ErrTorrentClosed
+		}
+
+		// Boundary checks.
+		if off < 0 || off > p.pieceSize {
+			pd.mu.Unlock()
+			return 0, errors.New("offset out of piece bounds")
+		}
+		if int64(len(b)) > p.pieceSize-off {
+			pd.mu.Unlock()
+			return 0, io.ErrShortWrite
+		}
+		if off+int64(len(b)) > int64(len(pd.data)) {
+			pd.mu.Unlock()
+			return 0, io.ErrShortWrite
+		}
+
+		copy(pd.data[off:], b)
+		n = len(b)
+		pd.recordWrittenRange(off, off+int64(n))
+		pd.mu.Unlock()
+
+		p.touchPiece(pd)
+
+		return n, nil
+	}
+
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return 0, ErrInsufficientMemory
+}
+
+// ensureDataAllocated makes sure that the piece's data slice is allocated. A
+// single goroutine owns the allocation while concurrent writers wait for it.
+func (p *pieceImpl) ensureDataAllocated(pd *pieceData) error {
+	for {
+		pd.mu.Lock()
+		switch {
+		case pd.evicted:
+			pd.mu.Unlock()
+			return ErrPieceNotAvailable
+		case pd.data != nil:
+			pd.mu.Unlock()
+			return nil
+		case pd.allocating:
+			done := pd.allocDone
+			pd.mu.Unlock()
+			<-done
+			continue
+		default:
+			pd.allocating = true
+			pd.allocDone = make(chan struct{})
+			pd.mu.Unlock()
+		}
+		break
+	}
+
+	data, err := p.client.allocateMemory(pd.pieceSize, p.infoHash, p.torrent)
+	if err != nil {
+		p.cleanupEmptyPiece(pd)
+		return err
+	}
+	defer p.client.completeAllocation()
+
+	if data == nil {
+		data = make([]byte, pd.pieceSize)
+	} else {
+		// Writes may cover only part of a piece. Clear recycled bytes before
+		// publication so unwritten regions never expose the evicted piece.
+		clear(data)
+	}
+	return p.commitPieceAllocation(pd, data)
+}
+
+// commitPieceAllocation publishes allocated data and revalidates the memory.
+func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
+	c := p.client
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	err := p.openErrLocked()
+	if err == nil {
+		c.evictLocked(c.maxMemory, evictActive, 0)
+		if c.used > c.maxMemory {
+			err = ErrInsufficientMemory
+		}
+	}
+	if err != nil {
+		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
+		p.finishFailedAllocationLocked(pd)
+		return err
 	}
 
 	pd.mu.Lock()
-
-	// Boundary checks.
-	if off < 0 || off > p.length {
-		pd.mu.Unlock()
-		return 0, errors.New("offset out of piece bounds")
+	defer pd.mu.Unlock()
+	if pd.evicted || c.pieces[p.key()] != pd {
+		c.releaseMemoryLocked(pd.pieceSize, p.torrent)
+		p.finishAllocationLocked(pd)
+		return ErrPieceNotAvailable
 	}
-	if int64(len(b)) > p.length-off {
-		pd.mu.Unlock()
-		return 0, io.ErrShortWrite
-	}
-	if off+int64(len(b)) > int64(len(pd.data)) {
-		pd.mu.Unlock()
-		return 0, io.ErrShortWrite
-	}
-
-	copy(pd.data[off:], b)
-	n = len(b)
-	pd.mu.Unlock()
-
-	p.touchPiece()
-
-	return n, nil
+	pd.data = data
+	p.finishAllocationLocked(pd)
+	return nil
 }
 
-// ensureDataAllocated makes sure that the piece's data slice is allocated.
-func (p *pieceImpl) ensureDataAllocated(pd *pieceData) error {
-	pd.mu.RLock()
-	needsAlloc := pd.data == nil
-	pd.mu.RUnlock()
-
-	if needsAlloc {
-		if err := p.client.allocateMemory(pd.pieceSize, p.hash); err != nil {
-			return err
-		}
-		pd.mu.Lock()
-		if pd.data == nil {
-			pd.data = make([]byte, pd.pieceSize)
-		}
-		pd.mu.Unlock()
+// finishAllocationLocked wakes writers waiting for the current allocation.
+// pd.mu must be held.
+func (p *pieceImpl) finishAllocationLocked(pd *pieceData) {
+	if pd.allocating {
+		pd.allocating = false
+		close(pd.allocDone)
+		pd.allocDone = nil
 	}
-	return nil
+}
+
+// finishFailedAllocationLocked unlinks an empty piece and wakes waiters.
+// c.mu must be held; this function acquires pd.mu.
+func (p *pieceImpl) finishFailedAllocationLocked(pd *pieceData) {
+	pd.mu.Lock()
+	defer pd.mu.Unlock()
+	if existing, ok := p.client.pieces[p.key()]; ok && existing == pd && pd.data == nil {
+		pd.evicted = true
+		if pd.lruElem != nil {
+			p.client.lru.Remove(pd.lruElem)
+			pd.lruElem = nil
+		}
+		delete(p.client.pieces, p.key())
+	}
+	p.finishAllocationLocked(pd)
+}
+
+// cleanupEmptyPiece removes a piece entry from tracking if its data was never
+// successfully allocated (e.g. allocateMemory failed). Must be called without locks held.
+func (p *pieceImpl) cleanupEmptyPiece(pd *pieceData) {
+	p.client.mu.Lock()
+	defer p.client.mu.Unlock()
+	p.finishFailedAllocationLocked(pd)
 }
 
 // getOrCreatePieceData retrieves the pieceData for a piece, creating it if it doesn't exist.
 // This ensures that piece metadata is tracked as soon as it's accessed.
-func (p *pieceImpl) getOrCreatePieceData() *pieceData {
+func (p *pieceImpl) getOrCreatePieceData() (*pieceData, error) {
 	p.client.mu.Lock()
 	defer p.client.mu.Unlock()
+
+	if err := p.openErrLocked(); err != nil {
+		return nil, err
+	}
 
 	key := p.key()
 
 	// Return the piece if it already exists.
 	if pd, ok := p.client.pieces[key]; ok {
-		return pd
+		return pd, nil
 	}
 
-	// Create a new piece, add it to the tracking map, and place it in the LRU list.
+	// Create and register new piece data.
 	pd := &pieceData{
-		pieceSize: p.length,
+		pieceSize: p.pieceSize,
+		torrent:   p.torrent,
 	}
+	pd.lastTouchNano.Store(time.Now().UnixNano())
+
 	p.client.pieces[key] = pd
 	pd.lruElem = p.client.lru.PushFront(key)
 
-	return pd
+	return pd, nil
 }
 
-// getPieceData retrieves the pieceData for a piece only if it already exists.
+// getPieceData retrieves the pieceData for a piece, returning ErrPieceNotAvailable
+// if it does not exist in memory.
 func (p *pieceImpl) getPieceData() (*pieceData, error) {
-	p.client.mu.Lock()
-	defer p.client.mu.Unlock()
+	p.client.mu.RLock()
+	defer p.client.mu.RUnlock()
+	if err := p.openErrLocked(); err != nil {
+		return nil, err
+	}
 
 	key := p.key()
 
-	if pd, ok := p.client.pieces[key]; ok {
+	if pd, ok := p.client.pieces[key]; ok && pd.torrent == p.torrent {
 		return pd, nil
 	}
 
 	return nil, ErrPieceNotAvailable
 }
 
+// openErrLocked returns ErrClientClosed after Close, ErrTorrentClosed once
+// the piece's torrent handle or torrent closed, and nil otherwise. c.mu must
+// be held.
+func (p *pieceImpl) openErrLocked() error {
+	if err := p.client.torrentOpenErrLocked(p.infoHash, p.torrent); err != nil {
+		return err
+	}
+	if p.handle.closed.Load() {
+		return ErrTorrentClosed
+	}
+	return nil
+}
+
 // key generates the unique pieceKey for the current piece.
 func (p *pieceImpl) key() pieceKey {
-	return pieceKey{hash: p.hash, index: p.index}
+	return pieceKey{infoHash: p.infoHash, index: p.index}
 }
+
+const touchMinInterval = int64(time.Second)
 
 // touchPiece moves a piece to the front of the LRU list, marking it as
 // recently used.
-func (p *pieceImpl) touchPiece() {
-	p.client.mu.Lock()
-	defer p.client.mu.Unlock()
+func (p *pieceImpl) touchPiece(pd *pieceData) {
+	if pd == nil {
+		return
+	}
 
-	if pd, ok := p.client.pieces[p.key()]; ok && pd.lruElem != nil {
-		p.client.lru.MoveToFront(pd.lruElem)
+	pd.mu.RLock()
+	if pd.evicted {
+		pd.mu.RUnlock()
+		return
+	}
+	pd.mu.RUnlock()
+
+	now := time.Now().UnixNano()
+	last := pd.lastTouchNano.Load()
+	if now >= last && now-last < touchMinInterval {
+		return
+	}
+
+	if pd.lastTouchNano.CompareAndSwap(last, now) {
+		p.client.mu.Lock()
+		if pd.lruElem != nil {
+			p.client.lru.MoveToFront(pd.lruElem)
+		}
+		p.client.mu.Unlock()
 	}
 }

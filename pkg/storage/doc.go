@@ -11,10 +11,11 @@
 // The Client type manages torrent data storage with configurable memory limits. Unlike traditional
 // file-based storage, this implementation keeps downloaded pieces in memory, making it suitable for
 // scenarios where:
-// - Disk I/O should be minimized.
-// - Data needs to be served quickly to peers.
-// - Memory is plentiful but limited.
-// - Temporary storage of downloaded content is required.
+//
+//   - Disk I/O should be minimized.
+//   - Data needs to be served quickly to peers.
+//   - Memory use must remain bounded.
+//   - Downloaded data is temporary.
 //
 // # Key Features
 //
@@ -29,14 +30,20 @@
 //  4. Statistics: Provides comprehensive memory usage statistics at both global and per-torrent levels.
 //
 //  5. Self-Hashing: Implements the SelfHashing interface to verify piece integrity without external
-//     hashing mechanisms.
+//     hashing mechanisms. A piece whose buffer is not fully written, for example because it was
+//     evicted mid-download, fails with ErrPieceIncomplete rather than a wrong hash, so the torrent
+//     client re-downloads it instead of banning the peers that sent it.
+//
+//  6. Eviction Protection: SetProtection and ClearProtection protect actively-read pieces and
+//     file boundary pieces from standard LRU eviction.
+//     Under memory pressure, boundary protection yields first; active ranges are evicted only
+//     as a last resort to prevent download stalls.
 //
 // # Usage Example
 //
 //	package main
 //
 //	import (
-//		"context"
 //		"log/slog"
 //
 //		"github.com/anacrolix/torrent"
@@ -44,8 +51,8 @@
 //	)
 //
 //	func main() {
-//		// Create a storage client with 1GB memory limit.
-//		storageClient := storage.NewClient(1<<30, slog.Default())
+//		// Create a storage client with a 1 GiB memory limit.
+//		storageClient := storage.New(1<<30, slog.Default())
 //
 //		// Configure torrent client to use our storage.
 //		config := torrent.NewDefaultClientConfig()
@@ -62,15 +69,27 @@
 //
 // # Memory Eviction
 //
-// When the total memory usage exceeds the configured limit, the client automatically evicts
-// least-recently-used pieces. Eviction only removes piece data from memory; metadata about
-// piece completion status is preserved. Re-downloading evicted pieces is required to access
-// their data again.
+// When an allocation would exceed the configured limit, the client automatically evicts
+// least-recently-used pieces. Eviction removes piece data and tracking from memory, causing
+// evicted pieces to be reported as incomplete so the torrent engine can download them again on demand.
+// Pieces still downloading, meaning incomplete and written within the last 30 seconds, are spared
+// while other pieces of the same protection level can be evicted instead, because an evicted partial
+// piece must be downloaded again in full. They are still evicted, oldest first, when nothing else at
+// that level frees enough memory.
+// The torrent engine caches piece completion and is not told when storage drops a piece on its own.
+// Register ClientEvictionHandler with SetEvictionHandler so every evicted piece, and every piece
+// already gone when the engine marks it complete, is reported back to it from a background
+// goroutine; otherwise it keeps treating evicted pieces as downloaded, skips them when reading
+// ahead, and considers a torrent that was read in full complete, dropping its peers.
+// When an incoming piece has the same size as a buffer detached during allocation-triggered
+// eviction, the buffer is cleared and handed directly to the incoming reservation. This reduces
+// allocation and garbage-collection churn without retaining an unaccounted free-buffer pool.
 //
 // # Thread Safety
 //
 // All public methods are thread-safe and can be called concurrently from multiple goroutines.
-// The implementation uses fine-grained locking to minimize contention.
+// One client lock guards the LRU list, the memory accounting, and the torrent and protection maps;
+// each piece has its own lock for its data, so copying piece data happens outside the client lock.
 //
 // # Limitations
 //
@@ -80,31 +99,58 @@
 //  2. Memory Pressure: Large torrents or many concurrent torrents may exceed available memory,
 //     causing frequent evictions and reduced performance.
 //
-//  3. Completion Tracking: While piece completion status is tracked, the actual piece data
-//     may be evicted. This means a piece can be marked as "complete" but not have its data
-//     in memory.
+//  3. Re-downloading on Eviction: When piece memory is evicted, the piece must be re-downloaded
+//     from the peer swarm to access its data again.
 //
 // # Statistics and Monitoring
 //
-// The package provides several methods for monitoring storage usage:
-// - GetMemoryStats(): Global memory usage statistics.
-// - GetTorrentMemoryStats(): Per-torrent detailed statistics.
-// - GetPieceStatus(): Individual piece information.
-// - Various helper methods for tracking completion progress and memory usage.
+// The package provides two snapshot methods for monitoring storage usage:
+//
+//   - Client.MemoryStats provides global memory usage statistics.
+//   - Client.TorrentStats provides detailed per-torrent and per-piece statistics.
+//
+// TorrentStats also provides the torrent's fraction of the memory limit.
+//
+// # Eviction Protection
+//
+// SetProtection replaces the piece ranges one owner, keyed by (info hash, owner
+// ID), protects, and ClearProtection removes them. A Protection holds two kinds
+// of ranges:
+//
+//   - Active ranges keep the pieces around a reader's playback position, or a
+//     preload's pieces, in memory.
+//   - File boundaries keep the head and tail of a streamed file, and with them
+//     container metadata such as MP4 moov atoms or Matroska cues, resident while
+//     a reader seeks.
+//
+// When an incoming piece needs space, eviction walks the LRU list in up to three passes,
+// each stopping as soon as the allocation fits:
+//
+//  1. Evict pieces that are in neither an active range nor a file boundary.
+//  2. Evict file boundary pieces, while still preserving active ranges.
+//  3. Evict active range pieces, oldest first. This pass runs only when no allocation is
+//     pending; otherwise the allocation waits for the pending reservation to publish or
+//     refund its memory.
 //
 // # Error Handling
 //
 // The package defines several error conditions:
-// - ErrPieceNotAvailable: Returned when reading a piece that has been evicted from memory.
-// - ErrInsufficientMemory: When memory limits cannot be satisfied even after eviction.
+//
+//   - ErrPieceNotAvailable indicates that a piece has never been written or has been evicted.
+//   - ErrPieceIncomplete indicates that a resident piece has bytes that were never written.
+//   - ErrInsufficientMemory indicates that an allocation cannot fit even after eviction.
+//   - ErrClientClosed indicates that the storage client has been closed.
+//   - ErrTorrentClosed indicates that an operation used a closed torrent implementation.
+//   - ErrTorrentNotManaged indicates that statistics were requested for an unmanaged torrent.
 //
 // # Implementation Details
 //
 // Internally, the client maintains:
-// - A global LRU list for eviction decisions.
-// - Per-piece metadata with synchronization.
-// - Per-torrent memory usage tracking.
-// - Piece hashes for integrity verification.
+//
+//   - A global LRU list for eviction decisions.
+//   - Synchronized per-piece metadata and data buffers.
+//   - Per-torrent memory usage accounting.
+//   - On-demand SHA-1 self-hashing of resident piece data.
 //
 // The implementation is designed to be efficient for the common case of sequential piece
 // downloading while supporting random access patterns.
