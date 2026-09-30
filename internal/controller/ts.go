@@ -146,7 +146,7 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 			api.HTTPError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		magnetStr = magnetURIfromHash(ih)
+		magnetStr = utils.MagnetURIFromHash(ih)
 	}
 
 	if ih.IsZero() {
@@ -221,7 +221,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 				api.HTTPError(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			magnet = utils.Ptr(magnetURIfromHash(ih))
+			magnet = new(utils.MagnetURIFromHash(ih))
 		}
 	}
 
@@ -254,11 +254,13 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == api.TSTorrentRequestActionAdd {
-		var code int
-		magnet, code, err = c.parseLink(r.Context(), req.Link)
-		if err != nil {
-			api.HTTPError(w, err.Error(), code)
-			return
+		if utils.Val(req.Link) != "" {
+			var code int
+			magnet, code, err = c.parseLink(r.Context(), req.Link)
+			if err != nil {
+				api.HTTPError(w, err.Error(), code)
+				return
+			}
 		}
 	}
 
@@ -555,7 +557,7 @@ func (c *Controller) buildTSTorrentResponse(t *api.Torrent, to *torrent.Torrent)
 
 func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int, error) {
 	err := errors.New("invalid link")
-	if link == nil || *link == "" {
+	if utils.Val(link) == "" {
 		return nil, http.StatusBadRequest, err
 	}
 	var magnet string
@@ -571,7 +573,7 @@ func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int,
 		if err != nil {
 			return nil, http.StatusBadRequest, err
 		}
-		magnet = magnetURIfromHash(ih)
+		magnet = utils.MagnetURIFromHash(ih)
 	case "http", "https":
 		resp, err := c.httpClient.Get(ctx, *link)
 		if err != nil {

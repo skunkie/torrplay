@@ -1132,7 +1132,7 @@ func (c *Controller) addTorrentByHash(ih metainfo.Hash) (*torrent.Torrent, error
 		if !errors.Is(err, database.ErrTorrentNotFound) {
 			return nil, err
 		}
-		return c.loadTorrent(magnetURIfromHash(ih), api.Memory)
+		return c.loadTorrent(utils.MagnetURIFromHash(ih), api.Memory)
 	}
 
 	return c.loadTorrent(t.Magnet, utils.Val(t.Storage))
@@ -1934,10 +1934,6 @@ func nameOpt(names ...string) func([]*api.Torrent) []*api.Torrent {
 
 		return opted
 	}
-}
-
-func magnetURIfromHash(ih metainfo.Hash) string {
-	return "magnet:?xt=urn:btih:" + ih.HexString()
 }
 
 func torrentToMetadata(to *torrent.Torrent) *api.Torrent {
