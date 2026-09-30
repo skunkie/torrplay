@@ -43,8 +43,10 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 			select {
 			case <-to.GotInfo():
 			case <-time.After(c.runtimeConfig.gotInfoTimeout):
-				to.Drop()
-				<-to.Closed()
+				if !c.hasTorrentReaders(to.InfoHash()) {
+					to.Drop()
+					<-to.Closed()
+				}
 				api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
 				return
 			}
@@ -61,8 +63,10 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 			_, err = c.createTorrentInDBLocked(to, req)
 			c.mu.Unlock()
 
-			to.Drop()
-			<-to.Closed()
+			if !c.hasTorrentReaders(to.InfoHash()) {
+				to.Drop()
+				<-to.Closed()
+			}
 
 			if err != nil {
 				var apiErr api.Error
@@ -128,8 +132,10 @@ func (c *Controller) QBittorrentAddTorrent(w http.ResponseWriter, r *http.Reques
 				_, err = c.createTorrentInDBLocked(to, req)
 				c.mu.Unlock()
 
-				to.Drop()
-				<-to.Closed()
+				if !c.hasTorrentReaders(to.InfoHash()) {
+					to.Drop()
+					<-to.Closed()
+				}
 
 				if err != nil {
 					var apiErr api.Error

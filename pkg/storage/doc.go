@@ -34,8 +34,8 @@
 //     evicted mid-download, fails with ErrPieceIncomplete rather than a wrong hash, so the torrent
 //     client re-downloads it instead of banning the peers that sent it.
 //
-//  6. Eviction Protection: SetProtection and ClearProtection protect actively-read pieces and
-//     file boundary pieces from standard LRU eviction.
+//  6. Eviction Protection: Satisfies the stream.ProtectionRegistry interface so that
+//     actively-read pieces and file boundary pieces are protected from standard LRU eviction.
 //     Under memory pressure, boundary protection yields first; active ranges are evicted only
 //     as a last resort to prevent download stalls.
 //

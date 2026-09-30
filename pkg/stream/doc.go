@@ -1,0 +1,102 @@
+// SPDX-FileCopyrightText: 2026 TorrPlay
+//
+// SPDX-License-Identifier: MIT
+
+// Package stream is the streaming engine for torrent files: a pooled reader
+// manager and a preloader sharing one readahead budget and one piece-priority
+// system.
+//
+// It multiplexes multiple concurrent readers per torrent file, keeps a released
+// reader reading ahead briefly for the player's next request, caches the head
+// and tail of files before they are played, and coordinates with the storage
+// layer via the ProtectionRegistry interface to protect actively-read and
+// preloaded pieces from eviction.
+//
+// # Overview
+//
+// The Pool type is the central manager. Each torrent file can have multiple
+// readers acquired simultaneously, and every Acquire creates a new reader. The
+// caller receives a buffered io.ReadSeeker of the file for http.ServeContent.
+// A seek moves the torrent reader only when the next read starts, so the size
+// probe of http.ServeContent never shifts the reader's readahead.
+//
+// # Lingering Readers
+//
+// When an HTTP request ends, its playback reader lingers: it stays open with
+// its readahead, so the torrent client keeps fetching the pieces just past
+// where the player stopped. A player that fetches a file in consecutive range
+// requests, or reconnects after a pause, then finds those pieces cached by the
+// time its next request's reader reaches them. The next reader of the same file
+// closes it once that reader has its own readahead window, and a reader
+// released while another reader of its file is active closes at once, so a file
+// has at most one lingering reader. Other viewers' readers never close it,
+// because the engine is shared; readers still lingering after LingerTimeout are
+// closed. Readers of a dropped torrent close on release, or within a second
+// when the torrent is dropped while they linger.
+//
+// # Eviction Protection
+//
+// Each active memory-storage reader protects a forward-weighted readahead
+// window (1/4 behind, full readahead ahead), together with its file's head and
+// tail boundaries when they fit the budget, through the ProtectionRegistry
+// interface; file-storage pieces live on disk and need no protection. When the
+// reader is released, its protection is cleared immediately, so a lingering
+// reader's pieces are eviction candidates again. A seek is reported when the
+// next read starts, so the destination is protected before the read can
+// block, while positions that are never read, such as the size probe of
+// http.ServeContent, are skipped.
+//
+// # Piece-Priority Bumping
+//
+// When PriorityWindowFraction > 0, reading a new piece triggers an
+// asynchronous piece-priority bump in the torrent client: the nearest
+// PriorityWindowFraction of the readahead pieces receive PiecePriorityNow, so
+// they download before the rest of the readahead window, which the torrent
+// client orders by rarity. Stale priority updates are discarded when a reader moves or
+// is released. Pool-level claim aggregation preserves the highest priority
+// requested by overlapping readers.
+//
+// # Readahead Rebalancing
+//
+// When a reader is acquired or released, or the budget changes, the pool redistributes the memory readahead
+// budget among active memory-storage readers. Storage protects
+// whole pieces, so the division is made in pieces: head and tail boundaries use
+// at most half of the budget and shrink, or are dropped, until their pieces fit,
+// and each reader's readahead is the largest whole number of pieces whose active
+// range fits its share. With large pieces and a small budget, a reader may protect
+// only the piece it is reading. File-storage readers retain their
+// configured FileReadaheadBytes while active. Lingering readers hold no share
+// of the budget.
+//
+// # Thread Safety
+//
+// All public methods are safe for concurrent use.
+//
+// # Usage Example
+//
+//	package main
+//
+//	import (
+//		"log/slog"
+//		"time"
+//
+//		"github.com/torrplay/torrplay/pkg/stream"
+//	)
+//
+//	func main() {
+//		pool := stream.New(stream.Config{
+//			FileReadaheadBytes: 50 * 1024 * 1024, // 50 MiB
+//			LingerTimeout:      30 * time.Second,
+//			Logger:             slog.Default(),
+//			Registry:           nil, // pass a storage.Client here to enable eviction protection
+//		})
+//		defer pool.Close()
+//		pool.SetReadaheadBudget(256 << 20)
+//
+//		// Acquire returns the io.ReadSeeker expected by http.ServeContent.
+//		// reader, release, err := pool.Acquire(r.Context(), file, stream.MemoryStorage)
+//		// if err != nil { panic(err) }
+//		// defer release()
+//		// http.ServeContent(w, r, file.Path(), time.Time{}, reader)
+//	}
+package stream

@@ -44,6 +44,7 @@ import (
 	"github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 	"github.com/torrplay/torrplay/web"
 	"golang.org/x/time/rate"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -138,8 +139,10 @@ type Controller struct {
 	// piece completion are being replaced, and stays set if replacement fails.
 	torrentClientUnavailable atomic.Bool
 	torrentConfigMu          sync.Mutex
+	torrentGeneration        atomic.Uint64
 	startedAt                time.Time
 	storageClient            atomic.Pointer[memstorage.Client]
+	streamPool               atomic.Pointer[stream.Pool]
 	torrentTracker           torrentTracker
 	trackers                 [][]string
 
@@ -257,10 +260,9 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		return nil, err
 	}
 
-	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers))
-
-	if *appSettings.EnableDlna {
-		err = c.dlna.Start(*appSettings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
+	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(c.settings.Load().FileStoragePath), c.trackers))
+	if *c.settings.Load().EnableDlna {
+		err = c.dlna.Start(*c.settings.Load().FriendlyName, c.httpAddr, c.resolveHTTPPort())
 		if err != nil {
 			return nil, err
 		}
@@ -556,14 +558,17 @@ func (c *Controller) Shutdown() {
 	}
 	c.stopProfiler()
 
-	if c.downloader.Load() != nil {
-		c.downloader.Load().Stop()
+	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+		activeDownloader.Stop()
 	}
 
 	close(c.torrentTracker.cleanupDone)
 	close(c.posterCleanupDone)
 
 	_ = c.dlna.Stop()
+	if pool := c.streamPool.Load(); pool != nil {
+		pool.Close()
+	}
 	if c.storageClient.Load() != nil {
 		_ = c.storageClient.Load().Close()
 	}
@@ -739,17 +744,49 @@ func (c *Controller) cleanupExpiredTorrents() {
 	for ih, info := range c.torrentTracker.torrents {
 		sub := now.Sub(info.lastUsedAt)
 		if sub > c.torrentTracker.ttl {
+			// Check if the torrent is actively being streamed or downloaded in the background.
+			isStreaming, isDownloading := c.torrentActivity(ih)
+
+			if isStreaming || isDownloading {
+				info.lastUsedAt = now
+				c.torrentTracker.torrents[ih] = info
+				c.logger.Load().Debug("skipping expiration for active torrent", "hash", ih)
+				continue
+			}
+
 			c.logger.Load().Debug("mark torrent as expired", "hash", ih, "age", sub)
 			delete(c.torrentTracker.torrents, ih)
 			if to, ok := c.client.Torrent(ih); ok {
-				go func() {
-					to.Drop()
-					<-to.Closed()
-					c.logger.Load().Debug("dropped torrent", "hash", ih, "age", sub)
-				}()
+				go func(t *torrent.Torrent, hash metainfo.Hash, age time.Duration) {
+					t.Drop()
+					<-t.Closed()
+					c.logger.Load().Debug("dropped torrent", "hash", hash, "age", age)
+				}(to, ih, sub)
 			}
 		}
 	}
+}
+
+// hasTorrentReaders returns true if the torrent has any stream pool readers
+// (active or lingering) or is being downloaded by the background downloader.
+// Lingering readers are included because they are still downloading for the
+// player's next request — see stream.Pool.HasReaders for details.
+func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
+	isStreaming, isDownloading := c.torrentActivity(ih)
+	return isStreaming || isDownloading
+}
+
+// torrentActivity reports whether the torrent has stream pool readers
+// and whether the background downloader is working on it.
+// It takes no controller lock, so callers may hold c.mu.
+func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloading bool) {
+	if pool := c.streamPool.Load(); pool != nil {
+		isStreaming = pool.HasReaders(ih)
+	}
+	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+		isDownloading = activeDownloader.IsActive(ih)
+	}
+	return isStreaming, isDownloading
 }
 
 // resolveHTTPPort determines the definitive port for the HTTP server by selecting between two possible sources.
@@ -770,6 +807,7 @@ func (c *Controller) configureTorrentClient() error {
 	c.mu.RLock()
 	oldClient := c.client
 	oldStorageClient := c.storageClient.Load()
+	oldPool := c.streamPool.Load()
 	currentSettings := c.settings.Load()
 	logger := c.logger.Load()
 	isReconfiguring := c.downloader.Load() != nil
@@ -803,10 +841,9 @@ func (c *Controller) configureTorrentClient() error {
 		_ = oldStorageClient.Close()
 		<-oldStorageClient.Closed()
 	}
-	c.mu.Lock()
-	c.client = nil
-	c.storageClient.Store(nil)
-	c.mu.Unlock()
+	if oldPool != nil {
+		oldPool.Close()
+	}
 
 	clientConfig := torrent.NewDefaultClientConfig()
 	if currentSettings.TorrentClient != nil {
@@ -841,6 +878,18 @@ func (c *Controller) configureTorrentClient() error {
 	if err != nil {
 		return fmt.Errorf("failed to initiate torrent client: %w", err)
 	}
+
+	// Create new stream pool.
+	// Registry: storageClient protects actively-read pieces from eviction
+	// by registering readahead windows with the storage layer.
+	pool := stream.New(stream.Config{
+		FileReadaheadBytes:     fileStorageReadahead,
+		LingerTimeout:          30 * time.Second,
+		Logger:                 logger,
+		PriorityWindowFraction: 0.15,
+		Registry:               storageClient,
+	})
+	pool.SetReadaheadBudget(readaheadBudget(*currentSettings.MaxMemory))
 	// Evicted pieces must stop counting as downloaded, or a torrent read in
 	// full looks complete to the client, which then drops its peers.
 	storageClient.SetEvictionHandler(memstorage.ClientEvictionHandler(client))
@@ -848,14 +897,17 @@ func (c *Controller) configureTorrentClient() error {
 	c.mu.Lock()
 	c.client = client
 	c.storageClient.Store(storageClient)
+	c.streamPool.Store(pool)
 	if isReconfiguring {
 		c.downloader.Load().Stop()
 		c.trackers = newTrackers
-		c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers))
+		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers)
+		c.downloader.Store(newDownloader)
 		if utils.Val(currentSettings.EnableDownloader) {
-			c.downloader.Load().Start()
+			newDownloader.Start()
 		}
 	}
+	c.torrentGeneration.Add(1)
 	c.mu.Unlock()
 	c.torrentClientUnavailable.Store(false)
 

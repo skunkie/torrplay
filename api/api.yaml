@@ -1597,12 +1597,6 @@ components:
           minimum: 33554432
           maximum: 2147483648
           example: 67108864
-        readahead_percentage:
-          type: integer
-          description: Readahead percentage value (50-100).
-          minimum: 50
-          maximum: 100
-          example: 90
         torrent_trackers:
           type: array
           description: |

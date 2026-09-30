@@ -268,9 +268,7 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		var needsDrop bool
 		if req.Action == api.TSTorrentRequestActionAdd && utils.Val(req.SaveToDB) {
-			needsDrop = true
 			addTorrentReq := api.TorrentAdd{
 				Category: req.Category,
 				Magnet:   magnet,
@@ -301,10 +299,12 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 
 		resp := c.buildTSTorrentResponse(t, to)
 
-		if needsDrop {
-			to.Drop()
-			<-to.Closed()
-			c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+		if req.Action == api.TSTorrentRequestActionAdd && utils.Val(req.SaveToDB) {
+			if !c.hasTorrentReaders(to.InfoHash()) {
+				to.Drop()
+				<-to.Closed()
+				c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -433,7 +433,7 @@ func (c *Controller) TSViewed(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := c.updateTorrent(r, ih, api.TorrentUpdate{
+		if err := c.updateTorrent(ih, api.TorrentUpdate{
 			Files: &[]api.TorrentFileUpdate{
 				{
 					Path:   t.Files[index].Path,

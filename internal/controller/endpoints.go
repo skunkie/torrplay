@@ -21,10 +21,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	gotorrentfs "github.com/ajnavarro/go-torrent-fs"
 	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -39,6 +37,7 @@ import (
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
+	"github.com/torrplay/torrplay/pkg/stream"
 )
 
 func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
@@ -219,9 +218,11 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	to.Drop()
-	<-to.Closed()
-	c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+	if !c.hasTorrentReaders(to.InfoHash()) {
+		to.Drop()
+		<-to.Closed()
+		c.logger.Load().Debug("dropped torrent after adding to database", "hash", to.InfoHash())
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Location", fmt.Sprintf("/api/v1/torrents/%s", resp.Hash))
@@ -776,9 +777,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reqSettings.FileStoragePath != nil {
 		newSettings.FileStoragePath = reqSettings.FileStoragePath
 	}
-	if reqSettings.ReadaheadPercentage != nil {
-		newSettings.ReadaheadPercentage = reqSettings.ReadaheadPercentage
-	}
 	if reqSettings.TorrentTrackers != nil {
 		newSettings.TorrentTrackers = reqSettings.TorrentTrackers
 	}
@@ -869,9 +867,6 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		replacePieceCompletion = true
 		reconfigureTorrentClient = true
 		restartHTTPServer = true
-		saveSettings = true
-	}
-	if utils.Differ(oldSettings.ReadaheadPercentage, newSettings.ReadaheadPercentage) {
 		saveSettings = true
 	}
 	if !slices.Equal(utils.Val(oldSettings.TorrentTrackers), utils.Val(newSettings.TorrentTrackers)) {
@@ -1115,7 +1110,7 @@ func (c *Controller) UpdateTorrent(w http.ResponseWriter, r *http.Request, ih me
 		return
 	}
 
-	if err := c.updateTorrent(r, ih, req); err != nil {
+	if err := c.updateTorrent(ih, req); err != nil {
 		api.HandleError(w, err)
 		return
 	}
@@ -1561,14 +1556,69 @@ func (c *Controller) loadTorrent(uri string, storageType api.TorrentStorage) (*t
 	return c.loadTorrentSpec(spec, storageType)
 }
 
+// readaheadBudget returns the streaming readahead budget for a memory limit.
+func readaheadBudget(maxMemory int64) int64 {
+	return maxMemory * int64(calcReadaheadPct(maxMemory)) / 100
+}
+
+// calcReadaheadPct computes the percentage of maxMemory allocated for streaming readahead.
+// Scale:
+//
+//	<= 64 MiB: 50% (leaving 50% headroom for incoming piece downloads)
+//	   128 MiB: 60%
+//	   256 MiB: 70%
+//	>= 512 MiB: 75% (capped)
+func calcReadaheadPct(maxMemory int64) int {
+	switch {
+	case maxMemory >= 512*1024*1024:
+		return 75
+	case maxMemory >= 256*1024*1024:
+		return 70 + int(float64(maxMemory-256*1024*1024)/float64(256*1024*1024)*5)
+	case maxMemory >= 128*1024*1024:
+		return 60 + int(float64(maxMemory-128*1024*1024)/float64(128*1024*1024)*10)
+	case maxMemory > 64*1024*1024:
+		return 50 + int(float64(maxMemory-64*1024*1024)/float64(64*1024*1024)*10)
+	default:
+		return 50
+	}
+}
+
+// torrentStorageMode reports the storage mode for a torrent, and whether the torrent is saved in the database.
+func (c *Controller) torrentStorageMode(ih metainfo.Hash) (mode stream.StorageMode, saved bool) {
+	t, err := c.db.GetTorrent(ih)
+	if err == nil {
+		if utils.Val(t.Storage) == api.File {
+			return stream.FileStorage, true
+		}
+		return stream.MemoryStorage, true
+	}
+	if !errors.Is(err, database.ErrTorrentNotFound) {
+		c.logger.Load().Error("failed to get torrent from database for its storage mode", "err", err, "hash", ih)
+	}
+	c.torrentTracker.mu.RLock()
+	defer c.torrentTracker.mu.RUnlock()
+	if info, ok := c.torrentTracker.torrents[ih]; ok && info.storageType == api.File {
+		return stream.FileStorage, false
+	}
+	return stream.MemoryStorage, false
+}
+
 // streamFile is the internal implementation for streaming a torrent file.
 // It can identify the file to stream by either a file path (string) or a file index (int).
 func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdentifier any) {
+	requestGeneration := c.torrentGeneration.Load()
+	if c.torrentClientUnavailable.Load() {
+		api.HTTPError(w, "torrent client is reconfiguring", http.StatusServiceUnavailable)
+		return
+	}
+
 	to, err := c.addTorrentByHash(ih)
 	if err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	to.AllowDataDownload()
 
 	select {
 	case <-to.GotInfo():
@@ -1600,10 +1650,10 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	t, err := c.db.GetTorrent(ih)
-	if err == nil {
+	mode, saved := c.torrentStorageMode(ih)
+	if saved {
 		go func() {
-			err := c.updateTorrent(r, ih, api.TorrentUpdate{
+			err := c.updateTorrent(ih, api.TorrentUpdate{
 				Files: &[]api.TorrentFileUpdate{
 					{
 						Path:   file.Path(),
@@ -1617,57 +1667,62 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		}()
 	}
 
-	reader := file.NewReader()
-	defer reader.Close()
-
-	isFileStorage := err == nil && utils.Val(t.Storage) == api.File
-
-	if isFileStorage {
-		reader.SetReadahead(fileStorageReadahead)
-	} else {
-		c.mu.RLock()
-		readahead := *c.settings.Load().MaxMemory * int64(*c.settings.Load().ReadaheadPercentage) / 100
-		c.mu.RUnlock()
-		reader.SetReadahead(readahead)
+	pool, current := c.streamPoolForGeneration(to, requestGeneration)
+	if !current {
+		api.HTTPError(w, "stream pool is unavailable", http.StatusServiceUnavailable)
+		return
 	}
 
-	fs := gotorrentfs.New(to)
-
-	r2 := r.Clone(r.Context())
-	r2.URL.Path = file.Path()
+	reader, release, err := pool.Acquire(r.Context(), file, mode)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, stream.ErrPoolClosed) {
+			status = http.StatusServiceUnavailable
+		}
+		api.HTTPError(w, err.Error(), status)
+		return
+	}
+	defer release()
 
 	dlna.AddHeader(w, r)
 
-	var once sync.Once
-	decrement := func() {
-		once.Do(func() {
-			c.metrics.DecStreamingTorrents()
-			if c.downloader.Load() != nil {
-				c.downloader.Load().RemoveStreaming(ih)
-			}
-		})
-	}
-	defer decrement()
-
-	go func() {
-		<-r.Context().Done()
-		decrement()
-	}()
-
 	c.metrics.IncStreamingTorrents()
-	if c.downloader.Load() != nil {
-		c.downloader.Load().AddStreaming(ih)
+	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+		activeDownloader.AddStreaming(ih)
 	}
+	defer func() {
+		c.metrics.DecStreamingTorrents()
+		if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+			activeDownloader.RemoveStreaming(ih)
+		}
+	}()
 
 	// For streaming endpoints, it is important to disable the read and write timeouts.
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
 
-	http.FileServerFS(fs).ServeHTTP(w, r2)
+	http.ServeContent(w, r, path.Base(file.Path()), time.Time{}, reader)
 }
 
-func (c *Controller) updateTorrent(_ *http.Request, ih metainfo.Hash, req api.TorrentUpdate) error {
+func (c *Controller) streamPoolForGeneration(to *torrent.Torrent, generation uint64) (*stream.Pool, bool) {
+	if to == nil || c.torrentClientUnavailable.Load() {
+		return nil, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	pool := c.streamPool.Load()
+	if c.torrentClientUnavailable.Load() || c.client == nil || pool == nil || generation != c.torrentGeneration.Load() {
+		return nil, false
+	}
+	current, ok := c.client.Torrent(to.InfoHash())
+	if !ok || current != to {
+		return nil, false
+	}
+	return pool, true
+}
+
+func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) error {
 	c.mu.Lock()
 	c.posterOpMu.Lock()
 
