@@ -703,6 +703,7 @@ func TestPool_CloseExpiredLingeringReaders(t *testing.T) {
 		to.Drop()
 		pool.closeExpiredLingeringReaders()
 		assert.False(t, pool.HasReaders(to.InfoHash()), "a lingering reader of a dropped torrent must close")
+		assert.Zero(t, pool.StreamingTorrentCount())
 	})
 
 	t.Run("closes after the timeout", func(t *testing.T) {

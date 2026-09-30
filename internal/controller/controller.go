@@ -769,28 +769,6 @@ func (c *Controller) cleanupExpiredTorrents() {
 	}
 }
 
-// hasTorrentReaders returns true if the torrent has any stream pool readers
-// (active or lingering) or is being downloaded by the background downloader.
-// Lingering readers are included because they are still downloading for the
-// player's next request — see stream.Pool.HasReaders for details.
-func (c *Controller) hasTorrentReaders(ih metainfo.Hash) bool {
-	isStreaming, isDownloading := c.torrentActivity(ih)
-	return isStreaming || isDownloading
-}
-
-// torrentActivity reports whether the torrent has stream pool readers
-// and whether the background downloader is working on it.
-// It takes no controller lock, so callers may hold c.mu.
-func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloading bool) {
-	if pool := c.streamPool.Load(); pool != nil {
-		isStreaming = pool.HasReaders(ih) || c.preloadActive(ih)
-	}
-	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
-		isDownloading = activeDownloader.IsActive(ih)
-	}
-	return isStreaming, isDownloading
-}
-
 // resolveHTTPPort determines the definitive port for the HTTP server by selecting between two possible sources.
 // It gives precedence to the port number provided at application startup
 // over the port number stored in the application's persistent settings.

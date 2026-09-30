@@ -8,12 +8,14 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -49,8 +51,8 @@ func newIntegrationTestController(t *testing.T) *Controller {
 		config.DisableTCP = true
 		config.DisableUTP = true
 	}
-	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig)
-	t.Cleanup(cleanup)
+	ctrl, _ := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+	ctrl.Start()
 	return ctrl
 }
 
@@ -171,6 +173,7 @@ func startBlockedIntegrationStream(t *testing.T, ctrl *Controller, fixture local
 		t.Fatal("local webseed was not requested")
 	}
 	ih := fixture.meta.HashInfoBytes()
+	require.Eventually(t, func() bool { return ctrl.hasTorrentReaders(ih) }, time.Second, time.Millisecond)
 	to, ok := ctrl.client.Torrent(ih)
 	require.True(t, ok)
 	return done, to
@@ -212,6 +215,54 @@ func TestIntegrationAddTorrentWhileStreaming(t *testing.T) {
 	finishBlockedIntegrationStream(t, fixture, done)
 }
 
+func TestIntegrationUpdateTorrentWhileStreaming(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, true)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, fixture)
+	done, _ := startBlockedIntegrationStream(t, ctrl, fixture, fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4", ih))
+
+	newTitle := "updated while streaming"
+	rr := testutil.NewRequest().Patch("/api/v1/torrents/"+ih.HexString()).WithJsonBody(api.TorrentUpdate{Title: &newTitle}).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusNoContent, rr.Code)
+	stored, err := ctrl.db.GetTorrent(ih)
+	require.NoError(t, err)
+	require.NotNil(t, stored.Title)
+	assert.Equal(t, newTitle, *stored.Title)
+
+	finishBlockedIntegrationStream(t, fixture, done)
+}
+
+func TestIntegrationTSTorrentsAddWhileStreaming(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, true)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	to, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(fixture.meta))
+	require.NoError(t, err)
+	ih := fixture.meta.HashInfoBytes()
+	done, activeTorrent := startBlockedIntegrationStream(t, ctrl, fixture, fmt.Sprintf("/stream/Sintel.mp4?link=%s&play&index=0", ih))
+	require.Same(t, to, activeTorrent)
+
+	magnet := utils.MagnetURIFromHash(ih)
+	saveToDB := true
+	rr := testutil.NewRequest().Post("/torrents").WithJsonBody(api.TSTorrentRequest{
+		Action:   "add",
+		Link:     &magnet,
+		Title:    new("Sintel Test"),
+		SaveToDB: &saveToDB,
+	}).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, rr.Code)
+	loadedTorrent, ok := ctrl.client.Torrent(ih)
+	require.True(t, ok)
+	assert.Same(t, activeTorrent, loadedTorrent)
+	select {
+	case <-loadedTorrent.Closed():
+		t.Fatal("TorrServer add closed the active stream")
+	default:
+	}
+	finishBlockedIntegrationStream(t, fixture, done)
+}
+
 func TestIntegrationStreamingFromLocalWebseed(t *testing.T) {
 	fixture := newLocalWebseedFixture(t, false)
 	defer fixture.release()
@@ -238,6 +289,93 @@ func TestIntegrationStreamingFromLocalWebseed(t *testing.T) {
 		assert.Equal(t, http.StatusPartialContent, resp.StatusCode)
 		assert.Equal(t, fixture.payload[:1024], body)
 	}
+}
+
+func TestIntegrationActiveMemoryCacheResponse(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, true)
+	defer fixture.release()
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, fixture)
+	done, to := startBlockedIntegrationStream(t, ctrl, fixture, fmt.Sprintf("/api/v1/stream/%s?path=Sintel/Sintel.mp4", ih))
+
+	storageTorrent, err := ctrl.storageClient.Load().OpenTorrent(context.Background(), to.Info(), ih)
+	require.NoError(t, err)
+	_, err = storageTorrent.Piece(to.Piece(0).Info()).WriteAt(make([]byte, 1024), 0)
+	require.NoError(t, err)
+
+	recorder := testutil.NewRequest().Post("/cache").WithJsonBody(api.TSCacheRequest{
+		Action: new("get"),
+		Hash:   ih.HexString(),
+	}).GoWithHTTPHandler(t, ctrl.router).Recorder
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	bodyBytes := recorder.Body.Bytes()
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(bodyBytes, &raw))
+	for _, key := range []string{"Capacity", "Filled", "Hash", "Pieces", "PiecesCount", "PiecesLength", "Readers", "Torrent"} {
+		assert.Contains(t, raw, key)
+	}
+
+	var response api.TSCacheResponse
+	require.NoError(t, json.Unmarshal(bodyBytes, &response))
+	assert.Equal(t, ih.HexString(), response.Hash)
+	assert.Positive(t, response.Capacity)
+	assert.Equal(t, to.NumPieces(), response.PiecesCount)
+	assert.NotEmpty(t, response.Readers)
+	require.NotNil(t, response.Torrent)
+
+	stats, err := ctrl.storageClient.Load().TorrentStats(ih)
+	require.NoError(t, err)
+	require.NotEmpty(t, stats.Pieces)
+	first := stats.Pieces[0]
+	piece, ok := response.Pieces[strconv.Itoa(first.Index)]
+	require.True(t, ok)
+	assert.Equal(t, first.Index, piece.ID)
+	assert.Equal(t, first.SizeBytes, piece.Length)
+	assert.LessOrEqual(t, piece.Size, piece.Length)
+
+	finishBlockedIntegrationStream(t, fixture, done)
+}
+
+func TestIntegrationStreamClientDisconnectReleasesBlockedReader(t *testing.T) {
+	fixture := newLocalWebseedFixture(t, true)
+	ctrl := newIntegrationTestController(t)
+	ih := addLocalWebseedTorrent(t, ctrl, fixture)
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	// Release the webseed before closing the server so a failing assertion
+	// cannot leave server.Close waiting on a blocked handler.
+	defer fixture.release()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	streamDone := make(chan struct{})
+	go func() {
+		defer close(streamDone)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?path=Sintel/Sintel.mp4", server.URL, ih), http.NoBody)
+		if err != nil {
+			return
+		}
+		req.Header.Set("Range", "bytes=0-")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-fixture.requested:
+	case <-time.After(10 * time.Second):
+		t.Fatal("local webseed was not requested")
+	}
+	require.Eventually(t, func() bool { return ctrl.streamPool.Load().HasActiveReaders(ih) }, time.Second, time.Millisecond)
+
+	// The webseed stays blocked, so only the request context can end the read.
+	cancel()
+	<-streamDone
+	require.Eventually(t, func() bool { return !ctrl.streamPool.Load().HasActiveReaders(ih) }, 5*time.Second, time.Millisecond,
+		"disconnected stream kept its reader active")
 }
 
 func TestIntegrationDeleteWhileStreamingUsesStateSynchronization(t *testing.T) {

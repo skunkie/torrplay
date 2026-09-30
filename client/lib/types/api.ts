@@ -65,6 +65,7 @@ interface TokenResponse {
 }
 
 interface Torrent {
+  active?: boolean,
   category?: string,
   createdAt?: string,
   files: TorrentFile[],
