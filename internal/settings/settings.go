@@ -25,17 +25,21 @@ func Default() api.Settings {
 		LogStoreSize:     new(100),
 		MaxMemory:        new(int64(64 * 1024 * 1024)),
 		TorrentClient: &api.TorrentClient{
-			DisableDHT:                 new(false),
-			DisableIPv6:                new(true),
-			DisablePEX:                 new(false),
-			DisableTCP:                 new(false),
-			DisableUTP:                 new(false),
-			DownloadRateLimit:          new(0),
-			EstablishedConnsPerTorrent: new(50),
-			PreferHeaderObfuscation:    new(false),
-			Seed:                       new(false),
-			TorrentPeersHighWater:      new(500),
-			UploadRateLimit:            new(0),
+			DisableDHT:                     new(false),
+			DisableIPv6:                    new(true),
+			DisablePEX:                     new(false),
+			DisableTCP:                     new(false),
+			DisableUTP:                     new(false),
+			DownloadRateLimit:              new(0),
+			EstablishedConnsPerTorrent:     new(50),
+			HalfOpenConnsPerTorrent:        new(25),
+			MaxAllocPeerRequestDataPerConn: new(1048576),
+			PreferHeaderObfuscation:        new(false),
+			Seed:                           new(false),
+			TorrentPeersHighWater:          new(500),
+			TorrentPeersLowWater:           new(50),
+			TotalHalfOpenConns:             new(100),
+			UploadRateLimit:                new(0),
 		},
 		TorrentTrackers: new([]string{}),
 	}
@@ -135,6 +139,14 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 			tc.EstablishedConnsPerTorrent = dtc.EstablishedConnsPerTorrent
 			changed = true
 		}
+		if tc.HalfOpenConnsPerTorrent == nil {
+			tc.HalfOpenConnsPerTorrent = dtc.HalfOpenConnsPerTorrent
+			changed = true
+		}
+		if tc.MaxAllocPeerRequestDataPerConn == nil {
+			tc.MaxAllocPeerRequestDataPerConn = dtc.MaxAllocPeerRequestDataPerConn
+			changed = true
+		}
 		if tc.PreferHeaderObfuscation == nil {
 			tc.PreferHeaderObfuscation = dtc.PreferHeaderObfuscation
 			changed = true
@@ -145,6 +157,14 @@ func Merge(target *api.Settings, defaults api.Settings) bool {
 		}
 		if tc.TorrentPeersHighWater == nil {
 			tc.TorrentPeersHighWater = dtc.TorrentPeersHighWater
+			changed = true
+		}
+		if tc.TorrentPeersLowWater == nil {
+			tc.TorrentPeersLowWater = dtc.TorrentPeersLowWater
+			changed = true
+		}
+		if tc.TotalHalfOpenConns == nil {
+			tc.TotalHalfOpenConns = dtc.TotalHalfOpenConns
 			changed = true
 		}
 		if tc.UploadRateLimit == nil {
