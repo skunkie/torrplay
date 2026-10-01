@@ -1750,10 +1750,15 @@ components:
           example: "text"
         log_level:
           type: string
+          description: Log level.
+          enum:
+            - "DEBUG"
+            - "INFO"
+            - "WARN"
+            - "ERROR"
           x-go-type: slog.Level
           x-go-type-import:
             path: log/slog
-          description: Log level.
           example: "INFO"
         log_store_size:
           type: integer

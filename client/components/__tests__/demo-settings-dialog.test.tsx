@@ -408,4 +408,38 @@ describe('DemoSettingsDialog', () => {
 
     expect(hoisted.updateSettings).not.toHaveBeenCalled();
   });
+
+  it('correctly populates log level when demo settings has DEBUG logLevel', async () => {
+    setupMocks();
+    currentSettings.logLevel = 'DEBUG';
+
+    render(
+      <DemoAuthWrapper settings={currentSettings}>
+        <DemoSettingsDialog open={true}
+          onOpenChange={vi.fn()} />
+      </DemoAuthWrapper>,
+    );
+
+    await waitFor(() => {
+      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+      expect(logLevelSelect).toHaveTextContent('DEBUG');
+    });
+  });
+
+  it('correctly populates default INFO log level when demo settings has undefined logLevel', async () => {
+    setupMocks();
+    delete currentSettings.logLevel;
+
+    render(
+      <DemoAuthWrapper settings={currentSettings}>
+        <DemoSettingsDialog open={true}
+          onOpenChange={vi.fn()} />
+      </DemoAuthWrapper>,
+    );
+
+    await waitFor(() => {
+      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+      expect(logLevelSelect).toHaveTextContent('INFO');
+    });
+  });
 });
