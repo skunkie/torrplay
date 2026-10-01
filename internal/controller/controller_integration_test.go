@@ -15,14 +15,19 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/anacrolix/generics"
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/anacrolix/torrent/storage"
 	"github.com/oapi-codegen/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -584,6 +589,20 @@ func TestIntegrationPreloadFromLocalWebseed(t *testing.T) {
 	assert.Equal(t, complete.CompletedBytes, complete.TargetBytes)
 }
 
+// countingWebseed serves payload and counts the requests it receives.
+func countingWebseed(t *testing.T, payload []byte) (*metainfo.MetaInfo, *atomic.Int64) {
+	t.Helper()
+	requests := new(atomic.Int64)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.ServeContent(w, r, "video.mp4", time.Time{}, bytes.NewReader(payload))
+	}))
+	t.Cleanup(server.Close)
+	return localWebseedMetaInfo(t, payload, server.URL), requests
+}
+
+// saveWebseedTorrent loads meta into ctrl the way requests do, keeping its web
+// seed, and saves it with the storage type.
 func saveWebseedTorrent(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, size int, storageType api.TorrentStorage) metainfo.Hash {
 	t.Helper()
 	_, err := ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), storageType)
@@ -606,6 +625,87 @@ func saveTorrentRecord(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, 
 		},
 	}))
 	return ih
+}
+
+// A full disk fails every file-storage write. The background download must stop
+// instead of requesting the same data forever, until the downloader restarts.
+func TestIntegrationFileStorageWriteFailureStopsBackgroundDownload(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test cannot write to")
+	}
+	for _, tc := range []struct {
+		name string
+		load func(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, storagePath string, size int) metainfo.Hash
+	}{
+		{
+			name: "loaded for file storage",
+			load: func(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, _ string, size int) metainfo.Hash {
+				t.Helper()
+				return saveWebseedTorrent(t, ctrl, meta, size, api.File)
+			},
+		},
+		{
+			name: "added by the downloader and loaded for memory playback",
+			load: func(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, storagePath string, size int) metainfo.Hash {
+				t.Helper()
+				spec := torrent.TorrentSpecFromMetaInfo(meta)
+				spec.Storage = storage.NewFileOpts(storage.NewFileClientOpts{
+					ClientBaseDir:   storagePath,
+					PieceCompletion: ctrl.pieceCompletion,
+					UsePartFiles:    generics.Option[bool]{Value: false, Ok: true},
+				})
+				to, _, err := ctrl.client.AddTorrentSpec(spec)
+				require.NoError(t, err)
+				ctrl.downloader.Load().WatchStorageWrites(to)
+				// The torrent is already in the client, so it keeps its file
+				// storage and the downloader's handling of failed writes.
+				_, err = ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), api.Memory)
+				require.NoError(t, err)
+				return saveTorrentRecord(t, ctrl, meta, size, api.File)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := bytes.Repeat([]byte("torrplay-file-write\n"), 4096)
+			meta, requests := countingWebseed(t, payload)
+			ctrl := newIntegrationTestController(t)
+			storagePath := t.TempDir()
+			// Unwritable, like a full disk.
+			require.NoError(t, os.Chmod(storagePath, 0o555))
+			t.Cleanup(func() { _ = os.Chmod(storagePath, 0o755) })
+			ctrl.mu.Lock()
+			settings := ctrl.settings.Load()
+			settings.EnableDownloader = utils.Ptr(true)
+			settings.FileStoragePath = utils.Ptr(storagePath)
+			ctrl.mu.Unlock()
+			require.NoError(t, ctrl.db.UpdateSettings(database.FromAPISettings(settings)))
+			ih := tc.load(t, ctrl, meta, storagePath, len(payload))
+
+			downloader := ctrl.downloader.Load()
+			// Start runs a pass at once instead of after the one-minute interval.
+			restart := func() {
+				downloader.Stop()
+				downloader.Start()
+			}
+			stopsRequesting := func(msg string) {
+				t.Helper()
+				require.Eventually(t, func() bool { return requests.Load() > 0 && !downloader.IsDownloading(ih) }, 10*time.Second, time.Millisecond, msg)
+				// Requests already in flight may still arrive.
+				time.Sleep(500 * time.Millisecond)
+				settled := requests.Load()
+				assert.Never(t, func() bool { return requests.Load() != settled }, 2*time.Second, 50*time.Millisecond,
+					"a torrent whose writes fail must not be requested again")
+			}
+
+			restart()
+			stopsRequesting("the downloader must stop a download whose writes fail")
+			before := requests.Load()
+			restart()
+			require.Eventually(t, func() bool { return requests.Load() > before }, 10*time.Second, time.Millisecond, "a restart must try again")
+			stopsRequesting("the retried download must stop again")
+			downloader.Stop()
+		})
+	}
 }
 
 // Background downloads pause as soon as a stream starts and resume as soon as

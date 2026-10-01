@@ -37,6 +37,7 @@ import (
 	"github.com/torrplay/torrplay/internal/metrics"
 	tputil "github.com/torrplay/torrplay/internal/testutil"
 	"github.com/torrplay/torrplay/internal/utils"
+	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
 )
 
@@ -1713,4 +1714,41 @@ func TestController_IsStreaming(t *testing.T) {
 
 	pool.Close()
 	assert.False(t, ctrl.isStreaming())
+}
+
+func TestController_MemoryWriteFailed(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	limit := ctrl.storageClient.Load().MemoryStats().LimitBytes
+	// downloadDisabled reports whether reading to fails because its downloads
+	// stopped, rather than waiting for data from peers it does not have.
+	downloadDisabled := func(t *testing.T, to *torrent.Torrent) bool {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		r := to.NewReader()
+		defer r.Close()
+		r.SetContext(ctx)
+		_, err := r.Read(make([]byte, 1))
+		return err != nil && strings.Contains(err.Error(), "downloading disabled")
+	}
+	insufficient := fmt.Errorf("write chunk: %w", memstorage.ErrInsufficientMemory)
+
+	t.Run("keeps downloading while memory storage cannot free room", func(t *testing.T) {
+		to := addSyntheticTorrent(t, ctrl, 4<<20, 1<<20)
+		ctrl.memoryWriteFailed(to, insufficient, new(sync.Once))
+		assert.False(t, downloadDisabled(t, to))
+	})
+
+	t.Run("keeps downloading after other errors", func(t *testing.T) {
+		to := addSyntheticTorrent(t, ctrl, 2*limit, 2*limit)
+		ctrl.memoryWriteFailed(to, memstorage.ErrPieceNotAvailable, new(sync.Once))
+		assert.False(t, downloadDisabled(t, to))
+	})
+
+	t.Run("stops a torrent whose pieces exceed the memory limit", func(t *testing.T) {
+		to := addSyntheticTorrent(t, ctrl, 2*limit+1, 2*limit)
+		ctrl.memoryWriteFailed(to, insufficient, new(sync.Once))
+		assert.True(t, downloadDisabled(t, to), "writes that can never fit must not be retried forever")
+	})
 }

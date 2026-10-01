@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anacrolix/generics"
@@ -1605,19 +1606,66 @@ func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.
 		}
 	}
 
-	to, _, err := c.client.AddTorrentSpec(spec)
+	to, added, err := client.AddTorrentSpec(spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add torrent spec to client: %w", err)
+	}
+	// A torrent already in the client keeps its storage, and the handler of
+	// whoever added it.
+	if added {
+		c.watchStorageWrites(to, spec.Storage != nil)
 	}
 
 	c.torrentTracker.mu.Lock()
 	c.torrentTracker.torrents[to.InfoHash()] = torrentInfo{
-		lastUsedAt:  time.Now(),
-		storageType: storageType,
+		lastUsedAt:     time.Now(),
+		memoryFallback: added && storageType == api.File && spec.Storage == nil,
+		storageType:    storageType,
 	}
 	c.torrentTracker.mu.Unlock()
 
 	return to, nil
+}
+
+// watchStorageWrites sets how to handle a failed storage write of to. The
+// torrent client logs the failure and requests the data again. A file-storage
+// write failure, such as a full disk, would repeat, so it stops the torrent's
+// downloads and its background download. Memory storage is handled by
+// memoryWriteFailed.
+func (c *Controller) watchStorageWrites(to *torrent.Torrent, fileStorage bool) {
+	if !fileStorage {
+		var once sync.Once
+		to.SetOnWriteChunkError(func(err error) { c.memoryWriteFailed(to, err, &once) })
+		return
+	}
+	if d := c.downloader.Load(); d != nil {
+		d.WatchStorageWrites(to)
+	}
+}
+
+// memoryWriteFailed handles a failed memory-storage write of to. Memory
+// storage fails a write while it cannot free room, so the torrent keeps
+// downloading, unless its pieces are larger than the whole memory limit: their
+// writes can never succeed, so the torrent stops downloading and its reads
+// fail. The stop is logged once per torrent through logged.
+func (c *Controller) memoryWriteFailed(to *torrent.Torrent, err error, logged *sync.Once) {
+	if !errors.Is(err, memstorage.ErrInsufficientMemory) || !c.piecesExceedMemoryLimit(to) {
+		return
+	}
+	to.DisallowDataDownload()
+	logged.Do(func() {
+		c.logger.Load().Error("stopped downloading torrent whose pieces are larger than the memory limit",
+			"hash", to.InfoHash(), "pieceLength", to.Info().PieceLength,
+			"memoryLimit", c.storageClient.Load().MemoryStats().LimitBytes)
+	})
+}
+
+// piecesExceedMemoryLimit reports whether the pieces of to are larger than the
+// whole memory storage limit, so memory storage can never hold one.
+func (c *Controller) piecesExceedMemoryLimit(to *torrent.Torrent) bool {
+	storageClient := c.storageClient.Load()
+	info := to.Info()
+	return storageClient != nil && info != nil && info.PieceLength > storageClient.MemoryStats().LimitBytes
 }
 
 // loadTorrent is the single entry point for adding a torrent to the client.
@@ -1657,26 +1705,6 @@ func calcReadaheadPct(maxMemory int64) int {
 	}
 }
 
-// torrentStorageMode reports the storage mode for a torrent, and whether the torrent is saved in the database.
-func (c *Controller) torrentStorageMode(ih metainfo.Hash) (mode stream.StorageMode, saved bool) {
-	t, err := c.db.GetTorrent(ih)
-	if err == nil {
-		if utils.Val(t.Storage) == api.File {
-			return stream.FileStorage, true
-		}
-		return stream.MemoryStorage, true
-	}
-	if !errors.Is(err, database.ErrTorrentNotFound) {
-		c.logger.Load().Error("failed to get torrent from database for its storage mode", "err", err, "hash", ih)
-	}
-	c.torrentTracker.mu.RLock()
-	defer c.torrentTracker.mu.RUnlock()
-	if info, ok := c.torrentTracker.torrents[ih]; ok && info.storageType == api.File {
-		return stream.FileStorage, false
-	}
-	return stream.MemoryStorage, false
-}
-
 // streamFile is the internal implementation for streaming a torrent file.
 // It can identify the file to stream by either a file path (string) or a file index (int).
 func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdentifier any) {
@@ -1691,8 +1719,6 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	to.AllowDataDownload()
 
 	select {
 	case <-to.GotInfo():
@@ -1725,6 +1751,12 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 	}
 
 	mode, saved := c.torrentStorageMode(ih)
+	// The torrent client stops a torrent's downloads after a storage error, such
+	// as a failed file-storage write or piece completion read, so each stream
+	// tries again, unless its pieces can never fit memory storage.
+	if mode == stream.FileStorage || !c.piecesExceedMemoryLimit(to) {
+		to.AllowDataDownload()
+	}
 	if saved {
 		go func() {
 			err := c.updateTorrent(ih, api.TorrentUpdate{

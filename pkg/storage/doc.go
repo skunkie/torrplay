@@ -130,7 +130,8 @@
 //  2. Evict file boundary pieces, while still preserving active ranges.
 //  3. Evict active range pieces, oldest first. This pass runs only when no allocation is
 //     pending; otherwise the allocation waits for the pending reservation to publish or
-//     refund its memory.
+//     refund its memory. It spares a failed write, whose chunk the torrent client would
+//     have to download again.
 //
 // # Error Handling
 //

@@ -36,6 +36,9 @@ type Downloader struct {
 	db              databaseReader
 	downloading     map[metainfo.Hash]struct{}
 	fileStoragePath string
+	// inMemoryStorage reports whether a loaded torrent holds its data in
+	// memory storage although it was saved for file storage.
+	inMemoryStorage func(metainfo.Hash) bool
 	logger          *slog.Logger
 	metrics         *metrics.Metrics
 	mu              sync.Mutex
@@ -49,11 +52,18 @@ type Downloader struct {
 	waitForInfo func(ctx context.Context, to *torrent.Torrent) error
 	// wake requests a pass before the next interval.
 	wake chan struct{}
+	// writeFailed holds the torrents whose file storage writes failed. Their
+	// background downloads stay stopped until the downloader starts again.
+	writeFailed map[metainfo.Hash]struct{}
 }
 
 // Hooks lets the downloader's owner take part in its decisions. A nil hook
 // keeps its default.
 type Hooks struct {
+	// InMemoryStorage reports whether a loaded torrent holds its data in
+	// memory storage although it was saved for file storage, which a
+	// background download would only churn. Nil means never.
+	InMemoryStorage func(metainfo.Hash) bool
 	// Streaming reports whether any file is being streamed, which pauses
 	// background downloads. Nil means never.
 	Streaming func() bool
@@ -74,6 +84,7 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		db:              db,
 		downloading:     make(map[metainfo.Hash]struct{}),
 		fileStoragePath: fsp,
+		inMemoryStorage: hooks.InMemoryStorage,
 		logger:          logger,
 		metrics:         m,
 		pieceCompletion: pc,
@@ -81,6 +92,7 @@ func New(client *torrent.Client, db databaseReader, logger *slog.Logger, m *metr
 		trackers:        trackers,
 		waitForInfo:     waitForInfo,
 		wake:            make(chan struct{}, 1),
+		writeFailed:     make(map[metainfo.Hash]struct{}),
 	}
 }
 
@@ -119,6 +131,8 @@ func (d *Downloader) Start() {
 	}
 
 	d.logger.Info("starting background downloader")
+	// A start tries torrents whose writes failed again.
+	clear(d.writeFailed)
 	// The start runs a pass at once, so a wake requested while stopped is
 	// already served.
 	select {
@@ -296,6 +310,7 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 				d.logger.Error("failed to add torrent to client for background download", "hash", t.Hash, "error", err)
 				continue
 			}
+			d.WatchStorageWrites(to)
 		}
 
 		if err := d.waitForInfo(ctx, to); err != nil {
@@ -312,6 +327,7 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 
 		d.mu.Lock()
 		_, isDownloading := d.downloading[t.Hash]
+		_, writeFailed := d.writeFailed[t.Hash]
 		d.mu.Unlock()
 
 		if to.BytesCompleted() == to.Length() {
@@ -324,7 +340,9 @@ func (d *Downloader) processTorrents(stop <-chan struct{}) {
 			continue
 		}
 
-		if downloaderEnabled {
+		inMemory := d.inMemoryStorage != nil && d.inMemoryStorage(t.Hash)
+
+		if downloaderEnabled && !writeFailed && !inMemory {
 			if !isDownloading && !d.startDownload(ctx, stop, to) {
 				return
 			}
@@ -370,6 +388,9 @@ func (d *Downloader) startDownload(ctx context.Context, stop <-chan struct{}, to
 	for _, f := range to.Files() {
 		f.SetPriority(torrent.PiecePriorityNormal)
 	}
+	// A failed storage write stops the torrent's downloads until they are
+	// allowed again.
+	to.AllowDataDownload()
 	d.setDownloadingLocked(to.InfoHash(), true)
 	return true
 }
@@ -389,4 +410,34 @@ func (d *Downloader) setDownloadingLocked(hash metainfo.Hash, downloading bool) 
 // isStreaming reports whether any file is being streamed.
 func (d *Downloader) isStreaming() bool {
 	return d.streaming != nil && d.streaming()
+}
+
+// WatchStorageWrites stops downloading a file-storage torrent when writing its
+// data fails, such as on a full disk, instead of requesting the data again
+// forever. The torrent's background download stays stopped until the
+// downloader starts again, and a stream of the torrent allows its downloads
+// again.
+func (d *Downloader) WatchStorageWrites(to *torrent.Torrent) {
+	to.SetOnWriteChunkError(func(err error) { d.storageWriteFailed(to, err) })
+}
+
+// storageWriteFailed stops downloading to after a failed storage write and
+// stops its background download.
+func (d *Downloader) storageWriteFailed(to *torrent.Torrent, err error) {
+	to.DisallowDataDownload()
+	hash := to.InfoHash()
+	d.mu.Lock()
+	_, alreadyFailed := d.writeFailed[hash]
+	d.writeFailed[hash] = struct{}{}
+	_, wasDownloading := d.downloading[hash]
+	d.setDownloadingLocked(hash, false)
+	d.mu.Unlock()
+	if wasDownloading {
+		for _, f := range to.Files() {
+			f.SetPriority(torrent.PiecePriorityNone)
+		}
+	}
+	if !alreadyFailed {
+		d.logger.Error("stopped downloading torrent after a storage write failed", "hash", hash, "error", err)
+	}
 }
