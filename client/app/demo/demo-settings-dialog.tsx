@@ -7,10 +7,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
+import { LogsViewLayout } from '@/components/logs-view-layout';
 import { SettingsDialogLayout } from '@/components/settings-dialog-layout';
 import { useAuth } from '@/lib/auth-context';
+import { copyLogEntries } from '@/lib/copy-logs';
+import { demoLogs } from '@/lib/demo-logs';
 import { demoDefaultSettings } from '@/lib/demo-settings';
-import { Auth, TorrentClient } from '@/lib/types/api';
+import { LogLevel, normalizeLogLevel } from '@/lib/log-level';
+import { Auth, LogEntry, TorrentClient } from '@/lib/types/api';
 
 interface DemoSettingsDialogProps {
   open: boolean,
@@ -20,6 +24,8 @@ interface DemoSettingsDialogProps {
 const defaultSettings = demoDefaultSettings;
 
 export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogProps) {
+  const [logsView, setLogsView] = useState(false);
+  const [logEntries, setLogEntries] = useState<LogEntry[]>(demoLogs);
   const { settings, updateSettings } = useAuth();
   const [initialized, setInitialized] = useState(false);
 
@@ -37,7 +43,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
-  const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
+  const [logLevel, setLogLevel] = useState<LogLevel>('INFO');
   const [logFormat, setLogFormat] = useState<'json' | 'text'>('text');
 
   // Initialize defaults on first open if no settings exist yet.
@@ -52,6 +58,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
   // Initialize local state from settings when dialog opens.
   useEffect(() => {
     if (!open) {
+      setLogsView(false);
       setInitialized(false);
       return;
     }
@@ -65,7 +72,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
-      setLogLevel(settings.logLevel || 'INFO');
+      setLogLevel(normalizeLogLevel(settings.logLevel));
       setLogFormat(settings.logFormat || 'text');
       setInitialized(true);
     }
@@ -98,7 +105,7 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     setAuthSettings(settings.auth || defaultSettings.auth);
     setTorrentClientSettings(settings.torrentClient || defaultSettings.torrentClient);
     setTorrentTrackers(settings.torrentTrackers || defaultSettings.torrentTrackers);
-    setLogLevel(settings.logLevel || defaultSettings.logLevel || 'INFO');
+    setLogLevel(normalizeLogLevel(settings.logLevel ?? defaultSettings.logLevel));
     setLogFormat(settings.logFormat || defaultSettings.logFormat || 'text');
     toast.success('Settings reset', { description: 'Demo mode - settings not actually saved' });
   };
@@ -125,6 +132,21 @@ export function DemoSettingsDialog({ open, onOpenChange }: DemoSettingsDialogPro
     <SettingsDialogLayout
       open={open}
       onOpenChange={onOpenChange}
+      logsView={logsView}
+      onViewLogs={() => setLogsView(true)}
+      onBackFromLogs={() => setLogsView(false)}
+      logsContent={<LogsViewLayout entries={logEntries}
+        loading={false}
+        retainedCount={settings.logStoreSize}
+        onRefresh={() => setLogEntries(current => [
+          { time: new Date().toISOString(), level: 'INFO', message: 'demo log view refreshed' },
+          ...current,
+        ])}
+        onCopyVisible={entries => {
+          void copyLogEntries(entries)
+            .then(() => toast.success('Logs copied'))
+            .catch(() => toast.error('Could not copy logs'));
+        }} />}
       settings={settings}
       error={null}
       saving={false}

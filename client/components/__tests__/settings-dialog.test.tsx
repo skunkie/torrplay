@@ -66,11 +66,9 @@ vi.mock('@/lib/auth-context', () => {
 });
 
 vi.mock('swr', () => {
-  const swrMock = vi.fn(() => ({
-    get data() { return settingsRef.current; },
-    get error() { return null; },
-    mutate: mockMutate,
-  }));
+  const swrMock = vi.fn((key: string | null) => key === '/api/system/logs'
+    ? { data: [{ time: '2026-09-22T10:00:00Z', level: 'ERROR', message: 'peer timed out', data: { hash: 'ABC123' } }], error: null, isLoading: false, mutate: mockMutate }
+    : { data: settingsRef.current, error: null, isLoading: false, mutate: mockMutate });
   const mod = {
     default: swrMock,
   };
@@ -110,6 +108,26 @@ describe('SettingsDialog', () => {
     render(<SettingsDialog open={true}
       onOpenChange={vi.fn()} />);
     expect(screen.getByText('Settings')).toBeInTheDocument();
+  });
+
+  it('opens logs and preserves unsaved settings when returning', () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+    const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+    selectCombobox(logLevelSelect, 'ERROR');
+    const viewLogsButton = screen.getByRole('button', { name: 'View logs' });
+    viewLogsButton.focus();
+    fireEvent.click(viewLogsButton);
+    expect(screen.getByRole('button', { name: 'Back to Settings' })).toHaveFocus();
+    expect(screen.getByText('peer timed out')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search logs' }), { target: { value: 'abc123' } });
+    expect(screen.getByText('peer timed out')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(mockMutate).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));
+    expect(viewLogsButton).toHaveFocus();
+    expect(screen.getByRole('combobox', { name: /log level/i })).toHaveTextContent('ERROR');
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
   });
 
   it('does not render the dialog when closed', () => {
@@ -501,6 +519,47 @@ describe('SettingsDialog', () => {
     await waitFor(() => {
       expect(trackersTextarea).toHaveValue('');
     });
+  });
+
+  it('correctly populates log level when server returns DEBUG level', async () => {
+    settingsRef.current = buildMockSettings({
+      logLevel: 'DEBUG',
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+      expect(logLevelSelect).toHaveTextContent('DEBUG');
+    });
+  });
+
+  it('correctly populates default INFO log level when server returns undefined logLevel', async () => {
+    settingsRef.current = buildMockSettings({
+      logLevel: undefined,
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+      expect(logLevelSelect).toHaveTextContent('INFO');
+    });
+  });
+
+  it('repairs an unsupported server log level on save', async () => {
+    settingsRef.current = buildMockSettings({ logLevel: 'INFO+1' });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
+    await waitFor(() => expect(logLevelSelect).toHaveTextContent('INFO'));
+
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({ logLevel: 'INFO' })));
   });
 
   it('Torrent Client accordion is expanded by default', async () => {
@@ -1016,33 +1075,6 @@ describe('SettingsDialog', () => {
           }),
         }),
       );
-    });
-  });
-  it('correctly populates log level when server returns DEBUG level', async () => {
-    settingsRef.current = buildMockSettings({
-      logLevel: 'DEBUG',
-    });
-
-    render(<SettingsDialog open={true}
-      onOpenChange={vi.fn()} />);
-
-    await waitFor(() => {
-      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
-      expect(logLevelSelect).toHaveTextContent('DEBUG');
-    });
-  });
-
-  it('correctly populates default INFO log level when server returns undefined logLevel', async () => {
-    settingsRef.current = buildMockSettings({
-      logLevel: undefined,
-    });
-
-    render(<SettingsDialog open={true}
-      onOpenChange={vi.fn()} />);
-
-    await waitFor(() => {
-      const logLevelSelect = screen.getByRole('combobox', { name: /log level/i });
-      expect(logLevelSelect).toHaveTextContent('INFO');
     });
   });
 });

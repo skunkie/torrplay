@@ -489,7 +489,11 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 				slog.String("path", r.URL.Path),
 			}
 			if r.URL.RawQuery != "" {
-				logAttrs = append(logAttrs, slog.String("query", r.URL.RawQuery))
+				query := r.URL.Query()
+				if r.URL.Path == "/api/system/logs" && query.Has("q") {
+					query.Set("q", "[REDACTED]")
+				}
+				logAttrs = append(logAttrs, slog.String("query", query.Encode()))
 			}
 			logAttrs = append(logAttrs, slog.String("user-agent", r.UserAgent()))
 

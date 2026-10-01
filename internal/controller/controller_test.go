@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -917,6 +918,42 @@ func TestUpdateSettings(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &updatedSettings))
 	assert.Equal(t, *newSettings.FriendlyName, *updatedSettings.FriendlyName)
 	assert.Equal(t, *newSettings.HTTPServerPort, *updatedSettings.HTTPServerPort)
+}
+
+func TestUpdateSettingsRejectsUnsupportedLogLevel(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	for _, level := range []string{"INFO+1", "ERROR+4"} {
+		t.Run(level, func(t *testing.T) {
+			rr := testutil.NewRequest().Patch("/api/v1/settings").WithJsonBody(map[string]string{"log_level": level}).GoWithHTTPHandler(t, http.HandlerFunc(ctrl.UpdateSettings)).Recorder
+			assert.Equal(t, http.StatusBadRequest, rr.Code)
+			assert.Contains(t, rr.Body.String(), "log level must be DEBUG, INFO, WARN, or ERROR")
+
+			stored, err := ctrl.db.GetSettings()
+			require.NoError(t, err)
+			require.NotNil(t, stored.LogLevel)
+			assert.Equal(t, slog.LevelInfo, *stored.LogLevel)
+		})
+	}
+}
+
+func TestSlogMiddlewareRedactsLogsQuery(t *testing.T) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(handler)
+
+	c := &Controller{}
+	c.logger.Store(logger)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/system/logs?q=private-search-term", http.NoBody)
+	rr := httptest.NewRecorder()
+	c.SlogMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(rr, req)
+
+	assert.NotContains(t, buf.String(), "private-search-term")
+	assert.Contains(t, buf.String(), "q=%5BREDACTED%5D")
 }
 
 func TestUpdateSettingsWithTrackers(t *testing.T) {

@@ -10,10 +10,14 @@ import { toast } from 'sonner';
 import useSWR from 'swr';
 
 import { getSettings } from '@/lib/api/settings';
+import { getSystemLogs } from '@/lib/api/system';
 import { getApiBaseUrl } from '@/lib/api-client';
 import { useAuth } from '@/lib/auth-context';
+import { copyLogEntries } from '@/lib/copy-logs';
+import { LogLevel, normalizeLogLevel } from '@/lib/log-level';
 import { Auth, Settings, TorrentClient } from '@/lib/types/api';
 
+import { LogsViewLayout } from './logs-view-layout';
 import { SettingsDialogLayout } from './settings-dialog-layout';
 
 interface SettingsDialogProps {
@@ -31,6 +35,12 @@ const isValidUrl = (url: string) => {
 };
 
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
+  const [logsView, setLogsView] = useState(false);
+  const { data: logEntries = [], error: logsError, isLoading: logsLoading, mutate: refreshLogs } = useSWR(
+    open && logsView ? '/api/system/logs' : null,
+    getSystemLogs,
+    { shouldRetryOnError: false }
+  );
   const { data: settings, error, mutate } = useSWR<Settings>(
     open ? '/api/v1/settings' : null,
     getSettings,
@@ -55,7 +65,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [authSettings, setAuthSettings] = useState<Auth | null>(null);
   const [torrentClientSettings, setTorrentClientSettings] = useState<TorrentClient | null>(null);
   const [torrentTrackers, setTorrentTrackers] = useState<string[]>([]);
-  const [logLevel, setLogLevel] = useState<'DEBUG' | 'INFO' | 'WARN' | 'ERROR'>('INFO');
+  const [logLevel, setLogLevel] = useState<LogLevel>('INFO');
   const [logFormat, setLogFormat] = useState<'json' | 'text'>('text');
 
   // State for API URL.
@@ -72,6 +82,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const IS_TAURI = isTauri();
 
   useEffect(() => {
+    if (!open) setLogsView(false);
     if (open) {
       const currentApiUrl = getApiBaseUrl();
       const customApiUrl = localStorage.getItem('NEXT_PUBLIC_API_URL');
@@ -97,7 +108,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
-      setLogLevel(settings.logLevel || 'INFO');
+      setLogLevel(normalizeLogLevel(settings.logLevel));
       setLogFormat(settings.logFormat || 'text');
     }
   }, [settings, open, IS_TAURI]);
@@ -264,7 +275,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
       setAuthSettings(settings.auth);
       setTorrentClientSettings(settings.torrentClient);
       setTorrentTrackers(settings.torrentTrackers || []);
-      setLogLevel(settings.logLevel || 'INFO');
+      setLogLevel(normalizeLogLevel(settings.logLevel));
       setLogFormat(settings.logFormat || 'text');
     }
   };
@@ -321,6 +332,19 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     <SettingsDialogLayout
       open={open}
       onOpenChange={onOpenChange}
+      logsView={logsView}
+      onViewLogs={() => setLogsView(true)}
+      onBackFromLogs={() => setLogsView(false)}
+      logsContent={<LogsViewLayout entries={logEntries}
+        error={logsError}
+        loading={logsLoading}
+        retainedCount={settings?.logStoreSize}
+        onRefresh={() => { void refreshLogs(); }}
+        onCopyVisible={entries => {
+          void copyLogEntries(entries)
+            .then(() => toast.success('Logs copied'))
+            .catch(() => toast.error('Could not copy logs'));
+        }} />}
       settings={settings}
       error={error}
       saving={saving}

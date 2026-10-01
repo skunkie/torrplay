@@ -21,7 +21,7 @@ var DefaultStore = NewStore(defaultLogStoreSize)
 type LogEntry struct {
 	Time    time.Time      `json:"time"`
 	Level   slog.Level     `json:"level"`
-	Message string         `json:"msg"`
+	Message string         `json:"message"`
 	Data    map[string]any `json:"data,omitempty"`
 }
 
