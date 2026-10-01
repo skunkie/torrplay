@@ -551,6 +551,106 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	ctrl.cancelPreload(ih)
 }
 
+func TestController_WaitForInfo(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
+
+	t.Run("returns once the metadata is known", func(t *testing.T) {
+		to := addSyntheticTorrent(t, ctrl, 1<<20, 1<<20)
+		require.NoError(t, ctrl.waitForInfo(to))
+		require.NoError(t, ctrl.waitForInfoOrDrop(to))
+	})
+
+	// A torrent added by hash alone has no peers here, so its metadata never
+	// arrives.
+	withoutInfo := func(t *testing.T, ih metainfo.Hash) *torrent.Torrent {
+		t.Helper()
+		to, err := ctrl.loadTorrent(utils.MagnetURIFromHash(ih), api.Memory)
+		require.NoError(t, err)
+		return to
+	}
+
+	t.Run("times out and keeps the torrent", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{7})
+		err := ctrl.waitForInfo(to)
+		var apiErr api.Error
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusGatewayTimeout, apiErr.Code)
+		assert.Equal(t, gotInfoTimeoutMsg, apiErr.Message)
+		_, loaded := ctrl.clientTorrent(to.InfoHash())
+		assert.True(t, loaded)
+	})
+
+	t.Run("returns once its context ends", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{10})
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.ErrorIs(t, ctrl.waitForInfoContext(ctx, to), context.Canceled)
+		ctrl.infoWaitersMu.Lock()
+		defer ctrl.infoWaitersMu.Unlock()
+		assert.Zero(t, ctrl.infoWaiters[to.InfoHash()], "the wait must no longer count")
+	})
+
+	t.Run("times out and drops the torrent", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{8})
+		require.Error(t, ctrl.waitForInfoOrDrop(to))
+		select {
+		case <-to.Closed():
+		default:
+			t.Fatal("the torrent was not dropped")
+		}
+	})
+
+	t.Run("keeps a torrent another request still awaits", func(t *testing.T) {
+		to := withoutInfo(t, metainfo.Hash{9})
+		ctrl.infoWaitersMu.Lock()
+		ctrl.infoWaiters[to.InfoHash()]++ // a stream request still waiting
+		ctrl.infoWaitersMu.Unlock()
+
+		require.Error(t, ctrl.waitForInfoOrDrop(to))
+		select {
+		case <-to.Closed():
+			t.Fatal("the torrent another request awaits was dropped")
+		default:
+		}
+
+		ctrl.infoWaitersMu.Lock()
+		ctrl.infoWaiters[to.InfoHash()]--
+		ctrl.infoWaitersMu.Unlock()
+		require.Error(t, ctrl.waitForInfoOrDrop(to))
+		<-to.Closed()
+	})
+
+	t.Run("ends at once when the torrent closes", func(t *testing.T) {
+		timeout := ctrl.runtimeConfig.gotInfoTimeout
+		ctrl.runtimeConfig.gotInfoTimeout = time.Minute
+		defer func() { ctrl.runtimeConfig.gotInfoTimeout = timeout }()
+		to := withoutInfo(t, metainfo.Hash{10})
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			to.Drop()
+		}()
+
+		start := time.Now()
+		err := ctrl.waitForInfo(to)
+		var apiErr api.Error
+		require.ErrorAs(t, err, &apiErr)
+		assert.Equal(t, http.StatusServiceUnavailable, apiErr.Code)
+		assert.Less(t, time.Since(start), 10*time.Second, "the wait must not run to the metadata timeout")
+	})
+
+	t.Run("forgets waiters once they return", func(t *testing.T) {
+		ctrl.infoWaitersMu.Lock()
+		defer ctrl.infoWaitersMu.Unlock()
+		for ih, count := range ctrl.infoWaiters {
+			assert.Positive(t, count, "hash %s", ih)
+		}
+		assert.NotContains(t, ctrl.infoWaiters, metainfo.Hash{7})
+		assert.NotContains(t, ctrl.infoWaiters, metainfo.Hash{8})
+	})
+}
+
 func TestController_TorrentStorageMode(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()

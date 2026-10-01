@@ -205,10 +205,8 @@ func (c *Controller) AddTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case <-to.GotInfo():
-	case <-time.After(c.runtimeConfig.gotInfoTimeout):
-		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+	if err := c.waitForInfoOrDrop(to); err != nil {
+		api.HandleError(w, err)
 		return
 	}
 
@@ -524,16 +522,15 @@ func (c *Controller) GetTorrent(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	select {
-	case <-to.GotInfo():
-		metadata := torrentToMetadata(to)
-		metadata.Active = utils.Ptr(c.hasTorrentReaders(ih))
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(metadata); err != nil {
-			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
-		}
-	case <-time.After(c.runtimeConfig.gotInfoTimeout):
-		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+	if err := c.waitForInfoOrDrop(to); err != nil {
+		api.HandleError(w, err)
+		return
+	}
+	metadata := torrentToMetadata(to)
+	metadata.Active = new(c.hasTorrentReaders(ih))
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(metadata); err != nil {
+		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
@@ -544,10 +541,8 @@ func (c *Controller) GetTorrentStats(w http.ResponseWriter, _ *http.Request, ih 
 		return
 	}
 
-	select {
-	case <-to.GotInfo():
-	case <-time.After(c.runtimeConfig.gotInfoTimeout):
-		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+	if err := c.waitForInfoOrDrop(to); err != nil {
+		api.HandleError(w, err)
 		return
 	}
 
@@ -1173,6 +1168,62 @@ func (c *Controller) addTorrentByMagnetWithStorage(uri string, defaultStorage ap
 	return c.loadTorrent(uri, utils.Val(t.Storage))
 }
 
+// waitForInfo waits at most the metadata timeout for a torrent's metadata. It
+// returns a gateway-timeout error when the metadata does not arrive in time,
+// and a service-unavailable error at once when the torrent closes meanwhile.
+func (c *Controller) waitForInfo(to *torrent.Torrent) error {
+	return c.waitForInfoContext(context.Background(), to)
+}
+
+// waitForInfoContext is waitForInfo that also returns ctx's error once ctx
+// ends.
+func (c *Controller) waitForInfoContext(ctx context.Context, to *torrent.Torrent) error {
+	ih := to.InfoHash()
+	c.infoWaitersMu.Lock()
+	c.infoWaiters[ih]++
+	c.infoWaitersMu.Unlock()
+	defer func() {
+		c.infoWaitersMu.Lock()
+		defer c.infoWaitersMu.Unlock()
+		c.infoWaiters[ih]--
+		if c.infoWaiters[ih] <= 0 {
+			delete(c.infoWaiters, ih)
+		}
+	}()
+
+	select {
+	case <-to.GotInfo():
+		return nil
+	case <-to.Closed():
+		return api.NewError("torrent closed while waiting for its metadata", http.StatusServiceUnavailable)
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(c.runtimeConfig.gotInfoTimeout):
+		return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+	}
+}
+
+// waitForInfoOrDrop is waitForInfo for a torrent loaded only to serve the
+// request: when the metadata does not arrive in time, it also drops the torrent
+// so it does not stay loaded without metadata. A torrent another request is
+// still waiting on stays loaded for that request.
+func (c *Controller) waitForInfoOrDrop(to *torrent.Torrent) error {
+	err := c.waitForInfo(to)
+	if err == nil {
+		return nil
+	}
+	c.infoWaitersMu.Lock()
+	awaited := c.infoWaiters[to.InfoHash()] > 0
+	c.infoWaitersMu.Unlock()
+	// A request that starts waiting after this check ends its wait as soon
+	// as the torrent closes, so the drop needs no lock.
+	if !awaited {
+		to.Drop()
+		<-to.Closed()
+	}
+	return err
+}
+
 func (c *Controller) buildPosterUrl(r *http.Request, id string) *string {
 	scheme := "http"
 	if r.TLS != nil {
@@ -1545,8 +1596,6 @@ func (c *Controller) torrentActivity(ih metainfo.Hash) (isStreaming, isDownloadi
 	return isStreaming, isDownloading
 }
 
-// loadTorrent is the single entry point for adding a torrent to the client.
-// It handles adding trackers and managing torrents' lifetime in the torrent client.
 func (c *Controller) loadTorrentSpec(spec *torrent.TorrentSpec, storageType api.TorrentStorage) (*torrent.Torrent, error) {
 	if t, err := c.db.GetTorrent(spec.InfoHash); err == nil && len(t.InfoBytes) > 0 && len(spec.InfoBytes) == 0 {
 		spec.InfoBytes = t.InfoBytes
@@ -1720,10 +1769,8 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 		return
 	}
 
-	select {
-	case <-to.GotInfo():
-	case <-time.After(c.runtimeConfig.gotInfoTimeout):
-		api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+	if err := c.waitForInfo(to); err != nil {
+		api.HandleError(w, err)
 		return
 	}
 
@@ -1893,15 +1940,10 @@ func (c *Controller) updateTorrent(ih metainfo.Hash, req api.TorrentUpdate) erro
 				if err != nil {
 					return api.NewError(err.Error(), http.StatusInternalServerError)
 				}
-				select {
-				case <-to.GotInfo():
-					meta := to.Metainfo()
-					infoBytes = meta.InfoBytes
-				case <-time.After(c.runtimeConfig.gotInfoTimeout):
-					to.Drop()
-					<-to.Closed()
-					return api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+				if err := c.waitForInfoOrDrop(to); err != nil {
+					return err
 				}
+				infoBytes = to.Metainfo().InfoBytes
 			}
 			t.InfoBytes = infoBytes
 		} else {

@@ -699,3 +699,23 @@ func TestTSCacheFileStorage(t *testing.T) {
 		assert.Empty(t, cacheResp.Readers)
 	})
 }
+
+func TestTSStreamPreloadReportsMetadataTimeout(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
+
+	for _, query := range []string{"preload", "preload&stat"} {
+		t.Run(query, func(t *testing.T) {
+			ih := metainfo.Hash{0x7a, byte(len(query))}
+			req := httptest.NewRequest(http.MethodGet, "/stream/movie.mkv?link="+ih.HexString()+"&"+query, http.NoBody)
+			rr := httptest.NewRecorder()
+			ctrl.router.ServeHTTP(rr, req)
+
+			require.Equal(t, http.StatusGatewayTimeout, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), gotInfoTimeoutMsg)
+			_, loaded := ctrl.clientTorrent(ih)
+			assert.False(t, loaded, "a torrent without metadata must be dropped")
+		})
+	}
+}

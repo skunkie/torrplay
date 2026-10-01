@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
@@ -286,9 +285,8 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	}
 
 	if utils.Val(params.Preload) {
-		select {
-		case <-to.GotInfo():
-		case <-time.After(c.runtimeConfig.gotInfoTimeout):
+		if err := c.waitForInfoOrDrop(to); err != nil {
+			api.HandleError(w, err)
 			return
 		}
 
@@ -309,10 +307,8 @@ func (c *Controller) TSStream(w http.ResponseWriter, r *http.Request, _ api.TSFi
 	}
 
 	if utils.Val(params.Stat) {
-		select {
-		case <-to.GotInfo():
-		case <-time.After(c.runtimeConfig.gotInfoTimeout):
-			api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+		if err := c.waitForInfoOrDrop(to); err != nil {
+			api.HandleError(w, err)
 			return
 		}
 		t := torrentToMetadata(to)
@@ -404,10 +400,8 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		select {
-		case <-to.GotInfo():
-		case <-time.After(c.runtimeConfig.gotInfoTimeout):
-			api.HTTPError(w, gotInfoTimeoutMsg, http.StatusGatewayTimeout)
+		if err := c.waitForInfoOrDrop(to); err != nil {
+			api.HandleError(w, err)
 			return
 		}
 
@@ -511,10 +505,8 @@ func (c *Controller) TSTorrentUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case <-to.GotInfo():
-	case <-time.After(c.runtimeConfig.gotInfoTimeout):
-		api.HandleError(w, api.NewError(gotInfoTimeoutMsg, http.StatusGatewayTimeout))
+	if err := c.waitForInfoOrDrop(to); err != nil {
+		api.HandleError(w, err)
 		return
 	}
 
