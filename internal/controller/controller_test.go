@@ -1691,3 +1691,26 @@ func TestCalcReadaheadPct(t *testing.T) {
 		})
 	}
 }
+
+func TestController_IsStreaming(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	assert.False(t, ctrl.isStreaming())
+	primeSampleMetadata(t, ctrl, sintelHash)
+
+	to, ok := ctrl.client.Torrent(sintelHash)
+	require.True(t, ok)
+	require.NotEmpty(t, to.Files())
+
+	pool := ctrl.streamPool.Load()
+	_, release, err := pool.Acquire(t.Context(), to.Files()[0], stream.MemoryStorage)
+	require.NoError(t, err)
+
+	assert.True(t, ctrl.isStreaming())
+	release()
+	assert.True(t, ctrl.isStreaming(), "a lingering reader still pauses background downloads")
+
+	pool.Close()
+	assert.False(t, ctrl.isStreaming())
+}

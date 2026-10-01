@@ -261,9 +261,10 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		return nil, err
 	}
 
-	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(c.settings.Load().FileStoragePath), c.trackers))
-	if *c.settings.Load().EnableDlna {
-		err = c.dlna.Start(*c.settings.Load().FriendlyName, c.httpAddr, c.resolveHTTPPort())
+	c.downloader.Store(downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(appSettings.FileStoragePath), c.trackers, c.downloaderHooks()))
+
+	if *appSettings.EnableDlna {
+		err = c.dlna.Start(*appSettings.FriendlyName, c.httpAddr, c.resolveHTTPPort())
 		if err != nil {
 			return nil, err
 		}
@@ -798,6 +799,32 @@ func (c *Controller) currentClient() *torrent.Client {
 	return c.client
 }
 
+// downloaderHooks returns how the background downloader asks the controller
+// about streaming, metadata, and storage.
+func (c *Controller) downloaderHooks() downloader.Hooks {
+	return downloader.Hooks{
+		Streaming: c.isStreaming,
+	}
+}
+
+// streamingTorrentCount returns the number of torrents with an active or
+// lingering stream reader, counting a torrent once however many of its files
+// are playing.
+func (c *Controller) streamingTorrentCount() int {
+	pool := c.streamPool.Load()
+	if pool == nil {
+		return 0
+	}
+	return pool.StreamingTorrentCount()
+}
+
+// isStreaming reports whether any file is being streamed, including by a
+// reader lingering between a player's range requests. The background
+// downloader pauses while it does.
+func (c *Controller) isStreaming() bool {
+	return c.streamingTorrentCount() > 0
+}
+
 func (c *Controller) configureTorrentClient() error {
 	c.torrentConfigMu.Lock()
 	defer c.torrentConfigMu.Unlock()
@@ -883,9 +910,16 @@ func (c *Controller) configureTorrentClient() error {
 	// Registry: storageClient protects actively-read pieces from eviction
 	// by registering readahead windows with the storage layer.
 	pool := stream.New(stream.Config{
-		FileReadaheadBytes:     fileStorageReadahead,
-		LingerTimeout:          30 * time.Second,
-		Logger:                 logger,
+		FileReadaheadBytes: fileStorageReadahead,
+		LingerTimeout:      30 * time.Second,
+		Logger:             logger,
+		// Background downloads pause while anything streams, so the
+		// downloader checks at once instead of at its next interval.
+		OnStreamingChange: func(bool) {
+			if d := c.downloader.Load(); d != nil {
+				d.Wake()
+			}
+		},
 		PriorityWindowFraction: 0.15,
 		Registry:               storageClient,
 	})
@@ -901,7 +935,7 @@ func (c *Controller) configureTorrentClient() error {
 	if isReconfiguring {
 		c.downloader.Load().Stop()
 		c.trackers = newTrackers
-		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers)
+		newDownloader := downloader.New(c.client, c.db, c.logger.Load(), c.metrics, c.pieceCompletion, utils.Val(currentSettings.FileStoragePath), c.trackers, c.downloaderHooks())
 		c.downloader.Store(newDownloader)
 		if utils.Val(currentSettings.EnableDownloader) {
 			newDownloader.Start()

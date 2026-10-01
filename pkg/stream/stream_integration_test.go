@@ -505,10 +505,9 @@ func TestPoolStaleReaderCannotMoveLingeringReader(t *testing.T) {
 	pool.mu.Unlock()
 }
 
-// TestPoolReportsStreamingChanges verifies that OnStreamingChange is called
-// when the pool gains its first reader, keeps true while any reader lingers,
-// and turns false when the last reader closes, so background downloads pause
-// and resume at once.
+// The pool reports when it gains its first reader and when its last reader,
+// lingering ones included, closes, so the background downloader can pause and
+// resume at once.
 func TestPoolReportsStreamingChanges(t *testing.T) {
 	c := newTestTorrentClient(t)
 	to, f := addTestTorrent(t, c)
