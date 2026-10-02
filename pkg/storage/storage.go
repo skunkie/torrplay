@@ -59,6 +59,8 @@ type Client struct {
 	allocations sync.WaitGroup
 	// closeCh is closed when the client is fully shut down.
 	closeCh chan struct{}
+	// counters accumulates storage events for Counters.
+	counters clientCounters
 	// closed is protected by mu and rejects new work before closeCh is signaled.
 	closed bool
 	// evictedPending holds pieces evicted, or found missing when marked
@@ -87,8 +89,6 @@ type Client struct {
 	torrents map[metainfo.Hash]*torrentState
 	// used is the total memory currently consumed by piece data.
 	used int64
-
-	counters clientCounters
 }
 
 // Counters holds cumulative storage event counts since the client was
@@ -615,6 +615,64 @@ func (c *Client) OpenTorrent(_ context.Context, info *metainfo.Info, infoHash me
 			return handle.closeErr
 		},
 	}, nil
+}
+
+// SetMaxMemory updates the maximum memory limit for the storage client.
+// If the new limit is lower than current usage, an eviction will be triggered
+// to bring memory usage within the new limit. Negative values are clamped to 0.
+// The limit is an absolute ceiling: protected pieces are evicted too if that
+// is needed to enforce it.
+//
+// It returns ErrClientClosed after Close and ErrInsufficientMemory if the new
+// limit cannot be enforced. This operation is thread-safe.
+func (c *Client) SetMaxMemory(limitBytes int64) error {
+	if limitBytes < 0 {
+		limitBytes = 0
+	}
+
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return ErrClientClosed
+		}
+		c.maxMemory = limitBytes
+
+		// Trigger eviction if current usage exceeds the new limit.
+		c.evictLocked(limitBytes, evictActive, 0)
+
+		used := c.used
+		if used <= limitBytes {
+			c.mu.Unlock()
+			c.logger.Debug("updated memory limit",
+				slog.Int64("newLimit", limitBytes),
+				slog.Int64("currentUsed", used))
+			return nil
+		}
+
+		// The only entries emergency eviction cannot release are in-flight
+		// reservations whose data has not been published yet. Wait without c.mu
+		// so their owners can commit or refund, then enforce the limit again.
+		waiters := make([]<-chan struct{}, 0)
+		for _, pd := range c.pieces {
+			pd.mu.RLock()
+			if pd.allocating {
+				waiters = append(waiters, pd.allocDone)
+			}
+			pd.mu.RUnlock()
+		}
+		c.mu.Unlock()
+
+		if len(waiters) == 0 {
+			c.logger.Warn("unable to enforce updated memory limit",
+				slog.Int64("newLimit", limitBytes),
+				slog.Int64("currentUsed", used))
+			return fmt.Errorf("%w: limit=%d used=%d", ErrInsufficientMemory, limitBytes, used)
+		}
+		for _, done := range waiters {
+			<-done
+		}
+	}
 }
 
 // releaseMemoryLocked releases a reservation. c.mu must be held by the caller.
@@ -1288,7 +1346,8 @@ func (p *pieceImpl) ensureDataAllocated(pd *pieceData) error {
 	return p.commitPieceAllocation(pd, data)
 }
 
-// commitPieceAllocation publishes allocated data and revalidates the memory.
+// commitPieceAllocation publishes allocated data and revalidates the memory
+// limit in case SetMaxMemory ran after the reservation was made.
 func (p *pieceImpl) commitPieceAllocation(pd *pieceData, data []byte) error {
 	c := p.client
 	c.mu.Lock()

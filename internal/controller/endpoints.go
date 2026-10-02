@@ -741,7 +741,7 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	c.settingsUpdateMu.Lock()
 	defer c.settingsUpdateMu.Unlock()
 
-	var reconfigureDLNA, reconfigureLogger, reconfigureProfiler, reconfigureTorrentClient, restartHTTPServer, saveSettings bool
+	var reconfigureDLNA, reconfigureLogger, reconfigureProfiler, reconfigureTorrentClient, resizeMemory, restartHTTPServer, saveSettings bool
 
 	dbOldSettings, err := c.db.GetSettings()
 	if err != nil {
@@ -916,7 +916,8 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.MaxMemory, newSettings.MaxMemory) {
-		reconfigureTorrentClient = true
+		// Applied in place unless the torrent client is rebuilt anyway.
+		resizeMemory = true
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.TorrentClient, newSettings.TorrentClient) {
@@ -1024,9 +1025,18 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			fail(fmt.Sprintf("failed to reconfigure torrent client, %v", err))
 			return
 		}
-	} else if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
-		c.applyDownloaderSettings()
-		applied.downloader = true
+	} else {
+		if resizeMemory {
+			applied.memoryLimit = true
+			if err := c.applyMemoryLimit(); err != nil {
+				fail(fmt.Sprintf("failed to resize memory storage, %v", err))
+				return
+			}
+		}
+		if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
+			c.applyDownloaderSettings()
+			applied.downloader = true
+		}
 	}
 
 	if reconfigureDLNA {
@@ -1078,6 +1088,7 @@ type appliedSettings struct {
 	downloader      bool
 	logStoreSize    bool
 	logger          bool
+	memoryLimit     bool
 	pieceCompletion bool
 	torrentClient   bool
 }
@@ -1141,6 +1152,27 @@ func (c *Controller) applyLoggerSettings() {
 	c.dlna.SetLogger(newLogger)
 }
 
+// applyMemoryLimit resizes memory storage and the stream readahead budget to
+// the current settings without replacing the torrent client, so streams and
+// cached pieces survive. When preload reservations exceed a smaller budget,
+// the stream pool evicts preloads until they fit.
+func (c *Controller) applyMemoryLimit() error {
+	c.torrentConfigMu.Lock()
+	defer c.torrentConfigMu.Unlock()
+
+	storageClient := c.storageClient.Load()
+	pool := c.streamPool.Load()
+	if storageClient == nil || pool == nil || c.torrentClientUnavailable.Load() {
+		return errors.New("torrent client is unavailable")
+	}
+	maxMemory := *c.settings.Load().MaxMemory
+	// Shrink the protected readahead first so eviction can reclaim what it
+	// no longer covers.
+	budget := readaheadBudget(maxMemory)
+	pool.SetReadaheadBudget(budget)
+	return storageClient.SetMaxMemory(maxMemory)
+}
+
 // rollbackSettings restores the previous settings in memory and in the
 // database after a failed update, then reapplies them to the components the
 // update changed. The logger and piece completion database are restored before
@@ -1159,6 +1191,11 @@ func (c *Controller) rollbackSettings(old *api.Settings, applied appliedSettings
 	}
 	if applied.downloader {
 		c.applyDownloaderSettings()
+	}
+	if applied.memoryLimit {
+		if err := c.applyMemoryLimit(); err != nil {
+			c.logger.Load().Error("failed to restore memory limit", "err", err)
+		}
 	}
 	if applied.logger {
 		c.applyLoggerSettings()

@@ -627,6 +627,59 @@ func saveTorrentRecord(t *testing.T, ctrl *Controller, meta *metainfo.MetaInfo, 
 	return ih
 }
 
+// A torrent whose pieces are larger than the memory limit can never store
+// one. Its stream must fail at once instead of downloading the same data
+// forever, and a stream after the limit grows must work.
+func TestIntegrationStreamFailsWhilePiecesExceedMemory(t *testing.T) {
+	payload := bytes.Repeat([]byte("torrplay-memory-write\n"), 4096)
+	meta, requests := countingWebseed(t, payload)
+	ctrl := newIntegrationTestController(t)
+	ih := saveWebseedTorrent(t, ctrl, meta, len(payload), api.Memory)
+	storageClient := ctrl.storageClient.Load()
+	require.NoError(t, storageClient.SetMaxMemory(localWebseedPieceLength/2))
+
+	server := httptest.NewServer(ctrl.router)
+	defer server.Close()
+	// A bounded request lets the server close even if a stream hangs.
+	readStart := func() error {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/api/v1/stream/%s?index=0", server.URL, ih), http.NoBody)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Range", "bytes=0-1023")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err == nil && !bytes.Equal(payload[:1024], body) {
+			err = fmt.Errorf("wrong bytes, status %s", resp.Status)
+		}
+		return err
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- readStart() }()
+	select {
+	case err := <-done:
+		require.Error(t, err, "no piece fits, so the stream cannot succeed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream must fail instead of waiting for pieces that never fit")
+	}
+	time.Sleep(500 * time.Millisecond)
+	settled := requests.Load()
+	assert.Never(t, func() bool { return requests.Load() != settled }, time.Second, 50*time.Millisecond,
+		"pieces that never fit must not be requested again")
+	require.Error(t, readStart(), "a retried stream cannot succeed either")
+	assert.Equal(t, settled, requests.Load(), "a retried stream must not request pieces that never fit")
+
+	require.NoError(t, storageClient.SetMaxMemory(4<<20))
+	require.NoError(t, readStart(), "a stream must work once pieces fit")
+}
+
 // A full disk fails every file-storage write. The background download must stop
 // instead of requesting the same data forever, until the downloader restarts.
 func TestIntegrationFileStorageWriteFailureStopsBackgroundDownload(t *testing.T) {

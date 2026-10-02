@@ -387,11 +387,12 @@ func TestClient_TorrentStats(t *testing.T) {
 	})
 
 	t.Run("memory usage fraction with zero limit", func(t *testing.T) {
-		client := newTestClient(0)
+		client := newTestClient(1024)
 		info, infoHash := newTestInfo(256, 1)
 		_, err := client.OpenTorrent(context.Background(), info, infoHash)
 		require.NoError(t, err)
 
+		require.NoError(t, client.SetMaxMemory(0))
 		assert.Equal(t, float64(0), requireTorrentStats(t, client, infoHash).MemoryUsageFraction())
 	})
 
@@ -1038,6 +1039,80 @@ func TestClientPieceBufferReuse(t *testing.T) {
 			}
 		}
 		assert.Equal(t, int64(256), client.MemoryStats().UsedBytes)
+	})
+}
+
+func TestClient_SetMaxMemory(t *testing.T) {
+	// Ensures that dynamically changing the memory limit triggers eviction.
+	t.Run("shrinking triggers eviction", func(t *testing.T) {
+		client := newTestClient(1024)
+		info, infoHash := newTestInfo(256, 4)
+
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+
+		// Write 3 pieces
+		for i := range 3 {
+			p := torrentImpl.Piece(info.Piece(i))
+			_, err := p.WriteAt(fmt.Appendf(nil, "piece_%d", i), 0)
+			require.NoError(t, err)
+		}
+
+		// Reduce memory, triggering eviction
+		require.NoError(t, client.SetMaxMemory(512))
+
+		stats, err := client.TorrentStats(infoHash)
+		require.NoError(t, err)
+		assert.Equal(t, 2, stats.ResidentPieces)
+		client.mu.RLock()
+		assert.Equal(t, int64(512), client.torrents[infoHash].pieceMemory, "eviction must release the torrent's memory")
+		client.mu.RUnlock()
+
+		require.NoError(t, client.SetMaxMemory(0))
+		assert.Zero(t, client.MemoryStats().TorrentsUsingMemory, "a torrent without resident pieces uses no memory")
+	})
+
+	t.Run("enforces limit across active ranges", func(t *testing.T) {
+		client := newTestClient(512)
+		info, infoHash := newTestInfo(256, 2)
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+
+		for i := range 2 {
+			_, err = torrentImpl.Piece(info.Piece(i)).WriteAt([]byte("data"), 0)
+			require.NoError(t, err)
+		}
+		client.SetProtection(infoHash, 1, activeProtection(0, 1))
+
+		require.NoError(t, client.SetMaxMemory(0))
+		stats := client.MemoryStats()
+		assert.Equal(t, int64(0), stats.LimitBytes)
+		assert.Equal(t, int64(0), stats.UsedBytes)
+		assert.Equal(t, 0, stats.TrackedPieces)
+	})
+
+	// Verifies that SetMaxMemory(-100)
+	// clamps to 0 and triggers eviction.
+	t.Run("negative clamps to zero", func(t *testing.T) {
+		client := newTestClient(512)
+		info, infoHash := newTestInfo(256, 2)
+
+		torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+		require.NoError(t, err)
+
+		_, err = torrentImpl.Piece(info.Piece(0)).WriteAt([]byte("data"), 0)
+		require.NoError(t, err)
+
+		require.NoError(t, client.SetMaxMemory(-100))
+
+		client.mu.RLock()
+		maxMem := client.maxMemory
+		used := client.used
+		client.mu.RUnlock()
+
+		assert.Equal(t, int64(0), maxMem, "negative value should be clamped to 0")
+		// With maxMemory=0, eviction deterministically removes all unprotected pieces.
+		assert.Equal(t, int64(0), used, "used should be 0 after eviction to maxMemory=0")
 	})
 }
 
@@ -1887,6 +1962,13 @@ func TestPieceData_RangeWritten(t *testing.T) {
 }
 
 func TestClient_Close(t *testing.T) {
+	t.Run("memory controls after close", func(t *testing.T) {
+		client := newTestClient(512)
+		require.NoError(t, client.Close())
+
+		assert.ErrorIs(t, client.SetMaxMemory(1), ErrClientClosed)
+	})
+
 	t.Run("is idempotent", func(t *testing.T) {
 		client := newTestClient(512)
 		info, infoHash := newTestInfo(256, 1)
@@ -2370,6 +2452,41 @@ func BenchmarkPieceImpl_WriteAt_ContendedFirstAllocation(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
+		}
+	}
+}
+
+func BenchmarkClient_RefillAndSetMaxMemoryEvict(b *testing.B) {
+	const pieceSize = 64 * 1024
+	const pieceCount = 16
+	const highLimit = pieceSize * pieceCount
+	const lowLimit = highLimit / 2
+	client := newBenchmarkClient(highLimit)
+	defer client.Close()
+
+	info, infoHash := newTestInfo(pieceSize, pieceCount)
+	torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+	if err != nil {
+		b.Fatal(err)
+	}
+	data := make([]byte, pieceSize)
+	fill := func() {
+		for i := range pieceCount {
+			if _, err := torrentImpl.Piece(info.Piece(i)).WriteAt(data, 0); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if err := client.SetMaxMemory(highLimit); err != nil {
+			b.Fatal(err)
+		}
+		fill()
+		if err := client.SetMaxMemory(lowLimit); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

@@ -133,6 +133,9 @@
 //     refund its memory. It spares a failed write, whose chunk the torrent client would
 //     have to download again.
 //
+// SetMaxMemory enforces a new limit with all three passes, waiting for pending
+// allocations when necessary.
+//
 // # Error Handling
 //
 // The package defines several error conditions:
