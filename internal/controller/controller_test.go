@@ -107,6 +107,8 @@ func primeSampleMetadata(t *testing.T, ctrl *Controller, ih metainfo.Hash) {
 	require.NoError(t, err)
 }
 
+type testControllerOpt func(*Controller)
+
 func testControllerRuntimeConfig() controllerRuntimeConfig {
 	return controllerRuntimeConfig{
 		fetchTrackers: func(context.Context, *httpclient.Client) ([][]string, error) {
@@ -119,14 +121,14 @@ func testControllerRuntimeConfig() controllerRuntimeConfig {
 			config.DisableWebtorrent = true
 			config.DisableWebseeds = true
 			config.NoDefaultPortForwarding = true
+			config.DisableTCP = true
+			config.DisableUTP = true
 		},
-		clientCloseDelay: 0,
 		gotInfoTimeout:   100 * time.Millisecond,
+		clientCloseDelay: 0,
 		setMemoryLimit:   func(int64) int64 { return math.MaxInt64 },
 	}
 }
-
-type testControllerOpt func(*Controller)
 
 func newTestController(t *testing.T, opts ...testControllerOpt) (*Controller, func()) {
 	t.Helper()
@@ -144,12 +146,12 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 	imagesSvc, err := images.NewBBoltDBService(postersDBPath)
 	require.NoError(t, err)
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	port := l.Addr().(*net.TCPAddr).Port
-	l.Close()
-
 	metricsSvc := metrics.New()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+
 	ctrl, err := newController(".", "127.0.0.1", port, dbClient, imagesSvc, metricsSvc, runtimeConfig)
 	require.NoError(t, err)
 
@@ -174,7 +176,6 @@ func newTestControllerWithRuntimeConfig(t *testing.T, runtimeConfig controllerRu
 			os.Remove(postersDBPath)
 		})
 	}
-
 	t.Cleanup(cleanup)
 
 	return ctrl, cleanup
@@ -273,6 +274,8 @@ func TestAddInvalidTorrent(t *testing.T) {
 func TestAddNonExistentTorrent(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
+
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
 
 	magnet := "magnet:?xt=urn:btih:0000000000000000000000000000000000000001"
 	body, err := json.Marshal(api.TorrentAdd{Magnet: &magnet})
@@ -373,6 +376,7 @@ func TestGetTorrent(t *testing.T) {
 	assert.NotNil(t, result.Name)
 	assert.NotNil(t, result.PieceCount)
 	assert.NotNil(t, result.TotalSize)
+	assert.NotNil(t, result.Active)
 }
 
 func TestStreamFileWithBothIdentifiers(t *testing.T) {
@@ -518,6 +522,8 @@ func TestQBittorrentAddTorrentFromFile(t *testing.T) {
 func TestTorrentMetadataFetchTimesOut(t *testing.T) {
 	ctrl, cleanup := newTestController(t)
 	defer cleanup()
+
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
 
 	rr := doGet(t, ctrl.router, "/api/v1/torrents/0000000000000000000000000000000000000001")
 	require.Equal(t, http.StatusGatewayTimeout, rr.Code)
@@ -1169,7 +1175,7 @@ func TestUpdateTorrentStorage(t *testing.T) {
 	assert.Equal(t, api.Memory, *updatedTorrent.Storage)
 }
 
-func TestController_TorrentInfoBytes(t *testing.T) {
+func TestFileStorageMigrationPreservesInfoBytes(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctrl, cleanup := newTestController(t, func(c *Controller) {
 		c.settings.Load().FileStoragePath = new(tmpDir)
@@ -1177,8 +1183,6 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 		require.NoError(t, err)
 	})
 	defer cleanup()
-
-	primeSampleMetadata(t, ctrl, sintelHash)
 
 	body, writer := createMultipartForm(t, map[string]string{
 		"storage": string(api.File),
@@ -1245,6 +1249,7 @@ func TestController_TorrentInfoBytes(t *testing.T) {
 	}, time.Second, time.Millisecond, "InfoBytes should be saved after updating torrent to file storage")
 }
 
+// TestNewController verifies that a new controller bootstraps its settings.
 func TestNewController(t *testing.T) {
 	t.Run("with pre-existing secrets on empty DB", func(t *testing.T) {
 		dbPath := tempfile()
@@ -1263,7 +1268,7 @@ func TestNewController(t *testing.T) {
 		assert.NotEmpty(t, udnBefore)
 
 		metricsSvc := metrics.New()
-		ctrl, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+		ctrl, err := newController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc, testControllerRuntimeConfig())
 		require.NoError(t, err)
 		defer ctrl.Shutdown()
 
@@ -1306,7 +1311,7 @@ func TestNewController(t *testing.T) {
 		require.NoError(t, err)
 
 		metricsSvc := metrics.New()
-		ctrl, err := NewController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc)
+		ctrl, err := newController(".", "127.0.0.1", 8080, dbClient, nil, metricsSvc, testControllerRuntimeConfig())
 		require.NoError(t, err)
 		defer ctrl.Shutdown()
 
@@ -1678,13 +1683,11 @@ func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
 }
 
 func TestUpdateTorrentUnlocksWhenStorageSwitchTimesOut(t *testing.T) {
-	runtimeConfig := testControllerRuntimeConfig()
-	runtimeConfig.gotInfoTimeout = 100 * time.Millisecond
-
-	ctrl, cleanup := newTestControllerWithRuntimeConfig(t, runtimeConfig, func(c *Controller) {
+	ctrl, cleanup := newTestController(t, func(c *Controller) {
 		c.settings.Load().FileStoragePath = new(t.TempDir())
 	})
 	defer cleanup()
+	ctrl.runtimeConfig.gotInfoTimeout = 10 * time.Millisecond
 
 	// Add a dummy torrent directly into the database with an unresolvable magnet link (empty InfoBytes)
 	deadHash := metainfo.NewHashFromHex("1111111111111111111111111111111111111111")

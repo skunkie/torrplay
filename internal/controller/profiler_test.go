@@ -21,11 +21,10 @@ import (
 )
 
 func TestIntegrationProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
-	ctrl, cleanup := newTestController(t, func(c *Controller) {
+	ctrl, _ := newTestController(t, func(c *Controller) {
 		c.settings.Load().LogLevel = utils.Ptr(slog.LevelDebug)
 		c.profilerAddr = "127.0.0.1:0"
 	})
-	defer cleanup()
 	ctrl.reconcileProfiler()
 
 	publicResponse := httptest.NewRecorder()
@@ -49,10 +48,9 @@ func TestIntegrationProfilerRunsOnSeparateLoopbackListener(t *testing.T) {
 }
 
 func TestIntegrationProfilerFollowsLogLevelUpdates(t *testing.T) {
-	ctrl, cleanup := newTestController(t, func(c *Controller) {
+	ctrl, _ := newTestController(t, func(c *Controller) {
 		c.profilerAddr = "127.0.0.1:0"
 	})
-	defer cleanup()
 	publicRouter := ctrl.SetupRouter()
 	assert.Nil(t, currentProfilerListener(ctrl))
 
