@@ -1483,6 +1483,7 @@ func TestUpdateSettingsSerializesConcurrentPatches(t *testing.T) {
 	ctrl.mu.RUnlock()
 }
 
+// TestController_StopPosterWorkers verifies that stopped poster workers reject late registration.
 func TestController_StopPosterWorkers(t *testing.T) {
 	ctrl := &Controller{}
 	workerStarted := make(chan struct{})
@@ -1530,49 +1531,121 @@ func TestController_StopPosterWorkers(t *testing.T) {
 	}
 }
 
-func TestController_CleanupExpiredTorrents_SkipsActive(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
+func TestController_CleanupExpiredTorrents(t *testing.T) {
+	t.Run("skips active torrents", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
 
-	ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
-	primeSampleMetadata(t, ctrl, ih)
-	magnet := samples[ih]
-	req := api.TorrentAdd{Magnet: &magnet}
-	rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
-	require.Equal(t, http.StatusCreated, rr.Code)
+		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
+		primeSampleMetadata(t, ctrl, ih)
+		magnet := samples[ih]
+		req := api.TorrentAdd{Magnet: &magnet}
+		rr := testutil.NewRequest().Post("/api/v1/torrents").WithJsonBody(req).GoWithHTTPHandler(t, ctrl.router).Recorder
+		require.Equal(t, http.StatusCreated, rr.Code)
 
-	// Mark the torrent expired in the tracker
-	ctrl.torrentTracker.mu.Lock()
-	ctrl.torrentTracker.torrents[ih] = torrentInfo{
-		lastUsedAt:  time.Now().Add(-4 * time.Hour),
-		storageType: api.Memory,
-	}
-	ctrl.torrentTracker.mu.Unlock()
+		// Mark the torrent expired in the tracker
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{
+			lastUsedAt:  time.Now().Add(-4 * time.Hour),
+			storageType: api.Memory,
+		}
+		ctrl.torrentTracker.mu.Unlock()
 
-	// Simulate an active streaming reader in streamPool
-	primeSampleMetadata(t, ctrl, ih)
-	to, err := ctrl.addTorrentByHash(ih)
-	require.NoError(t, err)
-	<-to.GotInfo()
+		// Simulate an active streaming reader in streamPool
+		primeSampleMetadata(t, ctrl, ih)
+		to, err := ctrl.addTorrentByHash(ih)
+		require.NoError(t, err)
+		<-to.GotInfo()
 
-	file := to.Files()[0]
-	pool := ctrl.streamPool.Load()
-	require.NotNil(t, pool)
-	pool.SetReadaheadBudget(1024 * 1024)
-	_, release, err := pool.Acquire(context.Background(), file, stream.MemoryStorage)
-	require.NoError(t, err)
-	defer release()
+		file := to.Files()[0]
+		ctrl.streamPool.Load().SetReadaheadBudget(1024 * 1024)
+		_, release, err := ctrl.streamPool.Load().Acquire(context.Background(), file, stream.MemoryStorage)
+		require.NoError(t, err)
+		defer release()
 
-	// Trigger cleanup
-	ctrl.cleanupExpiredTorrents()
+		// Trigger cleanup
+		ctrl.cleanupExpiredTorrents()
 
-	// The torrent should NOT have been removed because of the active reader
-	ctrl.torrentTracker.mu.RLock()
-	info, exists := ctrl.torrentTracker.torrents[ih]
-	ctrl.torrentTracker.mu.RUnlock()
+		// The torrent should NOT have been removed because of the active reader
+		ctrl.torrentTracker.mu.RLock()
+		info, exists := ctrl.torrentTracker.torrents[ih]
+		ctrl.torrentTracker.mu.RUnlock()
 
-	assert.True(t, exists, "active torrent should not be dropped during cleanup")
-	assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
+		assert.True(t, exists, "active torrent should not be dropped during cleanup")
+		assert.Less(t, time.Since(info.lastUsedAt), 1*time.Minute, "lastUsedAt should have been refreshed")
+	})
+
+	t.Run("drops torrents idle past TTL", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+
+		idle, recent := metainfo.Hash{1}, metainfo.Hash{2}
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[idle] = torrentInfo{lastUsedAt: time.Now().Add(-31 * time.Minute), storageType: api.Memory}
+		ctrl.torrentTracker.torrents[recent] = torrentInfo{lastUsedAt: time.Now().Add(-29 * time.Minute), storageType: api.Memory}
+		ctrl.torrentTracker.mu.Unlock()
+
+		ctrl.cleanupExpiredTorrents()
+
+		ctrl.torrentTracker.mu.RLock()
+		_, idleTracked := ctrl.torrentTracker.torrents[idle]
+		_, recentTracked := ctrl.torrentTracker.torrents[recent]
+		ctrl.torrentTracker.mu.RUnlock()
+		assert.False(t, idleTracked, "a torrent unused for over thirty minutes must be dropped")
+		assert.True(t, recentTracked, "a torrent used within thirty minutes must stay loaded")
+	})
+
+	t.Run("keeps a torrent with a running preload", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+
+		to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+		ih := to.InfoHash()
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{
+			lastUsedAt:  time.Now().Add(-4 * time.Hour),
+			storageType: api.Memory,
+		}
+		ctrl.torrentTracker.mu.Unlock()
+		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		defer ctrl.cancelPreload(ih)
+
+		ctrl.cleanupExpiredTorrents()
+
+		ctrl.torrentTracker.mu.RLock()
+		_, tracked := ctrl.torrentTracker.torrents[ih]
+		ctrl.torrentTracker.mu.RUnlock()
+		assert.True(t, tracked, "a torrent must not expire while it is preloading")
+	})
+
+	t.Run("clears a finished preload", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+
+		to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
+		ih := to.InfoHash()
+		ctrl.torrentTracker.mu.Lock()
+		ctrl.torrentTracker.torrents[ih] = torrentInfo{
+			lastUsedAt:  time.Now().Add(-4 * time.Hour),
+			storageType: api.Memory,
+		}
+		ctrl.torrentTracker.mu.Unlock()
+		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		// A smaller budget evicts the preload, which then only reports its
+		// final state.
+		pool := ctrl.streamPool.Load()
+		pool.SetReadaheadBudget(0)
+		defer pool.SetReadaheadBudget(readaheadBudget(*ctrl.settings.Load().MaxMemory))
+
+		ctrl.cleanupExpiredTorrents()
+
+		_, preloading := ctrl.preloadStatus(ih)
+		assert.False(t, preloading)
+		ctrl.torrentTracker.mu.RLock()
+		_, tracked := ctrl.torrentTracker.torrents[ih]
+		ctrl.torrentTracker.mu.RUnlock()
+		assert.False(t, tracked)
+	})
 }
 
 func TestUpdateTorrentUnlocksWithoutConfiguredFileStorage(t *testing.T) {
