@@ -117,13 +117,9 @@ type Controller struct {
 	// Guarded by infoWaitersMu.
 	infoWaiters          map[metainfo.Hash]int
 	infoWaitersMu        sync.Mutex
-	lastMetricsTime      time.Time
-	lastTotalDownload    int64
-	lastTotalUpload      int64
 	logFile              io.Closer
 	logger               atomic.Pointer[slog.Logger]
 	metrics              *metrics.Metrics
-	metricsMu            sync.RWMutex
 	mu                   sync.RWMutex
 	pieceCompletion      piececompletion.DeletablePieceCompletion
 	port                 int
@@ -149,6 +145,7 @@ type Controller struct {
 	torrentClientUnavailable atomic.Bool
 	torrentConfigMu          sync.Mutex
 	torrentGeneration        atomic.Uint64
+	speedMonitor             *speedMonitor
 	startedAt                time.Time
 	storageClient            atomic.Pointer[memstorage.Client]
 	streamPool               atomic.Pointer[stream.Pool]
@@ -210,6 +207,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		posterCleanupDone: make(chan struct{}),
 		postersPath:       "/posters/",
 		profilerAddr:      profilerAddress,
+		speedMonitor:      newSpeedMonitor(),
 		startedAt:         time.Now(),
 		torrentTracker: torrentTracker{
 			cleanupDone: make(chan struct{}),
@@ -285,6 +283,16 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 
 	go c.startTorrentCleanup()
 	c.startPosterWorker(c.startPosterCleanup)
+	go c.speedMonitor.Start(func() (int64, int64) {
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
+		if client == nil {
+			return 0, 0
+		}
+		stats := client.ConnStats()
+		return stats.BytesReadData.Int64(), stats.BytesWrittenData.Int64()
+	})
 
 	return c, nil
 }
@@ -579,6 +587,9 @@ func (c *Controller) Shutdown() {
 
 	close(c.torrentTracker.cleanupDone)
 	close(c.posterCleanupDone)
+	if c.speedMonitor != nil {
+		c.speedMonitor.Stop()
+	}
 
 	_ = c.dlna.Stop()
 	if pool := c.streamPool.Load(); pool != nil {
