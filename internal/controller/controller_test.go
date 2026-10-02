@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -121,6 +122,7 @@ func testControllerRuntimeConfig() controllerRuntimeConfig {
 		},
 		clientCloseDelay: 0,
 		gotInfoTimeout:   100 * time.Millisecond,
+		setMemoryLimit:   func(int64) int64 { return math.MaxInt64 },
 	}
 }
 

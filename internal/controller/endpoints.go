@@ -1170,7 +1170,30 @@ func (c *Controller) applyMemoryLimit() error {
 	// no longer covers.
 	budget := readaheadBudget(maxMemory)
 	pool.SetReadaheadBudget(budget)
-	return storageClient.SetMaxMemory(maxMemory)
+	if err := storageClient.SetMaxMemory(maxMemory); err != nil {
+		return err
+	}
+	c.applyHeapLimit(maxMemory)
+	return nil
+}
+
+// heapLimitOverhead is the memory the heap limit allows beyond memory storage
+// for the rest of the process.
+const heapLimitOverhead = 256 << 20
+
+// applyHeapLimit sets the garbage collector's soft memory limit to maxMemory
+// plus heapLimitOverhead. Piece buffers that memory storage drops, such as
+// those of a closed torrent or of an evicted piece whose size differs from
+// the new one, are garbage, and without a limit the heap grows to about twice
+// memory storage before they are collected. A GOMEMLIMIT environment variable
+// takes precedence.
+func (c *Controller) applyHeapLimit(maxMemory int64) {
+	if _, ok := os.LookupEnv("GOMEMLIMIT"); ok {
+		return
+	}
+	limit := maxMemory + heapLimitOverhead
+	c.runtimeConfig.setMemoryLimit(limit)
+	c.logger.Load().Info("set heap limit", "limit", limit)
 }
 
 // rollbackSettings restores the previous settings in memory and in the
