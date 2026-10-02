@@ -9,8 +9,11 @@ import { SystemInfo } from '@/lib/types/api';
 
 const systemInfo: SystemInfo = {
   addresses: ['127.0.0.1:8090', '192.168.1.100:8090'],
+  architecture: 'x64',
   buildDate: '2026-01-01',
   commit: 'a1b2c3d',
+  deployment: 'native',
+  os: 'linux',
   uptime: 86400,
   version: 'demo',
 };
