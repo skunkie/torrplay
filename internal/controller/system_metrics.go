@@ -11,6 +11,13 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 )
 
+// GetMetrics serves Prometheus metrics. It is part of the OpenAPI router, so
+// it requires the same authentication as the API when authentication is
+// enabled.
+func (c *Controller) GetMetrics(w http.ResponseWriter, r *http.Request) {
+	c.metrics.Handler().ServeHTTP(w, r)
+}
+
 func (c *Controller) GetSystemMetrics(w http.ResponseWriter, _ *http.Request) {
 	var downloadSpeed, uploadSpeed int64
 	if c.speedMonitor != nil {

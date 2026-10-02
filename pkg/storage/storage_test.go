@@ -775,6 +775,118 @@ func TestClient_SetEvictionHandler(t *testing.T) {
 	})
 }
 
+func TestClient_Counters(t *testing.T) {
+	full := make([]byte, 256)
+	tests := []struct {
+		name      string
+		maxMemory int64
+		run       func(t *testing.T, client *Client, infoHash metainfo.Hash, pieces []storage.PieceImpl)
+		want      Counters
+	}{
+		{
+			name:      "complete piece evicted",
+			maxMemory: 256,
+			run: func(t *testing.T, _ *Client, _ metainfo.Hash, pieces []storage.PieceImpl) {
+				t.Helper()
+				_, err := pieces[0].WriteAt(full, 0)
+				require.NoError(t, err)
+				require.NoError(t, pieces[0].MarkComplete())
+				_, err = pieces[1].WriteAt(full, 0)
+				require.NoError(t, err)
+			},
+			want: Counters{EvictedCompletePieces: 1},
+		},
+		{
+			name:      "partial piece evicted",
+			maxMemory: 256,
+			run: func(t *testing.T, _ *Client, _ metainfo.Hash, pieces []storage.PieceImpl) {
+				t.Helper()
+				_, err := pieces[0].WriteAt(full[:128], 0)
+				require.NoError(t, err)
+				_, err = pieces[1].WriteAt(full, 0)
+				require.NoError(t, err)
+			},
+			want: Counters{EvictedIncompleteBytes: 128, EvictedIncompletePieces: 1},
+		},
+		{
+			name:      "evicted piece read and marked complete",
+			maxMemory: 512,
+			run: func(t *testing.T, client *Client, _ metainfo.Hash, pieces []storage.PieceImpl) {
+				t.Helper()
+				_, err := pieces[0].WriteAt(full, 0)
+				require.NoError(t, err)
+				require.NoError(t, pieces[0].MarkComplete())
+				evictUnprotectedPieces(client, 0)
+				_, err = pieces[0].ReadAt(make([]byte, 16), 0)
+				require.ErrorIs(t, err, ErrPieceNotAvailable)
+				require.Error(t, pieces[0].MarkComplete())
+			},
+			want: Counters{CompletionMisses: 1, EvictedCompletePieces: 1, ReadMisses: 1},
+		},
+		{
+			name:      "unwritten bytes read and hashed",
+			maxMemory: 512,
+			run: func(t *testing.T, _ *Client, _ metainfo.Hash, pieces []storage.PieceImpl) {
+				t.Helper()
+				_, err := pieces[0].WriteAt(full[128:], 128)
+				require.NoError(t, err)
+				_, err = pieces[0].ReadAt(make([]byte, 64), 0)
+				require.ErrorIs(t, err, ErrPieceIncomplete)
+				_, err = pieces[0].(storage.SelfHashing).SelfHash()
+				require.ErrorIs(t, err, ErrPieceIncomplete)
+			},
+			want: Counters{IncompleteReads: 1, RefusedHashes: 1},
+		},
+		{
+			name:      "boundary piece evicted",
+			maxMemory: 256,
+			run: func(t *testing.T, client *Client, infoHash metainfo.Hash, pieces []storage.PieceImpl) {
+				t.Helper()
+				_, err := pieces[0].WriteAt(full, 0)
+				require.NoError(t, err)
+				require.NoError(t, pieces[0].MarkComplete())
+				client.SetProtection(infoHash, 1, boundaryProtection(0, 0, 0, 0))
+				_, err = pieces[1].WriteAt(full, 0)
+				require.NoError(t, err)
+			},
+			want: Counters{BoundaryEvictions: 1, EvictedCompletePieces: 1},
+		},
+		{
+			name:      "active range piece evicted",
+			maxMemory: 256,
+			run: func(t *testing.T, client *Client, infoHash metainfo.Hash, pieces []storage.PieceImpl) {
+				t.Helper()
+				_, err := pieces[0].WriteAt(full, 0)
+				require.NoError(t, err)
+				require.NoError(t, pieces[0].MarkComplete())
+				client.SetProtection(infoHash, 1, activeProtection(0, 0))
+				_, err = pieces[1].WriteAt(full, 0)
+				require.NoError(t, err)
+			},
+			want: Counters{ActiveRangeEvictions: 1, EvictedCompletePieces: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := newTestClient(tt.maxMemory)
+			defer client.Close()
+			info, infoHash := newTestInfo(256, 2)
+			torrentImpl, err := client.OpenTorrent(context.Background(), info, infoHash)
+			require.NoError(t, err)
+			pieces := []storage.PieceImpl{torrentImpl.Piece(info.Piece(0)), torrentImpl.Piece(info.Piece(1))}
+
+			tt.run(t, client, infoHash, pieces)
+			assert.Equal(t, tt.want, client.Counters())
+		})
+	}
+}
+
+func TestCounters_Add(t *testing.T) {
+	a := Counters{ActiveRangeEvictions: 1, BoundaryEvictions: 2, CompletionMisses: 3, EvictedCompletePieces: 4, EvictedIncompleteBytes: 5, EvictedIncompletePieces: 6, IncompleteReads: 8, ReadMisses: 9, RefusedHashes: 7}
+	b := Counters{ActiveRangeEvictions: 10, BoundaryEvictions: 20, CompletionMisses: 30, EvictedCompletePieces: 40, EvictedIncompleteBytes: 50, EvictedIncompletePieces: 60, IncompleteReads: 80, ReadMisses: 90, RefusedHashes: 70}
+	assert.Equal(t, Counters{ActiveRangeEvictions: 11, BoundaryEvictions: 22, CompletionMisses: 33, EvictedCompletePieces: 44, EvictedIncompleteBytes: 55, EvictedIncompletePieces: 66, IncompleteReads: 88, ReadMisses: 99, RefusedHashes: 77}, a.Add(b))
+}
+
 func TestClientPieceBufferReuse(t *testing.T) {
 	t.Run("standard eviction clears stale data", func(t *testing.T) {
 		client := newTestClient(256)

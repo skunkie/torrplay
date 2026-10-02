@@ -27,8 +27,10 @@ import (
 	"github.com/anacrolix/torrent/bencode"
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/getkin/kin-openapi/openapi3filter"
+	"github.com/go-chi/chi/v5"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
 	"github.com/oapi-codegen/testutil"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
@@ -1803,27 +1805,96 @@ func TestCalcReadaheadPct(t *testing.T) {
 	}
 }
 
-func TestController_IsStreaming(t *testing.T) {
-	ctrl, cleanup := newTestController(t)
-	defer cleanup()
+func TestController_MetricsMiddleware(t *testing.T) {
+	metricsSvc := metrics.New()
+	c := &Controller{metrics: metricsSvc}
 
-	assert.False(t, ctrl.isStreaming())
-	primeSampleMetadata(t, ctrl, sintelHash)
+	t.Run("mounted handler shares its route pattern", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Use(c.MetricsMiddleware())
+		r.Mount("/posters/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
 
-	to, ok := ctrl.client.Torrent(sintelHash)
-	require.True(t, ok)
-	require.NotEmpty(t, to.Files())
+		for _, path := range []string{"/posters/first.jpeg", "/posters/second.jpeg"} {
+			r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		}
 
-	pool := ctrl.streamPool.Load()
-	_, release, err := pool.Acquire(t.Context(), to.Files()[0], stream.MemoryStorage)
-	require.NoError(t, err)
+		patternCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/posters/*")
+		require.NoError(t, err)
+		assert.Equal(t, float64(2), promtestutil.ToFloat64(patternCounter))
 
-	assert.True(t, ctrl.isStreaming())
-	release()
-	assert.True(t, ctrl.isStreaming(), "a lingering reader still pauses background downloads")
+		rawCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/posters/first.jpeg")
+		require.NoError(t, err)
+		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
+	})
 
-	pool.Close()
-	assert.False(t, ctrl.isStreaming())
+	t.Run("unmatched requests share one label", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Use(c.MetricsMiddleware())
+		r.Get("/api/v1/torrents", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		for _, path := range []string{"/wp-login.php", "/.env"} {
+			r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		}
+
+		unmatchedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("404", http.MethodGet, unmatchedRoutePath)
+		require.NoError(t, err)
+		assert.Equal(t, float64(2), promtestutil.ToFloat64(unmatchedCounter))
+
+		rawCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("404", http.MethodGet, "/wp-login.php")
+		require.NoError(t, err)
+		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
+	})
+
+	t.Run("application router labels unhandled paths as unmatched", func(t *testing.T) {
+		ctrl, cleanup := newTestController(t)
+		defer cleanup()
+		router := ctrl.SetupRouter()
+
+		for _, path := range []string{"/wp-login.php", "/api/v1/unknown", "/posters/first.jpeg"} {
+			router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		}
+
+		unmatchedCounter, err := ctrl.metrics.HTTPRequestsTotal.GetMetricWithLabelValues("404", http.MethodGet, unmatchedRoutePath)
+		require.NoError(t, err)
+		assert.Equal(t, float64(2), promtestutil.ToFloat64(unmatchedCounter))
+
+		postersCounter, err := ctrl.metrics.HTTPRequestsTotal.GetMetricWithLabelValues("404", http.MethodGet, "/posters/*")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(postersCounter))
+	})
+
+	t.Run("dlna requests keep one label per service", func(t *testing.T) {
+		dlnaMetrics := metrics.New()
+		dlnaCtrl := &Controller{metrics: dlnaMetrics, dlnaPath: "/upnp/"}
+		r := chi.NewRouter()
+		r.Use(dlnaCtrl.MetricsMiddleware())
+		r.Mount("/upnp/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		for _, path := range []string{
+			"/upnp/",
+			"/upnp/urn:schemas-upnp-org:service:ContentDirectory:1",
+			"/upnp/ContentDirectory:1",
+			"/upnp/probe",
+		} {
+			r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		}
+
+		for label, expected := range map[string]float64{
+			"/upnp/":                 1,
+			"/upnp/ContentDirectory": 2,
+			"/upnp/*":                1,
+		} {
+			counter, err := dlnaMetrics.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, label)
+			require.NoError(t, err)
+			assert.Equal(t, expected, promtestutil.ToFloat64(counter), label)
+		}
+	})
 }
 
 func TestController_MemoryWriteFailed(t *testing.T) {

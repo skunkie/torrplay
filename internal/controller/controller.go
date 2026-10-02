@@ -65,6 +65,8 @@ const (
 	// to its peers, before it is dropped. Cleanup runs every five minutes, so
 	// a torrent is dropped 30 to 35 minutes after its last use.
 	torrentTrackerTTL = 30 * time.Minute
+	// unmatchedRoutePath labels HTTP metrics for requests matching no route.
+	unmatchedRoutePath = "unmatched"
 )
 
 var _ api.ServerInterface = (*Controller)(nil)
@@ -106,16 +108,17 @@ type torrentTracker struct {
 }
 
 type Controller struct {
-	client     *torrent.Client
-	dataDir    string
-	db         database.DatabaseInterface
-	dlna       *dlna.Service
-	dlnaPath   string
-	downloader atomic.Pointer[downloader.Downloader]
-	httpAddr   string
-	httpClient *httpclient.Client
-	httpServer *httpserver.Server
-	images     images.ServiceInterface
+	client       *torrent.Client
+	dataDir      string
+	db           database.DatabaseInterface
+	dlna         *dlna.Service
+	dlnaPath     string
+	downloader   atomic.Pointer[downloader.Downloader]
+	engineTotals engineTotals
+	httpAddr     string
+	httpClient   *httpclient.Client
+	httpServer   *httpserver.Server
+	images       images.ServiceInterface
 	// infoWaiters counts the requests waiting for each torrent's metadata.
 	// Guarded by infoWaitersMu.
 	infoWaiters          map[metainfo.Hash]int
@@ -237,6 +240,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	c.pieceCompletion = pc
 
 	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger.Load())
+	c.metrics.SetEngineStatsSource(c.engineStats)
 
 	// Check for auth override environment variable. This allows a user to regain
 	// access to their settings if they have forgotten their credentials.
@@ -346,9 +350,6 @@ func (c *Controller) buildRouter() *chi.Mux {
 	// Posters routes.
 	postersHandler := http.StripPrefix(c.postersPath, c.images)
 	router.Mount(c.postersPath, postersHandler)
-
-	// Metrics routes.
-	router.Method(http.MethodGet, "/metrics", c.metrics.Handler())
 
 	// Swagger routes.
 	router.Get("/swagger/openapi.json", func(w http.ResponseWriter, _ *http.Request) {
@@ -532,15 +533,7 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 			start := time.Now()
 
 			defer func() {
-				// Use chi.RouteContext to get the route pattern.
-				routeCtx := chi.RouteContext(r.Context())
-				routePath := routeCtx.RoutePattern()
-				// Sometimes path is empty, for example for static files.
-				// In that case, we can use r.URL.Path.
-				if routePath == "" {
-					routePath = r.URL.Path
-				}
-
+				routePath := c.metricsRoutePath(r)
 				duration := time.Since(start)
 				statusCode := strconv.Itoa(ww.Status())
 				method := r.Method
@@ -558,6 +551,27 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 
 			next.ServeHTTP(ww, r)
 		})
+	}
+}
+
+// metricsRoutePath returns a bounded path label for HTTP metrics: the matched
+// route pattern, so a mounted handler such as /posters/* gets one series
+// rather than one per file.
+func (c *Controller) metricsRoutePath(r *http.Request) string {
+	pattern := chi.RouteContext(r.Context()).RoutePattern()
+	switch {
+	case pattern == "" || pattern == "/*":
+		// Requests that no route handles share one label, so probing
+		// arbitrary paths cannot add series. The API routes are registered
+		// under router.Route("/"), whose catch-all reports "/*" for any path
+		// no route handles; a real top-level "/*" route would need its own
+		// label here.
+		return unmatchedRoutePath
+	case c.dlnaPath != "" && pattern == strings.TrimRight(c.dlnaPath, "/")+"/*":
+		// Keep the device description, icons, and each UPnP service apart.
+		return dlna.MetricsPath(c.dlnaPath, r.URL.Path)
+	default:
+		return pattern
 	}
 }
 
@@ -836,24 +850,6 @@ func (c *Controller) downloaderHooks() downloader.Hooks {
 	}
 }
 
-// streamingTorrentCount returns the number of torrents with an active or
-// lingering stream reader, counting a torrent once however many of its files
-// are playing.
-func (c *Controller) streamingTorrentCount() int {
-	pool := c.streamPool.Load()
-	if pool == nil {
-		return 0
-	}
-	return pool.StreamingTorrentCount()
-}
-
-// isStreaming reports whether any file is being streamed, including by a
-// reader lingering between a player's range requests. The background
-// downloader pauses while it does.
-func (c *Controller) isStreaming() bool {
-	return c.streamingTorrentCount() > 0
-}
-
 func (c *Controller) configureTorrentClient() error {
 	c.torrentConfigMu.Lock()
 	defer c.torrentConfigMu.Unlock()
@@ -939,6 +935,9 @@ func (c *Controller) configureTorrentClient() error {
 		return fmt.Errorf("failed to initiate torrent client: %w", err)
 	}
 
+	observeFileRead := c.metrics.StreamReadObserver(stream.FileStorage.String())
+	observeMemoryRead := c.metrics.StreamReadObserver(stream.MemoryStorage.String())
+
 	// Create new stream pool.
 	// Registry: storageClient protects actively-read pieces from eviction
 	// by registering readahead windows with the storage layer.
@@ -954,14 +953,24 @@ func (c *Controller) configureTorrentClient() error {
 			}
 		},
 		PriorityWindowFraction: 0.15,
-		Registry:               storageClient,
+		ReadObserver: func(mode stream.StorageMode, duration time.Duration) {
+			if mode == stream.FileStorage {
+				observeFileRead(duration)
+				return
+			}
+			observeMemoryRead(duration)
+		},
+		Registry: storageClient,
 	})
 	pool.SetReadaheadBudget(readaheadBudget(*currentSettings.MaxMemory))
 	// Evicted pieces must stop counting as downloaded, or a torrent read in
 	// full looks complete to the client, which then drops its peers.
 	storageClient.SetEvictionHandler(memstorage.ClientEvictionHandler(client))
+	// The replaced client and storage are closed, so their counters are final.
+	retired := engineTotalsOf(oldClient, oldStorageClient)
 
 	c.mu.Lock()
+	c.engineTotals.add(retired)
 	c.client = client
 	c.storageClient.Store(storageClient)
 	c.streamPool.Store(pool)

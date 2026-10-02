@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/stretchr/testify/assert"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/testutil"
@@ -152,5 +153,28 @@ func TestService_ServeHTTP(t *testing.T) {
 
 	if rw.Code != http.StatusOK {
 		t.Errorf("ServeHTTP returned status %d, expected %d", rw.Code, http.StatusOK)
+	}
+}
+
+func TestMetricsPath(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"/upnp", "/upnp/"},
+		{"/upnp/", "/upnp/"},
+		{"/upnp/rootDesc.xml", "/upnp/"},
+		{"/upnp/icons/icon-48.png", "/upnp/icons"},
+		{"/upnp/urn:schemas-upnp-org:service:ContentDirectory:1", "/upnp/ContentDirectory"},
+		{"/upnp/ContentDirectory:1", "/upnp/ContentDirectory"},
+		{"/upnp/urn%3Aupnp-org%3AserviceId%3AConnectionManager", "/upnp/ConnectionManager"},
+		{"/upnp/urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1", "/upnp/X_MS_MediaReceiverRegistrar"},
+		{"/upnp/wp-login.php", "/upnp/*"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			assert.Equal(t, tc.expected, MetricsPath("/upnp/", tc.input))
+		})
 	}
 }

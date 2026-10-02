@@ -1946,8 +1946,8 @@ func (c *Controller) streamFile(w http.ResponseWriter, r *http.Request, ih metai
 
 	dlna.AddHeader(w, r)
 
-	c.metrics.IncStreamingTorrents()
-	defer c.metrics.DecStreamingTorrents()
+	c.metrics.IncStreamRequests()
+	defer c.metrics.DecStreamRequests()
 
 	// For streaming endpoints, it is important to disable the read and write timeouts.
 	rc := http.NewResponseController(w)
