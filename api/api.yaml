@@ -188,7 +188,7 @@ paths:
       tags:
         - v1
       summary: Update application settings.
-      description: Update application configuration. Some settings may require a restart to take effect.
+      description: Update application configuration. Some settings may require a restart to take effect. Changing any authentication setting revokes every issued access and playback token.
       operationId: updateSettings
       requestBody:
         description: New settings values.

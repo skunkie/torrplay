@@ -8,9 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +59,23 @@ func newAuthTestController(t *testing.T, updateSettings func(*api.Settings)) (*C
 	return c, cleanup
 }
 
+// authorize adds credentials that are valid for the controller's current auth
+// settings, as a request would carry after passing the auth middleware.
+func authorize(t *testing.T, controller *Controller, req *http.Request) *http.Request {
+	t.Helper()
+	authSettings := controller.settings.Load().Auth
+	if utils.Val(authSettings.Type) == api.Basic {
+		req.SetBasicAuth(utils.Val(authSettings.Username), utils.Val(authSettings.Password))
+		return req
+	}
+	secret, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	token, err := auth.GenerateToken(utils.Val(authSettings.Username), []byte(secret))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+token)
+	return req
+}
+
 func TestNewAuthenticator(t *testing.T) {
 	testCases := []struct {
 		name          string
@@ -63,6 +84,7 @@ func TestNewAuthenticator(t *testing.T) {
 		username      string
 		password      string
 		token         string
+		tokenUsername string
 		schemeName    string
 		expectedError string
 	}{
@@ -133,8 +155,24 @@ func TestNewAuthenticator(t *testing.T) {
 				},
 			},
 			requestPath:   "/api/v1/torrents",
+			tokenUsername: "admin",
 			schemeName:    "bearerAuth",
 			expectedError: "",
+		},
+		{
+			name: "bearer auth rejects a token issued to a different user",
+			settings: &api.Settings{
+				Auth: &api.Auth{
+					Enabled:  new(true),
+					Type:     utils.Ptr(api.Bearer),
+					Username: new("admin"),
+					Password: new("password"),
+				},
+			},
+			requestPath:   "/api/v1/torrents",
+			tokenUsername: "former-admin",
+			schemeName:    "bearerAuth",
+			expectedError: "token was issued to a different user",
 		},
 		{
 			name: "Bearer Auth - Invalid Token",
@@ -197,10 +235,10 @@ func TestNewAuthenticator(t *testing.T) {
 				req.SetBasicAuth(tc.username, tc.password)
 			}
 
-			if tc.name == "Bearer Auth - Success" {
+			if tc.tokenUsername != "" {
 				secret, err := controller.db.GetJWTSecret()
 				require.NoError(t, err)
-				token, err := auth.GenerateToken("testuser", []byte(secret))
+				token, err := auth.GenerateToken(tc.tokenUsername, []byte(secret))
 				require.NoError(t, err)
 				req.Header.Set("Authorization", "Bearer "+token)
 			} else if tc.token != "" {
@@ -243,7 +281,7 @@ func TestQueryTokenAuthenticator(t *testing.T) {
 
 	secret, err := controller.db.GetJWTSecret()
 	require.NoError(t, err)
-	token, err := auth.GenerateToken("testuser", []byte(secret))
+	token, err := auth.GenerateToken("admin", []byte(secret))
 	require.NoError(t, err)
 	playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
 	require.NoError(t, err)
@@ -320,7 +358,7 @@ func TestGetSettingsIncludesScopedPlaybackToken(t *testing.T) {
 	defer cleanup()
 
 	rr := httptest.NewRecorder()
-	controller.GetSettings(rr, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+	controller.GetSettings(rr, authorize(t, controller, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody)))
 	require.Equal(t, http.StatusOK, rr.Code)
 
 	var got api.Settings
@@ -349,7 +387,7 @@ func TestCreateToken(t *testing.T) {
 		require.NoError(t, err)
 
 		rr := httptest.NewRecorder()
-		controller.CreateToken(rr, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(body)))
+		controller.CreateToken(rr, authorize(t, controller, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(body))))
 		require.Equal(t, http.StatusOK, rr.Code)
 
 		var response api.ScopedToken
@@ -369,13 +407,13 @@ func TestCreateToken(t *testing.T) {
 		require.NoError(t, err)
 
 		rr := httptest.NewRecorder()
-		controller.CreateToken(rr, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(body)))
+		controller.CreateToken(rr, authorize(t, controller, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(body))))
 		require.Equal(t, http.StatusBadRequest, rr.Code)
 	})
 
 	t.Run("invalid body", func(t *testing.T) {
 		rr := httptest.NewRecorder()
-		controller.CreateToken(rr, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader([]byte("invalid json"))))
+		controller.CreateToken(rr, authorize(t, controller, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader([]byte("invalid json")))))
 		require.Equal(t, http.StatusBadRequest, rr.Code)
 	})
 }
@@ -485,4 +523,347 @@ func TestMetricsEndpointRequiresAuthentication(t *testing.T) {
 		require.Equal(t, http.StatusOK, rr.Code)
 		assert.Contains(t, rr.Body.String(), "torrplay_storage_memory_limit_bytes")
 	})
+}
+
+func TestUpdateSettingsRotatesJWTSecretOnAuthChange(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		patch  api.Settings
+		rotate bool
+	}{
+		{name: "password change", patch: api.Settings{Auth: &api.Auth{Password: new("new-password")}}, rotate: true},
+		{name: "username change", patch: api.Settings{Auth: &api.Auth{Username: new("new-admin")}}, rotate: true},
+		{name: "type change", patch: api.Settings{Auth: &api.Auth{Type: utils.Ptr(api.Basic)}}, rotate: true},
+		{name: "auth disabled", patch: api.Settings{Auth: &api.Auth{Enabled: new(false)}}, rotate: true},
+		{name: "unchanged credentials", patch: api.Settings{Auth: &api.Auth{
+			Enabled:  new(true),
+			Type:     utils.Ptr(api.Bearer),
+			Username: new("admin"),
+			Password: new("password"),
+		}}},
+		{name: "unrelated setting", patch: api.Settings{FriendlyName: new("Renamed")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+				s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Bearer), Username: new("admin"), Password: new("password")}
+			})
+			defer cleanup()
+
+			secretBefore, err := controller.db.GetJWTSecret()
+			require.NoError(t, err)
+			token, err := auth.GenerateToken("admin", []byte(secretBefore))
+			require.NoError(t, err)
+			playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secretBefore))
+			require.NoError(t, err)
+
+			rr := testutil.NewRequest().Patch("/api/v1/settings").
+				WithHeader("Authorization", "Bearer "+token).
+				WithJsonBody(tc.patch).
+				GoWithHTTPHandler(t, controller.router).Recorder
+			require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+
+			secretAfter, err := controller.db.GetJWTSecret()
+			require.NoError(t, err)
+			require.NotEmpty(t, secretAfter)
+			if !tc.rotate {
+				assert.Equal(t, secretBefore, secretAfter)
+				rr = testutil.NewRequest().Get("/api/v1/torrents").
+					WithHeader("Authorization", "Bearer "+token).
+					GoWithHTTPHandler(t, controller.router).Recorder
+				assert.Equal(t, http.StatusOK, rr.Code, "tokens issued before the update must stay valid")
+				return
+			}
+
+			assert.NotEqual(t, secretBefore, secretAfter)
+			_, err = auth.ValidateToken(token, []byte(secretAfter))
+			assert.Error(t, err, "API tokens issued before the update must be revoked")
+			_, err = auth.ValidateToken(playbackToken, []byte(secretAfter))
+			assert.Error(t, err, "playback tokens issued before the update must be revoked")
+
+			current := controller.settings.Load().Auth
+			if !utils.Val(current.Enabled) {
+				return
+			}
+			if utils.Val(current.Type) == api.Bearer {
+				rr = testutil.NewRequest().Get("/api/v1/torrents").
+					WithHeader("Authorization", "Bearer "+token).
+					GoWithHTTPHandler(t, controller.router).Recorder
+				assert.Equal(t, http.StatusUnauthorized, rr.Code, "the API must reject tokens issued before the update")
+			}
+		})
+	}
+}
+
+type failingRotationDB struct {
+	database.DatabaseInterface
+}
+
+func (failingRotationDB) RotateJWTSecret() error {
+	return errors.New("rotation failed")
+}
+
+func TestUpdateSettingsRollsBackFailedJWTSecretRotation(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Bearer), Username: new("admin"), Password: new("password")}
+	})
+	defer cleanup()
+	controller.db = failingRotationDB{controller.db}
+
+	secretBefore, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	token, err := auth.GenerateToken("admin", []byte(secretBefore))
+	require.NoError(t, err)
+
+	rr := testutil.NewRequest().Patch("/api/v1/settings").
+		WithHeader("Authorization", "Bearer "+token).
+		WithJsonBody(api.Settings{Auth: &api.Auth{Password: new("new-password")}}).
+		GoWithHTTPHandler(t, controller.router).Recorder
+	require.Equal(t, http.StatusInternalServerError, rr.Code)
+
+	assert.Equal(t, "password", utils.Val(controller.settings.Load().Auth.Password))
+	stored, err := controller.db.GetSettings()
+	require.NoError(t, err)
+	assert.Equal(t, "password", utils.Val(stored.Auth.Password))
+
+	secretAfter, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	assert.Equal(t, secretBefore, secretAfter)
+}
+
+func TestController_GetToken(t *testing.T) {
+	requestToken := func(t *testing.T, controller *Controller, password string) *httptest.ResponseRecorder {
+		t.Helper()
+		form := url.Values{"grant_type": {"password"}, "username": {"admin"}, "password": {password}}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rr := httptest.NewRecorder()
+		controller.GetToken(rr, req)
+		return rr
+	}
+	enableBearer := func(s *api.Settings) {
+		s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Bearer), Username: new("admin"), Password: new("password")}
+	}
+
+	t.Run("valid credentials", func(t *testing.T) {
+		controller, cleanup := newAuthTestController(t, enableBearer)
+		defer cleanup()
+
+		rr := requestToken(t, controller, "password")
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var res api.TokenResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&res))
+
+		secret, err := controller.db.GetJWTSecret()
+		require.NoError(t, err)
+		claims, err := auth.ValidateToken(res.AccessToken, []byte(secret))
+		require.NoError(t, err)
+		assert.Equal(t, "admin", claims.Username)
+	})
+
+	t.Run("invalid credentials", func(t *testing.T) {
+		controller, cleanup := newAuthTestController(t, enableBearer)
+		defer cleanup()
+
+		assert.Equal(t, http.StatusUnauthorized, requestToken(t, controller, "wrong").Code)
+	})
+}
+
+// blockingRotationDB pauses a JWT secret rotation until released, holding an
+// auth change open between publishing credentials and rotating the secret.
+type blockingRotationDB struct {
+	database.DatabaseInterface
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (d blockingRotationDB) RotateJWTSecret() error {
+	close(d.reached)
+	<-d.release
+	return d.DatabaseInterface.RotateJWTSecret()
+}
+
+func TestTokenIssuanceWaitsForAuthChange(t *testing.T) {
+	// Each issuer presents the new password, which is valid only once the
+	// auth change completes.
+	newCredentials := func(req *http.Request) *http.Request {
+		req.SetBasicAuth("admin", "new-password")
+		return req
+	}
+	for _, tc := range []struct {
+		name     string
+		authType api.AuthType
+		issue    func(t *testing.T, controller *Controller) string
+	}{
+		{
+			name:     "access token",
+			authType: api.Bearer,
+			issue: func(t *testing.T, controller *Controller) string {
+				t.Helper()
+				form := url.Values{"grant_type": {"password"}, "username": {"admin"}, "password": {"new-password"}}
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/oauth/token", strings.NewReader(form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				rr := httptest.NewRecorder()
+				controller.GetToken(rr, req)
+				if rr.Code != http.StatusOK {
+					t.Errorf("token request failed: %d %s", rr.Code, rr.Body.String())
+					return ""
+				}
+				var res api.TokenResponse
+				if err := json.NewDecoder(rr.Body).Decode(&res); err != nil {
+					t.Error(err)
+				}
+				return res.AccessToken
+			},
+		},
+		{
+			name:     "settings playback token",
+			authType: api.Basic,
+			issue: func(t *testing.T, controller *Controller) string {
+				t.Helper()
+				req := newCredentials(httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+				settings, _, err := controller.redactedSettings(req)
+				if err != nil {
+					t.Error(err)
+				}
+				return utils.Val(settings.PlaybackToken)
+			},
+		},
+		{
+			name:     "scoped playback token",
+			authType: api.Basic,
+			issue: func(t *testing.T, controller *Controller) string {
+				t.Helper()
+				req := newCredentials(httptest.NewRequest(http.MethodPost, "/api/v1/tokens", http.NoBody))
+				token, _, _, err := controller.issuePlaybackToken(req)
+				if err != nil {
+					t.Error(err)
+				}
+				return token
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+				s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(tc.authType), Username: new("admin"), Password: new("password")}
+			})
+			defer cleanup()
+
+			secret, err := controller.db.GetJWTSecret()
+			require.NoError(t, err)
+			patch := authorize(t, controller, httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+				strings.NewReader(`{"auth":{"password":"new-password"}}`)))
+			patch.Header.Set("Content-Type", "application/json")
+
+			db := blockingRotationDB{DatabaseInterface: controller.db, reached: make(chan struct{}), release: make(chan struct{})}
+			controller.db = db
+			release := sync.OnceFunc(func() { close(db.release) })
+			defer release()
+
+			updated := make(chan int, 1)
+			go func() {
+				rr := httptest.NewRecorder()
+				controller.router.ServeHTTP(rr, patch)
+				updated <- rr.Code
+			}()
+			<-db.reached
+
+			issued := make(chan string, 1)
+			go func() { issued <- tc.issue(t, controller) }()
+			select {
+			case <-issued:
+				t.Fatal("a token was issued while the auth change was still rotating the secret")
+			case <-time.After(50 * time.Millisecond):
+			}
+
+			release()
+			require.Equal(t, http.StatusNoContent, <-updated)
+			token := <-issued
+			require.NotEmpty(t, token)
+
+			rotated, err := controller.db.GetJWTSecret()
+			require.NoError(t, err)
+			require.NotEqual(t, secret, rotated)
+			_, err = auth.ValidateToken(token, []byte(rotated))
+			assert.NoError(t, err, "a token issued during an auth change must survive the rotation")
+		})
+	}
+}
+
+func TestTokenIssuanceRejectsCredentialsRevokedByAuthChange(t *testing.T) {
+	for _, tc := range []struct {
+		authType  api.AuthType
+		challenge string
+	}{
+		{authType: api.Basic, challenge: `Basic realm="TorrPlay"`},
+		{authType: api.Bearer, challenge: `Bearer realm="TorrPlay"`},
+	} {
+		authType := tc.authType
+		t.Run(string(authType), func(t *testing.T) {
+			controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+				s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(authType), Username: new("admin"), Password: new("password")}
+			})
+			defer cleanup()
+
+			// These requests passed the auth middleware before the change and
+			// reach their handlers only after it.
+			body, err := json.Marshal(api.CreateTokenRequest{Scope: api.Playback})
+			require.NoError(t, err)
+			settingsReq := authorize(t, controller, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+			tokenReq := authorize(t, controller, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(body)))
+
+			patch := authorize(t, controller, httptest.NewRequest(http.MethodPatch, "/api/v1/settings",
+				strings.NewReader(`{"auth":{"password":"new-password"}}`)))
+			patch.Header.Set("Content-Type", "application/json")
+			rr := httptest.NewRecorder()
+			controller.router.ServeHTTP(rr, patch)
+			require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+
+			// Rejections match the auth middleware: a challenge for the
+			// configured scheme and no rejection details outside debug logging.
+			rr = httptest.NewRecorder()
+			controller.GetSettings(rr, settingsReq)
+			assert.Equal(t, http.StatusUnauthorized, rr.Code)
+			assert.Equal(t, tc.challenge, rr.Header().Get("WWW-Authenticate"))
+			assert.Contains(t, rr.Body.String(), "authentication failed")
+			assert.NotContains(t, rr.Body.String(), "playback_token")
+
+			rr = httptest.NewRecorder()
+			controller.CreateToken(rr, tokenReq)
+			assert.Equal(t, http.StatusUnauthorized, rr.Code)
+			assert.Equal(t, tc.challenge, rr.Header().Get("WWW-Authenticate"))
+			assert.Contains(t, rr.Body.String(), "authentication failed")
+		})
+	}
+}
+
+// failingSecretDB fails to read the JWT secret, as a damaged database would.
+type failingSecretDB struct {
+	database.DatabaseInterface
+}
+
+func (failingSecretDB) GetJWTSecret() (string, error) {
+	return "", errors.New("secret unavailable")
+}
+
+func TestTokenIssuanceReportsAuthFaultsAsServerErrors(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{Enabled: new(true), Type: utils.Ptr(api.Bearer), Username: new("admin"), Password: new("password")}
+	})
+	defer cleanup()
+
+	body, err := json.Marshal(api.CreateTokenRequest{Scope: api.Playback})
+	require.NoError(t, err)
+	settingsReq := authorize(t, controller, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody))
+	tokenReq := authorize(t, controller, httptest.NewRequest(http.MethodPost, "/api/v1/tokens", bytes.NewReader(body)))
+	controller.db = failingSecretDB{controller.db}
+
+	rr := httptest.NewRecorder()
+	controller.GetSettings(rr, settingsReq)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Empty(t, rr.Header().Get("WWW-Authenticate"))
+
+	rr = httptest.NewRecorder()
+	controller.CreateToken(rr, tokenReq)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code)
+	assert.Empty(t, rr.Header().Get("WWW-Authenticate"))
 }

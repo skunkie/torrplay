@@ -354,3 +354,29 @@ func (b *BBoltDB) GetJWTSecret() (string, error) {
 
 	return secret, err
 }
+
+// RotateJWTSecret replaces the JWT secret, revoking every token signed with
+// the previous one.
+func (b *BBoltDB) RotateJWTSecret() error {
+	secret, err := auth.GenerateJWTSecret()
+	if err != nil {
+		return err
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		s, err := b.getSettings(tx)
+		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
+			return err
+		}
+
+		if s == nil {
+			s = &Settings{}
+		}
+		s.JWTSecret = secret
+
+		encoded, err := json.Marshal(s)
+		if err != nil {
+			return fmt.Errorf("failed to marshal settings: %w", err)
+		}
+		return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), encoded)
+	})
+}

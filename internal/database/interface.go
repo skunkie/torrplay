@@ -22,4 +22,5 @@ type DatabaseInterface interface {
 
 	GetDLNAUDN() (string, error)
 	GetJWTSecret() (string, error)
+	RotateJWTSecret() error
 }
