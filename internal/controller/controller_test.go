@@ -910,6 +910,7 @@ func TestUpdateSettings(t *testing.T) {
 	defer cleanup()
 
 	newSettings := api.Settings{
+		EnableStremio:  new(true),
 		FriendlyName:   new("My New TorrPlay"),
 		HTTPServerPort: new(9090),
 	}
@@ -929,6 +930,8 @@ func TestUpdateSettings(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &updatedSettings))
 	assert.Equal(t, *newSettings.FriendlyName, *updatedSettings.FriendlyName)
 	assert.Equal(t, *newSettings.HTTPServerPort, *updatedSettings.HTTPServerPort)
+	require.NotNil(t, updatedSettings.EnableStremio)
+	assert.True(t, *updatedSettings.EnableStremio)
 }
 
 func TestUpdateSettingsRejectsUnsupportedLogLevel(t *testing.T) {
@@ -1874,6 +1877,12 @@ func TestSlogMiddlewareRedactsTokens(t *testing.T) {
 		expectedPath  string
 	}{
 		{
+			name:          "stremio path token is redacted",
+			requestURL:    "/stremio/secret-access-token-123/manifest.json",
+			unexpectedStr: "secret-access-token-123",
+			expectedPath:  "/stremio/[REDACTED]/manifest.json",
+		},
+		{
 			name:          "query token is redacted",
 			requestURL:    "/api/v1/stream?token=secret-query-token-456",
 			unexpectedStr: "secret-query-token-456",
@@ -1884,6 +1893,12 @@ func TestSlogMiddlewareRedactsTokens(t *testing.T) {
 			requestURL:    "/api/system/logs?q=private-search-term",
 			unexpectedStr: "private-search-term",
 			expectedPath:  "/api/system/logs",
+		},
+		{
+			name:          "stremio unauthenticated path is not altered",
+			requestURL:    "/stremio/manifest.json",
+			unexpectedStr: "[REDACTED]",
+			expectedPath:  "/stremio/manifest.json",
 		},
 	}
 
@@ -1912,6 +1927,61 @@ func TestSlogMiddlewareRedactsTokens(t *testing.T) {
 func TestController_MetricsMiddleware(t *testing.T) {
 	metricsSvc := metrics.New()
 	c := &Controller{metrics: metricsSvc}
+
+	t.Run("unrouted stremio request is collapsed in metrics label", func(t *testing.T) {
+		mw := c.MetricsMiddleware()
+		testHandler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/stremio/secret-metrics-token-123/manifest.json", http.NoBody)
+		rr := httptest.NewRecorder()
+		testHandler.ServeHTTP(rr, req)
+
+		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/manifest.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(redactedCounter))
+
+		rawCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/secret-metrics-token-123/manifest.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
+	})
+
+	t.Run("mounted stremio handler fallback collapses variable segments", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Use(c.MetricsMiddleware())
+		r.Mount("/stremio", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+
+		req := httptest.NewRequest(http.MethodGet, "/stremio/secret-metrics-token-456/catalog/movie/all.json", http.NoBody)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		redactedCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/catalog")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(redactedCounter))
+
+		rawCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/stremio/secret-metrics-token-456/catalog/movie/all.json")
+		require.NoError(t, err)
+		assert.Equal(t, float64(0), promtestutil.ToFloat64(rawCounter))
+	})
+
+	t.Run("standard chi routed pattern is preserved", func(t *testing.T) {
+		r := chi.NewRouter()
+		r.Use(c.MetricsMiddleware())
+		r.Get("/api/v1/torrents", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/torrents", http.NoBody)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+
+		patternCounter, err := metricsSvc.HTTPRequestsTotal.GetMetricWithLabelValues("200", http.MethodGet, "/api/v1/torrents")
+		require.NoError(t, err)
+		assert.Equal(t, float64(1), promtestutil.ToFloat64(patternCounter))
+	})
 
 	t.Run("mounted handler shares its route pattern", func(t *testing.T) {
 		r := chi.NewRouter()

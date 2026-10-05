@@ -29,6 +29,7 @@ interface Settings {
   auth: Auth,
   enableDlna: boolean,
   enableDownloader: boolean,
+  enableStremio: boolean,
   fileStoragePath: string,
   friendlyName: string,
   logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR',
@@ -36,6 +37,7 @@ interface Settings {
   logStoreSize?: number,
   maxMemory: number,
   playbackToken?: string,
+  stremioToken?: string,
   torrentClient: TorrentClient,
   torrentTrackers: string[]
 }

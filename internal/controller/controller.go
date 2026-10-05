@@ -43,6 +43,7 @@ import (
 	"github.com/torrplay/torrplay/internal/metrics"
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	"github.com/torrplay/torrplay/internal/settings"
+	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
@@ -160,16 +161,17 @@ type Controller struct {
 	// settingsUpdateMu serializes settings updates from read through apply.
 	settingsUpdateMu sync.Mutex
 	shutdownOnce     sync.Once
+	speedMonitor     *speedMonitor
+	startedAt        time.Time
+	storageClient    atomic.Pointer[memstorage.Client]
+	streamPool       atomic.Pointer[stream.Pool]
+	stremio          *stremio.Service
 	// torrentClientUnavailable is set while the torrent client, storage, and
 	// stream pool are being replaced, and stays set if the replacement fails.
 	// Streams and preloads are rejected while it is set.
 	torrentClientUnavailable atomic.Bool
 	torrentConfigMu          sync.Mutex
 	torrentGeneration        atomic.Uint64
-	speedMonitor             *speedMonitor
-	startedAt                time.Time
-	storageClient            atomic.Pointer[memstorage.Client]
-	streamPool               atomic.Pointer[stream.Pool]
 	torrentTracker           torrentTracker
 	trackers                 [][]string
 
@@ -306,6 +308,16 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 		c.downloader.Load().Start()
 	}
 
+	c.stremio = stremio.NewService(
+		dbClient,
+		c.postersPath,
+		c.logger.Load(),
+		func(w http.ResponseWriter, r *http.Request, ih metainfo.Hash, fileIdx int) {
+			c.streamFile(w, r, ih, fileIdx)
+		},
+		c.validateStremioToken,
+	)
+
 	go c.startTorrentCleanup()
 	c.startPosterWorker(c.startPosterCleanup)
 	go c.speedMonitor.Start(func() (int64, int64) {
@@ -320,6 +332,20 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	})
 
 	return c, nil
+}
+
+func (c *Controller) validateStremioToken(token string) bool {
+	currentSettings := c.settings.Load()
+	authEnabled := currentSettings != nil && currentSettings.Auth != nil && utils.Val(currentSettings.Auth.Enabled)
+	if !authEnabled {
+		return true
+	}
+
+	secret, err := c.db.GetJWTSecret()
+	if err != nil || secret == "" {
+		return false
+	}
+	return stremio.ValidateAccessToken(token, secret)
 }
 
 func (c *Controller) Logger() *slog.Logger {
@@ -363,6 +389,10 @@ func (c *Controller) buildRouter() *chi.Mux {
 	currentSettings := c.settings.Load()
 	if *currentSettings.EnableDlna {
 		router.Mount(c.dlnaPath, c.dlna)
+	}
+
+	if utils.Val(currentSettings.EnableStremio) && c.stremio != nil {
+		router.Mount("/stremio", c.stremio)
 	}
 
 	// Posters routes.
@@ -553,7 +583,7 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 
 			logAttrs := []any{
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("path", stremio.RedactPathToken(r.URL.Path)),
 			}
 			if r.URL.RawQuery != "" {
 				query := r.URL.Query()
@@ -616,6 +646,12 @@ func (c *Controller) MetricsMiddleware() func(next http.Handler) http.Handler {
 // route pattern, so a mounted handler such as /posters/* gets one series
 // rather than one per file.
 func (c *Controller) metricsRoutePath(r *http.Request) string {
+	if stremio.IsPath(r.URL.Path) {
+		// Stremio paths carry tokens, hashes and file names; keep one label
+		// per addon resource.
+		return stremio.MetricsPath(r.URL.Path)
+	}
+
 	pattern := chi.RouteContext(r.Context()).RoutePattern()
 	switch {
 	case pattern == "" || pattern == "/*":

@@ -24,6 +24,7 @@ const buildTestSettings = (auth: Auth): Settings => ({
   auth,
   enableDlna: false,
   enableDownloader: false,
+  enableStremio: false,
   fileStoragePath: '',
   friendlyName: '',
   logLevel: 'INFO',

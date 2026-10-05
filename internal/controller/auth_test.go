@@ -28,6 +28,7 @@ import (
 	"github.com/torrplay/torrplay/internal/auth"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/metrics"
+	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -346,7 +347,36 @@ func TestQueryTokenAuthenticator(t *testing.T) {
 	})
 }
 
-func TestGetSettingsIncludesScopedPlaybackToken(t *testing.T) {
+func TestStremioAuthenticationFollowsCurrentSettings(t *testing.T) {
+	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
+		s.Auth = &api.Auth{
+			Enabled:  new(true),
+			Type:     utils.Ptr(api.Basic),
+			Username: new("admin"),
+			Password: new("password"),
+		}
+	})
+	defer cleanup()
+
+	secret, err := controller.db.GetJWTSecret()
+	require.NoError(t, err)
+	token := stremio.AccessToken(secret)
+
+	assert.True(t, controller.validateStremioToken(token))
+	assert.False(t, controller.validateStremioToken("invalid"))
+
+	controller.mu.Lock()
+	controller.settings.Load().Auth.Enabled = new(false)
+	controller.mu.Unlock()
+	assert.True(t, controller.validateStremioToken(""))
+
+	controller.mu.Lock()
+	controller.settings.Load().Auth.Enabled = new(true)
+	controller.mu.Unlock()
+	assert.False(t, controller.validateStremioToken(""))
+}
+
+func TestGetSettingsIncludesScopedStremioToken(t *testing.T) {
 	controller, cleanup := newAuthTestController(t, func(s *api.Settings) {
 		s.Auth = &api.Auth{
 			Enabled:  new(true),
@@ -363,9 +393,12 @@ func TestGetSettingsIncludesScopedPlaybackToken(t *testing.T) {
 
 	var got api.Settings
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&got))
+	require.NotNil(t, got.StremioToken)
 	require.NotNil(t, got.PlaybackToken)
 	secret, err := controller.db.GetJWTSecret()
 	require.NoError(t, err)
+	assert.Equal(t, stremio.AccessToken(secret), *got.StremioToken)
+	assert.NotEqual(t, secret, *got.StremioToken)
 	claims, err := auth.ValidateToken(*got.PlaybackToken, []byte(secret))
 	require.NoError(t, err)
 	assert.Equal(t, auth.PlaybackTokenScope, claims.Scope)
@@ -603,6 +636,8 @@ func TestUpdateSettingsRotatesJWTSecretOnAuthChange(t *testing.T) {
 			assert.Error(t, err, "API tokens issued before the update must be revoked")
 			_, err = auth.ValidateToken(playbackToken, []byte(secretAfter))
 			assert.Error(t, err, "playback tokens issued before the update must be revoked")
+			assert.False(t, stremio.ValidateAccessToken(stremio.AccessToken(secretBefore), secretAfter),
+				"Stremio tokens issued before the update must be revoked")
 
 			current := controller.settings.Load().Auth
 			if !utils.Val(current.Enabled) {
@@ -614,6 +649,14 @@ func TestUpdateSettingsRotatesJWTSecretOnAuthChange(t *testing.T) {
 					GoWithHTTPHandler(t, controller.router).Recorder
 				assert.Equal(t, http.StatusUnauthorized, rr.Code, "the API must reject tokens issued before the update")
 			}
+
+			rr = httptest.NewRecorder()
+			controller.GetSettings(rr, authorize(t, controller, httptest.NewRequest(http.MethodGet, "/api/v1/settings", http.NoBody)))
+			require.Equal(t, http.StatusOK, rr.Code)
+			var res api.Settings
+			require.NoError(t, json.NewDecoder(rr.Body).Decode(&res))
+			assert.Equal(t, stremio.AccessToken(secretAfter), utils.Val(res.StremioToken),
+				"settings must expose the Stremio token for the new secret")
 		})
 	}
 }
@@ -895,6 +938,7 @@ func TestTokenIssuanceRejectsCredentialsRevokedByAuthChange(t *testing.T) {
 			assert.Equal(t, tc.challenge, rr.Header().Get("WWW-Authenticate"))
 			assert.Contains(t, rr.Body.String(), "authentication failed")
 			assert.NotContains(t, rr.Body.String(), "playback_token")
+			assert.NotContains(t, rr.Body.String(), "stremio_token")
 
 			rr = httptest.NewRecorder()
 			controller.CreateToken(rr, tokenReq)

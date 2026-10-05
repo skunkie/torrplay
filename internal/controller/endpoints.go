@@ -38,6 +38,7 @@ import (
 	"github.com/torrplay/torrplay/internal/logging"
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	appsettings "github.com/torrplay/torrplay/internal/settings"
+	"github.com/torrplay/torrplay/internal/stremio"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
@@ -461,6 +462,7 @@ func (c *Controller) redactedSettings(r *http.Request) (api.Settings, int, error
 		if err != nil || secret == "" {
 			return api.Settings{}, http.StatusInternalServerError, errors.New("failed to get scoped access tokens")
 		}
+		redactedSettings.StremioToken = utils.Ptr(stremio.AccessToken(secret))
 		playbackToken, _, err := auth.GeneratePlaybackToken([]byte(secret))
 		if err != nil {
 			return api.Settings{}, http.StatusInternalServerError, errors.New("failed to create playback token")
@@ -962,6 +964,9 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if reqSettings.EnableDownloader != nil {
 		newSettings.EnableDownloader = reqSettings.EnableDownloader
 	}
+	if reqSettings.EnableStremio != nil {
+		newSettings.EnableStremio = reqSettings.EnableStremio
+	}
 	if reqSettings.FriendlyName != nil {
 		newSettings.FriendlyName = reqSettings.FriendlyName
 	}
@@ -1018,6 +1023,10 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		restartHTTPServer = true
 	}
 	if utils.Differ(oldSettings.EnableDownloader, newSettings.EnableDownloader) {
+		saveSettings = true
+	}
+	if utils.Differ(oldSettings.EnableStremio, newSettings.EnableStremio) {
+		restartHTTPServer = true
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.FriendlyName, newSettings.FriendlyName) {
@@ -1185,8 +1194,8 @@ type appliedSettings struct {
 }
 
 // storeSettings persists and publishes new settings. When they change
-// authentication, it also rotates the JWT secret, revoking every bearer
-// and playback token issued under the previous credentials. The
+// authentication, it also rotates the JWT secret, revoking every bearer,
+// playback, and Stremio token issued under the previous credentials. The
 // whole auth change holds authMu, so no token is signed in between with a
 // secret that the rotation is about to revoke. It reports whether the secret
 // was rotated. A failed rotation restores the previous settings.

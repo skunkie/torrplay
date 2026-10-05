@@ -33,6 +33,7 @@ const buildDemoSettings = (overrides: Partial<Settings> = {}): Settings => ({
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
   enableDlna: false,
   enableDownloader: false,
+  enableStremio: false,
   fileStoragePath: '',
   friendlyName: 'TorrPlay',
   logLevel: 'INFO',
