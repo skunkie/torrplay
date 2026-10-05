@@ -80,6 +80,30 @@ export function getApiBaseUrl(): string {
   return getDefaultApiUrl();
 }
 
+// -- Stored Credentials --
+
+const CREDENTIAL_STORAGE_KEYS = ['jwt_token', 'basic_auth', 'playback_token'] as const;
+
+export function clearStoredCredentials(): void {
+  for (const key of CREDENTIAL_STORAGE_KEYS) {
+    localStorage.removeItem(key);
+  }
+}
+
+// Store or remove the manual API URL override. Drop stored credentials when the
+// effective server changes so one server's credentials never reach another.
+export function setApiBaseUrlOverride(url: string | null): void {
+  const previous = getApiBaseUrl();
+  if (url === null) {
+    localStorage.removeItem('NEXT_PUBLIC_API_URL');
+  } else {
+    localStorage.setItem('NEXT_PUBLIC_API_URL', url);
+  }
+  if (getApiBaseUrl() !== previous) {
+    clearStoredCredentials();
+  }
+}
+
 export async function apiFetch(path: string, options: RequestInit = {}): Promise<Response> {
   const baseUrl = getApiBaseUrl();
 
