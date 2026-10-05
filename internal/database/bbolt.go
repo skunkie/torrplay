@@ -321,9 +321,28 @@ func (b *BBoltDB) GetDLNAUDN() (string, error) {
 	return udn, err
 }
 
+// GetJWTSecret returns the JWT secret, creating it on first use. It runs for
+// every authenticated request, so an existing secret is read in a read-only
+// transaction, and a write transaction only creates a missing one.
 func (b *BBoltDB) GetJWTSecret() (string, error) {
 	var secret string
-	err := b.db.Update(func(tx *bbolt.Tx) error {
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		s, err := b.getSettings(tx)
+		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
+			return err
+		}
+		if s != nil {
+			secret = s.JWTSecret
+		}
+		return nil
+	})
+	if err != nil || secret != "" {
+		return secret, err
+	}
+
+	// Another caller may have created the secret since the read, so the write
+	// transaction checks again before creating one.
+	err = b.db.Update(func(tx *bbolt.Tx) error {
 		s, err := b.getSettings(tx)
 		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
 			return err

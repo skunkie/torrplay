@@ -172,6 +172,30 @@ func TestBBoltDB(t *testing.T) {
 			assert.Equal(t, secret, secret2)
 		})
 
+		t.Run("reads an existing secret without the write lock", func(t *testing.T) {
+			secret, err := db.GetJWTSecret()
+			require.NoError(t, err)
+
+			// A write transaction in progress blocks another, but not a read.
+			writer, err := db.db.Begin(true)
+			require.NoError(t, err)
+			defer func() { _ = writer.Rollback() }()
+			read := make(chan string, 1)
+			go func() {
+				got, err := db.GetJWTSecret()
+				assert.NoError(t, err)
+				read <- got
+			}()
+			select {
+			case got := <-read:
+				assert.Equal(t, secret, got)
+			case <-time.After(5 * time.Second):
+				require.NoError(t, writer.Rollback())
+				<-read
+				t.Fatal("reading the secret waited for the write transaction")
+			}
+		})
+
 		t.Run("rotate secret", func(t *testing.T) {
 			secret, err := db.GetJWTSecret()
 			require.NoError(t, err)
