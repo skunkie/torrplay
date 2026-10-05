@@ -148,6 +148,7 @@ type Controller struct {
 	settings             atomic.Pointer[api.Settings]
 	// settingsUpdateMu serializes settings updates from read through apply.
 	settingsUpdateMu sync.Mutex
+	shutdownOnce     sync.Once
 	// torrentClientUnavailable is set while the torrent client, storage, and
 	// stream pool are being replaced, and stays set if the replacement fails.
 	// Streams and preloads are rejected while it is set.
@@ -475,20 +476,28 @@ func (c *Controller) NewAuthenticator() openapi3filter.AuthenticationFunc {
 			}
 
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-			if _, err := auth.ValidateToken(tokenString, []byte(jwtSecret)); err != nil {
+			claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+			if err != nil {
 				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "Bearer"}
 			}
+			if claims.Scope != "" {
+				return &api.AuthError{Message: "token scope is not valid for API access", Type: "Bearer"}
+			}
 			return nil
-		case "cookieAuth":
+		case "queryTokenAuth":
 			if authType != api.Bearer {
 				return nil
 			}
-			cookie, err := input.RequestValidationInput.Request.Cookie("session")
-			if err != nil {
-				return &api.AuthError{Message: "missing session cookie", Type: "cookie"}
+			tokenString := input.RequestValidationInput.Request.URL.Query().Get("token")
+			if tokenString == "" {
+				return &api.AuthError{Message: "token query parameter is missing", Type: "query"}
 			}
-			if _, err := auth.ValidateToken(cookie.Value, []byte(jwtSecret)); err != nil {
-				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "cookie"}
+			claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+			if err != nil {
+				return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "query"}
+			}
+			if claims.Scope != auth.PlaybackTokenScope {
+				return &api.AuthError{Message: "only playback-scoped tokens are accepted in URLs", Type: "query"}
 			}
 			return nil
 		}
@@ -508,6 +517,9 @@ func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {
 			}
 			if r.URL.RawQuery != "" {
 				query := r.URL.Query()
+				if query.Has("token") {
+					query.Set("token", "[REDACTED]")
+				}
 				if r.URL.Path == "/api/system/logs" && query.Has("q") {
 					query.Set("q", "[REDACTED]")
 				}
@@ -597,45 +609,45 @@ func (c *Controller) Start() {
 }
 
 func (c *Controller) Shutdown() {
-	c.logger.Load().Info("shutting down TorrPlay...")
+	c.shutdownOnce.Do(func() {
+		c.logger.Load().Info("shutting down TorrPlay...")
 
-	if c.httpServer != nil {
-		_ = c.httpServer.Close()
-	}
-	c.stopProfiler()
+		if c.httpServer != nil {
+			_ = c.httpServer.Close()
+		}
+		c.stopProfiler()
 
-	if activeDownloader := c.downloader.Load(); activeDownloader != nil {
-		activeDownloader.Stop()
-	}
+		if activeDownloader := c.downloader.Load(); activeDownloader != nil {
+			activeDownloader.Stop()
+		}
 
-	close(c.torrentTracker.cleanupDone)
-	close(c.posterCleanupDone)
-	if c.speedMonitor != nil {
-		c.speedMonitor.Stop()
-	}
+		close(c.torrentTracker.cleanupDone)
+		close(c.posterCleanupDone)
+		if c.speedMonitor != nil {
+			c.speedMonitor.Stop()
+		}
 
-	_ = c.dlna.Stop()
-	if pool := c.streamPool.Load(); pool != nil {
-		pool.Close()
-	}
-	if c.storageClient.Load() != nil {
-		_ = c.storageClient.Load().Close()
-	}
-	if c.pieceCompletion != nil {
-		_ = c.pieceCompletion.Close()
-	}
-	if c.client != nil {
+		_ = c.dlna.Stop()
+		if pool := c.streamPool.Load(); pool != nil {
+			pool.Close()
+		}
+		if storageClient := c.storageClient.Load(); storageClient != nil {
+			_ = storageClient.Close()
+		}
+		if c.pieceCompletion != nil {
+			_ = c.pieceCompletion.Close()
+		}
 		_ = c.client.Close()
-	}
-	c.stopPosterWorkers()
-	if c.images != nil {
-		_ = c.images.Close()
-	}
-	if c.logFile != nil {
-		_ = c.logFile.Close()
-	}
+		c.stopPosterWorkers()
+		if c.images != nil {
+			_ = c.images.Close()
+		}
+		if c.logFile != nil {
+			_ = c.logFile.Close()
+		}
 
-	c.logger.Load().Info("TorrPlay stopped")
+		c.logger.Load().Info("TorrPlay stopped")
+	})
 }
 
 func (c *Controller) startPosterWorker(worker func()) bool {

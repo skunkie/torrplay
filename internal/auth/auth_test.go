@@ -35,7 +35,21 @@ func TestGenerateAndValidateToken(t *testing.T) {
 	assert.WithinDuration(t, time.Now().Add(24*time.Hour), claims.ExpiresAt.Time, time.Second)
 }
 
-func TestValidateToken_InvalidToken(t *testing.T) {
+func TestGenerateAndValidatePlaybackToken(t *testing.T) {
+	secret, err := GenerateJWTSecret()
+	require.NoError(t, err)
+
+	tokenString, expiresAt, err := GeneratePlaybackToken([]byte(secret))
+	require.NoError(t, err)
+
+	claims, err := ValidateToken(tokenString, []byte(secret))
+	require.NoError(t, err)
+	assert.Equal(t, PlaybackTokenScope, claims.Scope)
+	assert.WithinDuration(t, expiresAt, claims.ExpiresAt.Time, time.Second)
+}
+
+// TestValidateToken verifies that ValidateToken rejects an invalid token.
+func TestValidateToken(t *testing.T) {
 	secret, err := GenerateJWTSecret()
 	require.NoError(t, err)
 

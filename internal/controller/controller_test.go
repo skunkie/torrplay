@@ -425,7 +425,7 @@ func TestGetPlaylist(t *testing.T) {
 	})
 
 	t.Run("torrent specific playlist", func(t *testing.T) {
-		rr := doGet(t, ctrl.router, "/api/v1/playlist?name=Sintel.m3u")
+		rr := doGet(t, ctrl.router, "/api/v1/playlist?name=Sintel.m3u&token=test-token")
 
 		require.Equal(t, http.StatusOK, rr.Code)
 		assert.Equal(t, "application/x-mpegURL", rr.Header().Get("Content-Type"))
@@ -445,6 +445,7 @@ func TestGetPlaylist(t *testing.T) {
 		ih := metainfo.NewHashFromHex("08ada5a7a6183aae1e09d831df6748d566095a10")
 		expectedURLPart := fmt.Sprintf("/api/v1/stream/%s?path=", ih.HexString())
 		assert.Contains(t, streamURL, expectedURLPart)
+		assert.Contains(t, streamURL, "&token=test-token")
 	})
 }
 
@@ -946,24 +947,6 @@ func TestUpdateSettingsRejectsUnsupportedLogLevel(t *testing.T) {
 			assert.Equal(t, slog.LevelInfo, *stored.LogLevel)
 		})
 	}
-}
-
-func TestSlogMiddlewareRedactsLogsQuery(t *testing.T) {
-	var buf bytes.Buffer
-	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
-	logger := slog.New(handler)
-
-	c := &Controller{}
-	c.logger.Store(logger)
-
-	req := httptest.NewRequest(http.MethodGet, "/api/system/logs?q=private-search-term", http.NoBody)
-	rr := httptest.NewRecorder()
-	c.SlogMiddleware()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})).ServeHTTP(rr, req)
-
-	assert.NotContains(t, buf.String(), "private-search-term")
-	assert.Contains(t, buf.String(), "q=%5BREDACTED%5D")
 }
 
 func TestUpdateSettingsWithTrackers(t *testing.T) {
@@ -1492,6 +1475,18 @@ func TestUpdateSettingsSerializesConcurrentPatches(t *testing.T) {
 	ctrl.mu.RUnlock()
 }
 
+// TestController_Shutdown verifies that Shutdown is idempotent.
+func TestController_Shutdown(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	// Calling Shutdown multiple times should not panic
+	require.NotPanics(t, func() {
+		ctrl.Shutdown()
+		ctrl.Shutdown()
+	})
+}
+
 // TestController_StopPosterWorkers verifies that stopped poster workers reject late registration.
 func TestController_StopPosterWorkers(t *testing.T) {
 	ctrl := &Controller{}
@@ -1806,6 +1801,56 @@ func TestCalcReadaheadPct(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := calcReadaheadPct(tt.maxMemory)
 			assert.Equal(t, tt.want, got, "maxMemory = %d", tt.maxMemory)
+		})
+	}
+}
+
+func TestSlogMiddlewareRedactsTokens(t *testing.T) {
+	var buf bytes.Buffer
+	handler := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(handler)
+
+	c := &Controller{}
+	c.logger.Store(logger)
+
+	tests := []struct {
+		name          string
+		requestURL    string
+		unexpectedStr string
+		expectedPath  string
+	}{
+		{
+			name:          "query token is redacted",
+			requestURL:    "/api/v1/stream?token=secret-query-token-456",
+			unexpectedStr: "secret-query-token-456",
+			expectedPath:  "/api/v1/stream",
+		},
+		{
+			name:          "log search query is redacted",
+			requestURL:    "/api/system/logs?q=private-search-term",
+			unexpectedStr: "private-search-term",
+			expectedPath:  "/api/system/logs",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf.Reset()
+			req := httptest.NewRequest(http.MethodGet, tc.requestURL, http.NoBody)
+			rr := httptest.NewRecorder()
+
+			mw := c.SlogMiddleware()
+			testHandler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			testHandler.ServeHTTP(rr, req)
+
+			logOutput := buf.String()
+			assert.Contains(t, logOutput, tc.expectedPath)
+			if tc.unexpectedStr != "" {
+				assert.NotContains(t, logOutput, tc.unexpectedStr)
+			}
 		})
 	}
 }

@@ -89,5 +89,10 @@ export async function deleteTorrent(hash: string): Promise<void> {
 }
 
 export function getTorrentStreamUrl(hash: string, filepath: string): string {
-  return `${getApiBaseUrl()}/api/v1/stream/${hash}?path=${encodeURIComponent(filepath)}`;
+  let url = `${getApiBaseUrl()}/api/v1/stream/${hash}?path=${encodeURIComponent(filepath)}`;
+  if (typeof window !== 'undefined') {
+    const playbackToken = localStorage.getItem('playback_token');
+    if (playbackToken) url += `&token=${encodeURIComponent(playbackToken)}`;
+  }
+  return url;
 }

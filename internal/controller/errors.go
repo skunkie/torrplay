@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -20,7 +21,7 @@ import (
 
 // ErrorHandler is a custom error handler for OpenAPI request validation middleware.
 // It intercepts errors from the oapi-codegen validator and formats them into consistent HTTP JSON responses.
-func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseWriter, _ *http.Request, opts nethttpmiddleware.ErrorHandlerOpts) {
+func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseWriter, r *http.Request, opts nethttpmiddleware.ErrorHandlerOpts) {
 	var reqErr *openapi3filter.RequestError
 	var secErr *openapi3filter.SecurityRequirementsError
 	switch {
@@ -37,19 +38,37 @@ func (c *Controller) ErrorHandler(_ context.Context, err error, w http.ResponseW
 		api.HTTPError(w, message, opts.StatusCode)
 		return
 	case errors.As(err, &secErr):
-		if authErr, ok := errors.AsType[*api.AuthError](err); ok {
-			realm := "TorrPlay"
-			authHeader := fmt.Sprintf(`%s realm=%q`, authErr.Type, realm)
-			w.Header().Set("WWW-Authenticate", authHeader)
-		}
-		if utils.Val(c.settings.Load().LogLevel) == slog.LevelDebug {
-			api.HTTPError(w, err.Error(), http.StatusUnauthorized)
-			return
-		}
-		api.HTTPError(w, "authentication failed", http.StatusUnauthorized)
+		c.writeAuthError(w, r, err)
 	default:
 		api.HTTPError(w, "invalid request", opts.StatusCode)
 	}
+}
+
+// writeAuthError answers a request whose credentials were rejected. It sends
+// the authentication challenge for the rejected scheme, using x-Basic for XHR
+// requests so browsers do not show their own login prompt, and hides the
+// rejection reason unless debug logging is enabled.
+func (c *Controller) writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	if authErr, ok := errors.AsType[*api.AuthError](err); ok {
+		realm := "TorrPlay"
+		authType := string(authErr.Type)
+		if strings.EqualFold(authType, "Basic") {
+			if r != nil && strings.EqualFold(r.Header.Get("X-Requested-With"), "XMLHttpRequest") {
+				authType = "x-Basic"
+			} else {
+				authType = "Basic"
+			}
+		} else if strings.EqualFold(authType, "Bearer") {
+			authType = "Bearer"
+		}
+		authHeader := fmt.Sprintf(`%s realm=%q`, authType, realm)
+		w.Header().Set("WWW-Authenticate", authHeader)
+	}
+	if utils.Val(c.settings.Load().LogLevel) == slog.LevelDebug {
+		api.HTTPError(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	api.HTTPError(w, "authentication failed", http.StatusUnauthorized)
 }
 
 // getInnerErrorMessage recursively unwraps an error to find the most specific
