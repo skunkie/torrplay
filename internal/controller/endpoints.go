@@ -450,7 +450,7 @@ func (c *Controller) redactedSettings(r *http.Request) (api.Settings, int, error
 	redactedSettings := *c.settings.Load()
 	if redactedSettings.Auth != nil {
 		redactedAuth := *redactedSettings.Auth
-		redactedAuth.Password = utils.Ptr("********")
+		redactedAuth.Password = nil
 		redactedSettings.Auth = &redactedAuth
 	}
 	authEnabled := redactedSettings.Auth != nil && utils.Val(redactedSettings.Auth.Enabled)

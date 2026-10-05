@@ -177,7 +177,8 @@ function useAuthStore(isDemo = false) {
     if (isDemo) {
       const updatedSettings = { ...settings, ...newSettings } as Settings;
       if (newSettings.auth) {
-        updatedSettings.auth = { ...settings?.auth, ...newSettings.auth } as Auth;
+        // Mirror the server, which never returns the stored password.
+        updatedSettings.auth = { ...settings?.auth, ...newSettings.auth, password: undefined } as Auth;
       }
       setSettings(updatedSettings);
       setAuth(updatedSettings.auth);
@@ -186,14 +187,9 @@ function useAuthStore(isDemo = false) {
 
     if (!settings) throw new Error('Settings not loaded');
 
-    const settingsToUpdate: Partial<Settings> = { ...newSettings };
-    if (settingsToUpdate.auth?.password === '********') {
-      delete settingsToUpdate.auth.password;
-    }
+    await apiUpdateSettings(newSettings);
 
-    await apiUpdateSettings(settingsToUpdate);
-
-    if (settingsToUpdate.auth) {
+    if (newSettings.auth) {
       localStorage.removeItem('jwt_token');
       localStorage.removeItem('basic_auth');
       localStorage.removeItem('playback_token');

@@ -369,6 +369,72 @@ describe('SettingsDialog', () => {
     });
   });
 
+  it('keeps the stored password when the password field is left blank', async () => {
+    settingsRef.current = buildMockSettings({
+      auth: { enabled: true, type: 'basic', username: 'admin' },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const password = screen.getByLabelText(/^password$/i);
+    expect(password).toHaveValue('');
+    expect(password).toHaveAttribute('placeholder', 'Leave blank to keep the current password');
+
+    fireEvent.change(screen.getByLabelText(/^username$/i), { target: { value: 'operator' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        auth: { username: 'operator' },
+      }));
+    });
+  });
+
+  it('sends a newly entered password', async () => {
+    settingsRef.current = buildMockSettings({
+      auth: { enabled: true, type: 'basic', username: 'admin' },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: 'new-password' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        auth: { password: 'new-password' },
+      }));
+    });
+  });
+
+  it('requires a password when enabling authentication', async () => {
+    const { toast } = await import('sonner');
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('switch', { name: /enable authentication/i }));
+    fireEvent.change(screen.getByLabelText(/^username$/i), { target: { value: 'admin' } });
+    expect(screen.getByLabelText(/^password$/i)).not.toHaveAttribute('placeholder');
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Password required', expect.anything());
+    });
+    expect(mockUpdateSettings).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText(/^password$/i), { target: { value: 'password' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        auth: { enabled: true, username: 'admin', password: 'password' },
+      }));
+    });
+  });
+
   it('Reset button reverts torrentClient settings to server values', async () => {
     render(<SettingsDialog open={true}
       onOpenChange={vi.fn()} />);
