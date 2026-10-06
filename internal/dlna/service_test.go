@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/ethulhu/helix/upnpav"
 	"github.com/ethulhu/helix/upnpav/contentdirectory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -191,6 +192,61 @@ func TestService_ServeHTTP(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Equal(t, "max-age=600", rec.Header().Get("Cache-Control"))
 		})
+	})
+}
+
+func TestServiceConnectionManagerAndRegistrar(t *testing.T) {
+	service, cleanup := newTestService(t)
+	defer cleanup()
+
+	// Test ConnectionManager service handler is registered
+	cmHandler, ok := service.device.SOAPInterface("urn:schemas-upnp-org:service:ConnectionManager:1")
+	if !ok || cmHandler == nil {
+		t.Fatal("ConnectionManager SOAPInterface is not registered")
+	}
+
+	// Test MediaReceiverRegistrar service handler is registered
+	mrrHandler, ok := service.device.SOAPInterface("urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1")
+	if !ok || mrrHandler == nil {
+		t.Fatal("MediaReceiverRegistrar SOAPInterface is not registered")
+	}
+}
+
+func TestAddHeader(t *testing.T) {
+	t.Run("no DLNA headers", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Empty(t, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Empty(t, rec.Header().Get("transferMode.dlna.org"))
+	})
+
+	t.Run("getContentFeatures requested", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req.Header.Set("getContentFeatures.dlna.org", "1")
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Equal(t, upnpav.ContentFeatures, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Equal(t, "Streaming", rec.Header().Get("transferMode.dlna.org"))
+	})
+
+	t.Run("custom transferMode provided", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req.Header.Set("transferMode.dlna.org", "Background")
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Empty(t, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Equal(t, "Background", rec.Header().Get("transferMode.dlna.org"))
+	})
+
+	t.Run("both headers provided", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+		req.Header.Set("getContentFeatures.dlna.org", "1")
+		req.Header.Set("transferMode.dlna.org", "Interactive")
+		rec := httptest.NewRecorder()
+		AddHeader(rec, req)
+		assert.Equal(t, upnpav.ContentFeatures, rec.Header().Get("contentFeatures.dlna.org"))
+		assert.Equal(t, "Interactive", rec.Header().Get("transferMode.dlna.org"))
 	})
 }
 
