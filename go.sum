@@ -410,6 +410,8 @@ github.com/sirupsen/logrus v1.2.0/go.mod h1:LxeOpSwHxABJmUn/MG1IvRgCAasNZTLOkJPx
 github.com/sirupsen/logrus v1.4.2/go.mod h1:tLMulIdttU9McNUspp0xgXVQah82FyeX6MwdIuYE2rE=
 github.com/sirupsen/logrus v1.9.4 h1:TsZE7l11zFCLZnZ+teH4Umoq5BhEIfIzfRDZ1Uzql2w=
 github.com/sirupsen/logrus v1.9.4/go.mod h1:ftWc9WdOfJ0a92nsE2jF5u5ZwH8Bv2zdeOC42RjbV2g=
+github.com/skunkie/helix v0.0.0-20261006093140-1fd6fc59f382 h1:4CyvcaaycB9olUbh1K1a//A5pFy+fR6FoQFrMlSToeU=
+github.com/skunkie/helix v0.0.0-20261006093140-1fd6fc59f382/go.mod h1:Os9+/ec5DT5Fqkp2Ikl0M/Ra05Vf1gZkFz3aC3yy7DQ=
 github.com/skunkie/torrent v0.0.0-20260929135407-b43286c76e47 h1:GOTb/B+XAEQe0ghFQJ1gVMbS/6qlOgqaBb1A/S3MIJc=
 github.com/skunkie/torrent v0.0.0-20260929135407-b43286c76e47/go.mod h1:pkyH7KHvJcqehMuraryq6Rs4U8KbZuLdLOfSHmNKvG0=
 github.com/smartystreets/assertions v0.0.0-20180927180507-b2de0cb4f26d/go.mod h1:OnSkiWE9lh6wB0YB77sQom3nweQdgAjqCqsofrRNTgc=
@@ -450,8 +452,6 @@ github.com/tidwall/btree v1.8.1/go.mod h1:jBbTdUWhSZClZWoDg54VnvV7/54modSOzDN7VX
 github.com/tinylib/msgp v1.0.2/go.mod h1:+d+yLhGm8mzTaHzB+wgMYrodPfmZrzkirds8fDWklFE=
 github.com/tinylib/msgp v1.1.0/go.mod h1:+d+yLhGm8mzTaHzB+wgMYrodPfmZrzkirds8fDWklFE=
 github.com/tinylib/msgp v1.1.2/go.mod h1:+d+yLhGm8mzTaHzB+wgMYrodPfmZrzkirds8fDWklFE=
-github.com/torrplay/helix v0.0.0-20260509133152-1120c60f8ca8 h1:n9f/O7amx0+hJIS7jS7WgkGdSYO9wAYYUKXJul2yUmI=
-github.com/torrplay/helix v0.0.0-20260509133152-1120c60f8ca8/go.mod h1:Mq6gIQgcf4XwQSDBGgX31O2E2hrbVNBisvj5G++fzYg=
 github.com/vearutop/statigz v1.4.0 h1:RQL0KG3j/uyA/PFpHeZ/L6l2ta920/MxlOAIGEOuwmU=
 github.com/vearutop/statigz v1.4.0/go.mod h1:LYTolBLiz9oJISwiVKnOQoIwhO1LWX1A7OECawGS8XE=
 github.com/vmware-labs/yaml-jsonpath v0.3.2 h1:/5QKeCBGdsInyDCyVNLbXyilb61MXGi9NP674f9Hobk=

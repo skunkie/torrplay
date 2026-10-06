@@ -16,7 +16,7 @@ import (
 
 func corsOptions() cors.Options {
 	return cors.Options{
-		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"},
+		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "SUBSCRIBE", "UNSUBSCRIBE", "NOTIFY"},
 		AllowedHeaders: []string{
 			"Accept", "Accept-Ranges", "Accept-Language", "Access-Control-Request-Private-Network",
 			"Authorization", "Content-Language", "Content-Type", "Content-Length", "Origin", "Range",

@@ -153,6 +153,6 @@ require (
 	zombiezen.com/go/sqlite v0.13.1 // indirect
 )
 
-replace github.com/ethulhu/helix => github.com/torrplay/helix v0.0.0-20260509133152-1120c60f8ca8
+replace github.com/ethulhu/helix => github.com/skunkie/helix v0.0.0-20261006093140-1fd6fc59f382
 
 replace github.com/anacrolix/torrent => github.com/skunkie/torrent v0.0.0-20260929135407-b43286c76e47

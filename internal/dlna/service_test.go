@@ -5,14 +5,20 @@
 package dlna
 
 import (
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/ethulhu/helix/upnpav/contentdirectory"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/testutil"
@@ -52,6 +58,23 @@ func (m *mockDB) GetTorrent(ih metainfo.Hash) (*database.Torrent, error) {
 	return database.FromAPITorrent(testTorrents[0]), nil
 }
 
+// newTestService creates a Service, starts it on 127.0.0.1 with a fixed
+// test address, and registers a cleanup that stops the service when the test
+// finishes. Using t.Cleanup guarantees the UPnP broadcast goroutine launched
+// by Start is cancelled before the next test (or the next -count iteration of
+// the same test) starts a new one.
+func newTestService(t *testing.T) (*Service, func()) {
+	t.Helper()
+
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, "/upnp/", "/posters/", logger)
+
+	require.NoError(t, service.Start("test-server", "127.0.0.1", 8080))
+
+	return service, func() { _ = service.Stop() }
+}
+
 func TestNewService(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -71,46 +94,45 @@ func TestNewService(t *testing.T) {
 }
 
 func TestService_Start(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+	t.Run("initializes service", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
 
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
-	defer func() { _ = service.Stop() }()
+		if service.cancel == nil {
+			t.Error("service.cancel was not set")
+		}
 
-	if service.cancel == nil {
-		t.Error("service.cancel was not set")
-	}
+		if service.device == nil {
+			t.Error("service.device was not set")
+		}
 
-	if service.device == nil {
-		t.Error("service.device was not set")
-	}
+		if service.handler == nil {
+			t.Error("service.handler was not set")
+		}
+	})
 
-	if service.handler == nil {
-		t.Error("service.handler was not set")
-	}
-}
+	t.Run("already running", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
 
-func TestService_Start_NoErrorWithUnspecifiedIP(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+		err := service.Start("test-server", "127.0.0.1", 8080)
+		assert.ErrorContains(t, err, "already running")
+	})
 
-	if err := service.Start("test-server", "0.0.0.0", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error for an unspecified IP: %v", err)
-	}
+	t.Run("unspecified IP", func(t *testing.T) {
+		db := &mockDB{}
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		service := NewService(db, "/upnp/", "/posters/", logger)
+
+		if err := service.Start("test-server", "0.0.0.0", 8080); err != nil {
+			t.Fatalf("service.Start() returned an error for an unspecified IP: %v", err)
+		}
+	})
 }
 
 func TestService_Stop(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	if err := service.Stop(); err != nil {
 		t.Fatalf("service.Stop() returned an error: %v", err)
@@ -122,14 +144,8 @@ func TestService_Stop(t *testing.T) {
 }
 
 func TestService_Reconfigure(t *testing.T) {
-	db := &mockDB{}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
-
-	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
-		t.Fatalf("service.Start() returned an error: %v", err)
-	}
-	defer func() { _ = service.Stop() }()
+	service, cleanup := newTestService(t)
+	defer cleanup()
 
 	if err := service.Reconfigure("new-test-server", "127.0.0.1", 8081); err != nil {
 		t.Fatalf("service.Reconfigure() returned an error: %v", err)
@@ -137,25 +153,136 @@ func TestService_Reconfigure(t *testing.T) {
 }
 
 func TestService_ServeHTTP(t *testing.T) {
+	t.Run("serves device description", func(t *testing.T) {
+		service, cleanup := newTestService(t)
+		defer cleanup()
+
+		req := httptest.NewRequest(http.MethodGet, "/upnp/", http.NoBody)
+		rw := httptest.NewRecorder()
+
+		service.ServeHTTP(rw, req)
+
+		if rw.Code != http.StatusOK {
+			t.Errorf("ServeHTTP returned status %d, expected %d", rw.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("icons and not found", func(t *testing.T) {
+		db := &mockDB{}
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+		service := NewService(db, "/upnp/", "/posters/", logger)
+
+		t.Run("handler is nil when stopped", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/upnp/test", http.NoBody)
+			rec := httptest.NewRecorder()
+			service.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusNotFound, rec.Code)
+		})
+
+		t.Run("serve embedded icon", func(t *testing.T) {
+			if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+				t.Fatalf("service.Start() returned an error: %v", err)
+			}
+			defer func() { _ = service.Stop() }()
+
+			req := httptest.NewRequest(http.MethodGet, "/upnp/icons/device/icon-128x128.png", http.NoBody)
+			rec := httptest.NewRecorder()
+			service.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusOK, rec.Code)
+			assert.Equal(t, "max-age=600", rec.Header().Get("Cache-Control"))
+		})
+	})
+}
+
+func TestService_SetLogger(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	service := NewService(db, "/upnp/", "/posters/", logger)
 
+	newLogger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	service.SetLogger(newLogger)
+	assert.Equal(t, newLogger, service.logger)
+}
+
+func TestService_IncrementSystemUpdateID(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, "/upnp/", "/posters/", logger)
+
+	// When content directory is nil (not started)
+	service.IncrementSystemUpdateID()
+
+	// When service is running
 	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
 		t.Fatalf("service.Start() returned an error: %v", err)
 	}
 	defer func() { _ = service.Stop() }()
 
-	req := httptest.NewRequest(http.MethodGet, "/upnp/", http.NoBody)
-	rw := httptest.NewRecorder()
+	initialID, err := service.contentDirectory.SystemUpdateID(t.Context())
+	assert.NoError(t, err)
 
-	service.ServeHTTP(rw, req)
+	service.IncrementSystemUpdateID()
+	newID, err := service.contentDirectory.SystemUpdateID(t.Context())
+	assert.NoError(t, err)
+	assert.Equal(t, initialID+1, newID)
+}
 
-	if rw.Code != http.StatusOK {
-		t.Errorf("ServeHTTP returned status %d, expected %d", rw.Code, http.StatusOK)
+func TestService_SendUpdateNotification(t *testing.T) {
+	db := &mockDB{}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	service := NewService(db, "/upnp/", "/posters/", logger)
+
+	// When stopped (no-op)
+	service.SendUpdateNotification()
+
+	// When running
+	if err := service.Start("test-server", "127.0.0.1", 8080); err != nil {
+		t.Fatalf("service.Start() returned an error: %v", err)
+	}
+	defer func() { _ = service.Stop() }()
+
+	type notification struct {
+		body string
+		seq  string
+	}
+	notifications := make(chan notification, 2)
+	callback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		notifications <- notification{body: string(body), seq: r.Header.Get("Seq")}
+	}))
+	defer callback.Close()
+
+	subscribe := httptest.NewRequest("SUBSCRIBE", "/upnp/"+string(contentdirectory.Version1), http.NoBody)
+	subscribe.Header.Set("Nt", "upnp:event")
+	subscribe.Header.Set("Callback", "<"+callback.URL+">")
+	subscribeRecorder := httptest.NewRecorder()
+	service.ServeHTTP(subscribeRecorder, subscribe)
+	require.Equal(t, http.StatusOK, subscribeRecorder.Code)
+
+	select {
+	case initial := <-notifications:
+		assert.Equal(t, "0", initial.seq)
+		assert.Contains(t, initial.body, "<SystemUpdateID>")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for initial event")
+	}
+
+	service.IncrementSystemUpdateID()
+	updatedID, err := service.contentDirectory.SystemUpdateID(t.Context())
+	require.NoError(t, err)
+	service.SendUpdateNotification()
+
+	select {
+	case update := <-notifications:
+		assert.Equal(t, "1", update.seq)
+		assert.Contains(t, update.body, fmt.Sprintf("<SystemUpdateID>%d</SystemUpdateID>", updatedID))
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for update event")
 	}
 }
 
+// TestDeviceIcons verifies that deviceIcons rejects a missing directory.
 func TestMetricsPath(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -177,4 +304,10 @@ func TestMetricsPath(t *testing.T) {
 			assert.Equal(t, tc.expected, MetricsPath("/upnp/", tc.input))
 		})
 	}
+}
+
+func TestDeviceIcons(t *testing.T) {
+	baseURL, _ := url.Parse("http://127.0.0.1:8080")
+	_, err := deviceIcons(iconsFS, "nonexistent-dir", baseURL)
+	assert.Error(t, err)
 }

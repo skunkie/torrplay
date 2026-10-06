@@ -96,6 +96,12 @@ func defaultControllerRuntimeConfig() controllerRuntimeConfig {
 	}
 }
 
+func init() {
+	chi.RegisterMethod("SUBSCRIBE")
+	chi.RegisterMethod("UNSUBSCRIBE")
+	chi.RegisterMethod("NOTIFY")
+}
+
 type torrentInfo struct {
 	lastUsedAt time.Time
 	// memoryFallback reports that the torrent was loaded for file storage but
