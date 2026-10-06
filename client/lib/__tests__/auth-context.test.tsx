@@ -22,6 +22,7 @@ vi.mock('@/lib/api/auth', () => ({
 
 const buildTestSettings = (auth: Auth): Settings => ({
   auth,
+  corsAllowedOrigins: [],
   enableDlna: false,
   enableDownloader: false,
   enableStremio: false,

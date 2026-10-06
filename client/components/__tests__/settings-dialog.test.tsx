@@ -12,6 +12,7 @@ const mockUpdateSettings = vi.fn().mockResolvedValue(undefined);
 
 const buildMockSettings = (overrides = {}) => ({
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
+  corsAllowedOrigins: ['https://ui.example.com'],
   enableDlna: true,
   enableDownloader: true,
   enableStremio: true,
@@ -327,83 +328,6 @@ describe('SettingsDialog', () => {
     );
   });
 
-  it('Reset to Defaults resets torrent trackers to default values', async () => {
-    render(<SettingsDialog open={true}
-      onOpenChange={vi.fn()} />);
-
-    const trackersTextarea = screen.getByRole('textbox', { name: /torrent trackers/i });
-    expect(trackersTextarea).toHaveValue('udp://tracker.example.com:6969');
-
-    fireEvent.click(getResetToDefaultsButton());
-
-    await waitFor(() => {
-      expect(trackersTextarea).toHaveValue('');
-    });
-  });
-
-  it('Reset to Defaults disables downloader and clears file storage path', async () => {
-    render(<SettingsDialog open={true}
-      onOpenChange={vi.fn()} />);
-
-    await waitFor(() => {
-      const downloaderSwitch = screen.getByRole('switch', { name: /enable downloader/i });
-      expect(downloaderSwitch).toBeChecked();
-    });
-
-    const pathInput = screen.getByRole('textbox', { name: /file storage path/i });
-    await waitFor(() => {
-      expect(pathInput).toHaveValue('/torrplay');
-    });
-
-    fireEvent.click(getResetToDefaultsButton());
-
-    await waitFor(() => {
-      const downloaderSwitch = screen.getByRole('switch', { name: /enable downloader/i });
-      expect(downloaderSwitch).not.toBeChecked();
-      expect(pathInput).toHaveValue('');
-    });
-  });
-
-  it('clearing file storage path disables downloader automatically', async () => {
-    render(<SettingsDialog open={true}
-      onOpenChange={vi.fn()} />);
-
-    const pathInput = screen.getByRole('textbox', { name: /file storage path/i });
-    const downloaderSwitch = screen.getByRole('switch', { name: /enable downloader/i });
-
-    await waitFor(() => {
-      expect(downloaderSwitch).toBeChecked();
-      expect(pathInput).toHaveValue('/torrplay');
-    });
-
-    fireEvent.change(pathInput, { target: { value: '' } });
-
-    await waitFor(() => {
-      expect(downloaderSwitch).not.toBeChecked();
-    });
-  });
-
-  it('Reset to Defaults resets auth to enabled=false', async () => {
-    settingsRef.current = buildMockSettings({
-      auth: { enabled: true, type: 'basic', username: 'admin', password: '' },
-    });
-
-    render(<SettingsDialog open={true}
-      onOpenChange={vi.fn()} />);
-
-    await waitFor(() => {
-      const authSwitch = screen.getByRole('switch', { name: /enable authentication/i });
-      expect(authSwitch).toBeChecked();
-    });
-
-    fireEvent.click(getResetToDefaultsButton());
-
-    await waitFor(() => {
-      const authSwitch = screen.getByRole('switch', { name: /enable authentication/i });
-      expect(authSwitch).not.toBeChecked();
-    });
-  });
-
   it('keeps the stored password when the password field is left blank', async () => {
     settingsRef.current = buildMockSettings({
       auth: { enabled: true, type: 'basic', username: 'admin' },
@@ -519,6 +443,99 @@ describe('SettingsDialog', () => {
     });
 
     expect(mockUpdateSettings).not.toHaveBeenCalled();
+  });
+
+  it('saves additional trusted web origins', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const origins = screen.getByRole('textbox', { name: /additional web origins/i });
+    expect(origins).toHaveValue('https://ui.example.com');
+    fireEvent.change(origins, { target: { value: 'https://one.example.com\nhttps://two.example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockUpdateSettings).toHaveBeenCalledWith(expect.objectContaining({
+        corsAllowedOrigins: ['https://one.example.com', 'https://two.example.com'],
+      }));
+    });
+  });
+
+  it('Reset to Defaults resets torrent trackers to default values', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const trackersTextarea = screen.getByRole('textbox', { name: /torrent trackers/i });
+    expect(trackersTextarea).toHaveValue('udp://tracker.example.com:6969');
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      expect(trackersTextarea).toHaveValue('');
+    });
+  });
+
+  it('Reset to Defaults disables downloader and clears file storage path', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const downloaderSwitch = screen.getByRole('switch', { name: /enable downloader/i });
+      expect(downloaderSwitch).toBeChecked();
+    });
+
+    const pathInput = screen.getByRole('textbox', { name: /file storage path/i });
+    await waitFor(() => {
+      expect(pathInput).toHaveValue('/torrplay');
+    });
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      const downloaderSwitch = screen.getByRole('switch', { name: /enable downloader/i });
+      expect(downloaderSwitch).not.toBeChecked();
+      expect(pathInput).toHaveValue('');
+    });
+  });
+
+  it('clearing file storage path disables downloader automatically', async () => {
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    const pathInput = screen.getByRole('textbox', { name: /file storage path/i });
+    const downloaderSwitch = screen.getByRole('switch', { name: /enable downloader/i });
+
+    await waitFor(() => {
+      expect(downloaderSwitch).toBeChecked();
+      expect(pathInput).toHaveValue('/torrplay');
+    });
+
+    fireEvent.change(pathInput, { target: { value: '' } });
+
+    await waitFor(() => {
+      expect(downloaderSwitch).not.toBeChecked();
+    });
+  });
+
+  it('Reset to Defaults resets auth to enabled=false', async () => {
+    settingsRef.current = buildMockSettings({
+      auth: { enabled: true, type: 'basic', username: 'admin', password: '' },
+    });
+
+    render(<SettingsDialog open={true}
+      onOpenChange={vi.fn()} />);
+
+    await waitFor(() => {
+      const authSwitch = screen.getByRole('switch', { name: /enable authentication/i });
+      expect(authSwitch).toBeChecked();
+    });
+
+    fireEvent.click(getResetToDefaultsButton());
+
+    await waitFor(() => {
+      const authSwitch = screen.getByRole('switch', { name: /enable authentication/i });
+      expect(authSwitch).not.toBeChecked();
+    });
   });
 
   it('Reset button reverts torrentClient settings to server values', async () => {

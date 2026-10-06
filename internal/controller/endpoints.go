@@ -949,6 +949,20 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		newSettings.LogLevel = reqSettings.LogLevel
 	}
+	if reqSettings.CorsAllowedOrigins != nil {
+		normalizedOrigins := make([]string, 0, len(*reqSettings.CorsAllowedOrigins))
+		for _, origin := range *reqSettings.CorsAllowedOrigins {
+			normalized, valid := normalizeOrigin(origin)
+			if !valid || normalized == "*" {
+				api.HTTPError(w, fmt.Sprintf("invalid CORS origin: %q", origin), http.StatusBadRequest)
+				return
+			}
+			if !slices.Contains(normalizedOrigins, normalized) {
+				normalizedOrigins = append(normalizedOrigins, normalized)
+			}
+		}
+		newSettings.CorsAllowedOrigins = &normalizedOrigins
+	}
 	if reqSettings.LogFormat != nil {
 		newSettings.LogFormat = reqSettings.LogFormat
 	}
@@ -1006,6 +1020,9 @@ func (c *Controller) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.LogStoreSize, newSettings.LogStoreSize) {
+		saveSettings = true
+	}
+	if !slices.Equal(utils.Val(oldSettings.CorsAllowedOrigins), utils.Val(newSettings.CorsAllowedOrigins)) {
 		saveSettings = true
 	}
 	if utils.Differ(oldSettings.MaxMemory, newSettings.MaxMemory) {

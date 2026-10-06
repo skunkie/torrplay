@@ -18,6 +18,8 @@ func TestDefault(t *testing.T) {
 
 	require.NotNil(t, d.Auth)
 	assert.False(t, *d.Auth.Enabled)
+	require.NotNil(t, d.CorsAllowedOrigins)
+	assert.Empty(t, *d.CorsAllowedOrigins)
 
 	require.NotNil(t, d.EnableDlna)
 	assert.False(t, *d.EnableDlna)

@@ -1514,7 +1514,7 @@ func TestUpdateSettingsSerializesConcurrentPatches(t *testing.T) {
 	})
 	wg.Go(func() {
 		for i := range iterations {
-			patch(map[string]any{"friendly_name": fmt.Sprintf("name-%d", i)})
+			patch(map[string]any{"cors_allowed_origins": []string{fmt.Sprintf("https://host-%d.example", i)}})
 		}
 	})
 	wg.Wait()
@@ -1525,11 +1525,8 @@ func TestUpdateSettingsSerializesConcurrentPatches(t *testing.T) {
 	persisted := database.ToAPISettings(stored)
 	require.NotNil(t, persisted.Auth)
 	assert.Equal(t, fmt.Sprintf("user-%d", iterations-1), utils.Val(persisted.Auth.Username))
-	assert.Equal(t, fmt.Sprintf("name-%d", iterations-1), utils.Val(persisted.FriendlyName))
-	ctrl.mu.RLock()
+	assert.Equal(t, []string{fmt.Sprintf("https://host-%d.example", iterations-1)}, utils.Val(persisted.CorsAllowedOrigins))
 	assert.Equal(t, utils.Val(persisted.Auth.Username), utils.Val(ctrl.settings.Load().Auth.Username))
-	assert.Equal(t, utils.Val(persisted.FriendlyName), utils.Val(ctrl.settings.Load().FriendlyName))
-	ctrl.mu.RUnlock()
 }
 
 // TestController_Shutdown verifies that Shutdown is idempotent.

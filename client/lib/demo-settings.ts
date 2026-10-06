@@ -7,6 +7,7 @@
 import { Settings, TorrentClient } from '@/lib/types/api';
 
 export const demoDefaultSettings: Settings = {
+  corsAllowedOrigins: [],
   auth: { enabled: false, type: 'basic' as const, username: '', password: '' },
   enableDlna: false,
   enableDownloader: false,
