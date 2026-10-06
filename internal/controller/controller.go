@@ -264,7 +264,7 @@ func newController(dataDir string, ipAddr string, port int, dbClient database.Da
 	}
 	c.pieceCompletion = pc
 
-	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger.Load())
+	c.dlna = dlna.NewService(dbClient, c.dlnaPath, c.postersPath, c.logger.Load(), c.dlnaPlaybackToken)
 	c.metrics.SetEngineStatsSource(c.engineStats)
 
 	// Check for auth override environment variable. This allows a user to regain
@@ -522,25 +522,12 @@ func (c *Controller) authenticate(r *http.Request, scheme string) error {
 		}
 		return nil
 	case "queryTokenAuth":
-		if authType != api.Bearer {
+		return c.validatePlaybackQueryToken(r)
+	case "compatQueryTokenAuth":
+		if authType == api.Basic {
 			return nil
 		}
-		jwtSecret, err := c.db.GetJWTSecret()
-		if err != nil || jwtSecret == "" {
-			return errAuthNotConfigured
-		}
-		tokenString := r.URL.Query().Get("token")
-		if tokenString == "" {
-			return &api.AuthError{Message: "token query parameter is missing", Type: "query"}
-		}
-		claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
-		if err != nil {
-			return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "query"}
-		}
-		if claims.Scope != auth.PlaybackTokenScope {
-			return &api.AuthError{Message: "only playback-scoped tokens are accepted in URLs", Type: "query"}
-		}
-		return nil
+		return c.validatePlaybackQueryToken(r)
 	}
 
 	return errors.New("authentication failed")
@@ -568,6 +555,46 @@ func (c *Controller) reauthenticate(r *http.Request) (int, error) {
 		return http.StatusUnauthorized, err
 	}
 	return http.StatusOK, nil
+}
+
+func (c *Controller) validatePlaybackQueryToken(r *http.Request) error {
+	jwtSecret, err := c.db.GetJWTSecret()
+	if err != nil || jwtSecret == "" {
+		return errAuthNotConfigured
+	}
+
+	tokenString := r.URL.Query().Get("token")
+	if tokenString == "" {
+		return &api.AuthError{Message: "token query parameter is missing", Type: "query"}
+	}
+	claims, err := auth.ValidateToken(tokenString, []byte(jwtSecret))
+	if err != nil {
+		return &api.AuthError{Message: fmt.Sprintf("invalid token: %v", err), Type: "query"}
+	}
+	if claims.Scope != auth.PlaybackTokenScope {
+		return &api.AuthError{Message: "only playback-scoped tokens are accepted in URLs", Type: "query"}
+	}
+	return nil
+}
+
+func (c *Controller) dlnaPlaybackToken() (string, error) {
+	c.authMu.RLock()
+	defer c.authMu.RUnlock()
+
+	authSettings := c.settings.Load().Auth
+	enabled := authSettings != nil && utils.Val(authSettings.Enabled)
+
+	if !enabled {
+		return "", nil
+	}
+
+	secret, err := c.db.GetJWTSecret()
+	if err != nil || secret == "" {
+		return "", errAuthNotConfigured
+	}
+
+	token, _, err := auth.GeneratePlaybackToken([]byte(secret))
+	return token, err
 }
 
 func (c *Controller) SlogMiddleware() func(next http.Handler) http.Handler {

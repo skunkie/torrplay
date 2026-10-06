@@ -64,12 +64,16 @@ func (m *mockDB) GetTorrent(ih metainfo.Hash) (*database.Torrent, error) {
 // finishes. Using t.Cleanup guarantees the UPnP broadcast goroutine launched
 // by Start is cancelled before the next test (or the next -count iteration of
 // the same test) starts a new one.
-func newTestService(t *testing.T) (*Service, func()) {
+func newTestService(t *testing.T, playbackTokenProviders ...PlaybackTokenProvider) (*Service, func()) {
 	t.Helper()
 
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+	var playbackTokenProvider PlaybackTokenProvider
+	if len(playbackTokenProviders) > 0 {
+		playbackTokenProvider = playbackTokenProviders[0]
+	}
+	service := NewService(db, "/upnp/", "/posters/", logger, playbackTokenProvider)
 
 	require.NoError(t, service.Start("test-server", "127.0.0.1", 8080))
 
@@ -79,7 +83,7 @@ func newTestService(t *testing.T) (*Service, func()) {
 func TestNewService(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger, nil)
 
 	if service == nil {
 		t.Fatal("NewService returned nil")
@@ -123,7 +127,7 @@ func TestService_Start(t *testing.T) {
 	t.Run("unspecified IP", func(t *testing.T) {
 		db := &mockDB{}
 		logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-		service := NewService(db, "/upnp/", "/posters/", logger)
+		service := NewService(db, "/upnp/", "/posters/", logger, nil)
 
 		if err := service.Start("test-server", "0.0.0.0", 8080); err != nil {
 			t.Fatalf("service.Start() returned an error for an unspecified IP: %v", err)
@@ -171,7 +175,7 @@ func TestService_ServeHTTP(t *testing.T) {
 	t.Run("icons and not found", func(t *testing.T) {
 		db := &mockDB{}
 		logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-		service := NewService(db, "/upnp/", "/posters/", logger)
+		service := NewService(db, "/upnp/", "/posters/", logger, nil)
 
 		t.Run("handler is nil when stopped", func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/upnp/test", http.NoBody)
@@ -253,7 +257,7 @@ func TestAddHeader(t *testing.T) {
 func TestService_SetLogger(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger, nil)
 
 	newLogger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	service.SetLogger(newLogger)
@@ -263,7 +267,7 @@ func TestService_SetLogger(t *testing.T) {
 func TestService_IncrementSystemUpdateID(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger, nil)
 
 	// When content directory is nil (not started)
 	service.IncrementSystemUpdateID()
@@ -286,7 +290,7 @@ func TestService_IncrementSystemUpdateID(t *testing.T) {
 func TestService_SendUpdateNotification(t *testing.T) {
 	db := &mockDB{}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	service := NewService(db, "/upnp/", "/posters/", logger)
+	service := NewService(db, "/upnp/", "/posters/", logger, nil)
 
 	// When stopped (no-op)
 	service.SendUpdateNotification()

@@ -804,7 +804,7 @@ paths:
       description: Compatibility endpoint for streaming torrent content directly.
       operationId: tSPlay
       security:
-        - queryTokenAuth: []
+        - compatQueryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/Hash"
         - $ref: "#/components/parameters/TSIndex"
@@ -867,7 +867,7 @@ paths:
       description: Compatibility endpoint for streaming or preloading torrent content with various options.
       operationId: tSStream
       security:
-        - queryTokenAuth: []
+        - compatQueryTokenAuth: []
       parameters:
         - $ref: "#/components/parameters/TSLink"
         - $ref: "#/components/parameters/TSIndexQuery"
@@ -1019,6 +1019,10 @@ components:
       scheme: bearer
       bearerFormat: JWT
     queryTokenAuth:
+      type: apiKey
+      in: query
+      name: token
+    compatQueryTokenAuth:
       type: apiKey
       in: query
       name: token
