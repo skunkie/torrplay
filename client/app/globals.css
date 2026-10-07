@@ -68,6 +68,16 @@
     overflow-y: scroll;
   }
 
+  /*
+   * Radix Select temporarily adds data-scroll-locked to the body and hides
+   * its scrollbar. Keep the app's permanent scrollbar gutter in place so
+   * opening a dropdown does not resize the page behind a dialog.
+   */
+  html body[data-scroll-locked] {
+    margin-right: 0 !important;
+    overflow-y: scroll !important;
+  }
+
   /* Increase base font size for larger screens */
   @screen lg {
     html {

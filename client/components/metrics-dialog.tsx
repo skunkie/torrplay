@@ -8,7 +8,7 @@ import { VisuallyHidden } from '@radix-ui/react-visually-hidden';
 import { Loader2 } from 'lucide-react';
 import useSWR from 'swr';
 
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { getMemoryStats } from '@/lib/api/stats';
 import { getSystemMetrics } from '@/lib/api/system';
 
@@ -37,6 +37,7 @@ export function MetricsDialog({ open, onOpenChange }: MetricsDialogProps) {
         <DialogContent>
           <VisuallyHidden>
             <DialogTitle>Loading...</DialogTitle>
+            <DialogDescription>Loading system metrics</DialogDescription>
           </VisuallyHidden>
           <div className='flex items-center justify-center py-8'>
             <Loader2 className='h-8 w-8 animate-spin text-muted-foreground' />

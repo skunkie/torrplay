@@ -125,21 +125,6 @@ export function SettingsDialogLayout({
 }: SettingsDialogLayoutProps) {
   const IS_NATIVE = Capacitor.isNativePlatform();
   const IS_TAURI = isTauri();
-
-  const stremioManifestUrl = (() => {
-    const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
-    try {
-      const baseUrl = new URL(apiUrl || fallbackOrigin);
-      const tokenSegment = settings?.auth.enabled && settings.stremioToken
-        ? `${encodeURIComponent(settings.stremioToken)}/`
-        : '';
-      return new URL(`/stremio/${tokenSegment}manifest.json`, baseUrl).toString();
-    } catch {
-      return '/stremio/manifest.json';
-    }
-  })();
-
-  const stremioInstallUrl = stremioManifestUrl.replace(/^https?:\/\//, 'stremio://');
   const backFromLogsRef = React.useRef<HTMLButtonElement>(null);
   const viewLogsRef = React.useRef<HTMLButtonElement>(null);
   const previousLogsView = React.useRef(logsView);
@@ -156,6 +141,21 @@ export function SettingsDialogLayout({
     }
     previousLogsView.current = logsView;
   }, [logsView, open]);
+
+  const stremioManifestUrl = (() => {
+    const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
+    try {
+      const baseUrl = new URL(apiUrl || fallbackOrigin);
+      const tokenSegment = settings?.auth.enabled && settings.stremioToken
+        ? `${encodeURIComponent(settings.stremioToken)}/`
+        : '';
+      return new URL(`/stremio/${tokenSegment}manifest.json`, baseUrl).toString();
+    } catch {
+      return '/stremio/manifest.json';
+    }
+  })();
+
+  const stremioInstallUrl = stremioManifestUrl.replace(/^https?:\/\//, 'stremio://');
   const isLoadingSettings = open && !settings && !error;
   const canSaveServerSettings = settings != null;
   const [rateLimitUnit, setRateLimitUnit] = useState('MiB/s');
@@ -223,8 +223,15 @@ export function SettingsDialogLayout({
             {logsContent}
           </>
         )}
-        <div hidden={logsView}>
-          <div className='grid gap-y-6 py-4 max-h-[60vh] overflow-y-auto pr-3'>
+        <form hidden={logsView}
+          onSubmit={e => {
+            e.preventDefault();
+            if (!saving && (isApiUrlChangePending || canSaveServerSettings)) {
+              onSave();
+            }
+          }}>
+          <div tabIndex={0}
+            className='grid gap-y-6 py-4 max-h-[60vh] overflow-y-auto pr-3 focus:outline-none'>
             {!IS_NATIVE && (
               <div className='space-y-4'>
                 <h3 className='text-lg font-medium text-foreground'>API Configuration</h3>
@@ -758,6 +765,7 @@ export function SettingsDialogLayout({
                     </AccordionContent>
                   </AccordionItem>
                 </Accordion>
+
                 <div className='space-y-4'>
                   <h3 className='text-lg font-medium text-foreground'>Memory Management</h3>
 
@@ -847,23 +855,31 @@ export function SettingsDialogLayout({
             )}
           </div>
 
-          <DialogFooter className='flex-col gap-2 sm:flex-row'>
-            <Button variant='outline'
+          <DialogFooter className='flex-col gap-2 sm:flex-row mt-4'>
+            <Button
+              type='button'
+              variant='outline'
               onClick={onResetToDefaults}
               disabled={saving}
-              className='w-full sm:w-auto'>
+              className='w-full sm:w-auto'
+            >
               Reset to Defaults
             </Button>
             <div className='flex gap-2 w-full sm:w-auto sm:ml-auto'>
-              <Button variant='outline'
+              <Button
+                type='button'
+                variant='outline'
                 onClick={onReset}
                 disabled={saving}
-                className='flex-1 sm:flex-auto'>
+                className='flex-1 sm:flex-auto'
+              >
                 Reset
               </Button>
-              <Button onClick={onSave}
+              <Button
+                type='submit'
                 disabled={saving || (!isApiUrlChangePending && !canSaveServerSettings)}
-                className='flex-1 sm:flex-auto'>
+                className='flex-1 sm:flex-auto'
+              >
                 {saving ? (
                   <>
                     <Loader2 className='h-4 w-4 mr-2 animate-spin' />
@@ -875,7 +891,7 @@ export function SettingsDialogLayout({
               </Button>
             </div>
           </DialogFooter>
-        </div>
+        </form>
       </DialogContent>
     </Dialog>
   );

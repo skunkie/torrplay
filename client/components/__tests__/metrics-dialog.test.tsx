@@ -90,4 +90,19 @@ describe('MetricsDialog', () => {
     expect(screen.getByText(/120.56 KB\/s/)).toBeInTheDocument();
     expect(screen.getByText(/12.06 KB\/s/)).toBeInTheDocument();
   });
+
+  it('should render loading state with accessible title and description', () => {
+    mockGetMemoryStats.mockImplementation(() => new Promise(() => {}));
+    mockGetSystemMetrics.mockImplementation(() => new Promise(() => {}));
+
+    render(
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <MetricsDialog open={true}
+          onOpenChange={() => {}} />
+      </SWRConfig>
+    );
+
+    expect(screen.getByText('Loading...')).toBeInTheDocument();
+    expect(screen.getByText('Loading system metrics')).toBeInTheDocument();
+  });
 });
