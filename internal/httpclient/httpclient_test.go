@@ -75,3 +75,52 @@ func TestClientTimeout(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+func TestGetLimited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/redirect", http.StatusFound)
+		case "/scheme":
+			http.Redirect(w, r, "file:///etc/passwd", http.StatusFound)
+		case "/status":
+			w.WriteHeader(http.StatusNotFound)
+		case "/timeout":
+			<-r.Context().Done()
+		default:
+			_, _ = w.Write([]byte("12345"))
+		}
+	}))
+	defer server.Close()
+	client := NewWithClient(&http.Client{Timeout: 20 * time.Millisecond})
+	for _, tc := range []struct {
+		name, url string
+		limit     int64
+		fails     bool
+	}{
+		{"exact limit", server.URL, 5, false},
+		{"under limit", server.URL, 6, false},
+		{"oversize", server.URL, 4, true},
+		{"status", server.URL + "/status", 5, true},
+		{"redirect cap", server.URL + "/redirect", 5, true},
+		{"redirect scheme", server.URL + "/scheme", 5, true},
+		{"timeout", server.URL + "/timeout", 5, true},
+		{"scheme", "file:///etc/passwd", 5, true},
+		{"host", "http:///path", 5, true},
+		{"malformed", "http://%", 5, true},
+		{"negative limit", server.URL, -1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := client.GetLimited(t.Context(), tc.url, tc.limit)
+			if tc.fails {
+				require.Error(t, err)
+				assert.Nil(t, body)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, "12345", string(body))
+			}
+		})
+	}
+	assert.Equal(t, 30*time.Second, New().client.Timeout)
+	assert.Equal(t, 30*time.Second, NewWithClient(&http.Client{Timeout: time.Minute}).client.Timeout)
+}
