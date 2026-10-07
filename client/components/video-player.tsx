@@ -36,7 +36,7 @@ import {
   VolumeLowIcon
 } from '@vidstack/react/icons';
 import { X } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 interface VideoPlayerProps {
   options: {
@@ -163,7 +163,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
     }
   };
 
-  const toggleFullscreen = () => {
+  const toggleFullscreen = useCallback(() => {
     if (player.current) {
       if (isFullscreen) {
         player.current.exitFullscreen();
@@ -171,7 +171,51 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
         player.current.enterFullscreen();
       }
     }
-  };
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      const isInput = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || (activeEl as HTMLElement).isContentEditable);
+      if (isInput) return;
+
+      if (e.key === ' ' || e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        if (player.current) {
+          if (player.current.paused) {
+            player.current.play();
+          } else {
+            player.current.pause();
+          }
+        }
+      } else if (e.key === 'ArrowLeft') {
+        const isSlider = activeEl?.getAttribute('role') === 'slider';
+        if (!isSlider) {
+          e.preventDefault();
+          seek(-10);
+        }
+      } else if (e.key === 'ArrowRight') {
+        const isSlider = activeEl?.getAttribute('role') === 'slider';
+        if (!isSlider) {
+          e.preventDefault();
+          seek(10);
+        }
+      } else if (e.key === 'f' || e.key === 'F') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        if (player.current) {
+          player.current.muted = !player.current.muted;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [toggleFullscreen]);
 
   if (!preferenceLoaded) {
     return null;
@@ -202,24 +246,38 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
           </div>
         )}
         {onExit && (
-          <button onClick={() => onExit()}
-            className='absolute z-10 top-2 right-2 flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white ring-white/50 transition-all hover:bg-white/20 focus:ring-4'>
+          <button
+            onClick={() => onExit()}
+            aria-label='Close player'
+            className='absolute z-10 top-2 right-2 flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white ring-white/50 transition-all hover:bg-white/20 focus:ring-4 outline-none'
+          >
             <X className='h-6 w-6' />
+            <span className='sr-only'>Close player</span>
           </button>
         )}
         <div className='absolute inset-0 flex w-full items-center justify-center gap-x-4 group-data-[fullscreen]:gap-x-12'>
-          <div onClick={() => seek(-10)}
-            className='flex h-16 w-16 group-data-[fullscreen]:h-32 group-data-[fullscreen]:w-32 items-center justify-center rounded-full bg-white/50 text-white ring-white/50 transition-all hover:bg-primary/70 focus:ring-4'>
+          <button
+            type='button'
+            onClick={() => seek(-10)}
+            aria-label='Seek backward 10 seconds'
+            className='flex h-16 w-16 group-data-[fullscreen]:h-32 group-data-[fullscreen]:w-32 items-center justify-center rounded-full bg-white/50 text-white ring-white/50 transition-all hover:bg-primary/70 focus-visible:ring-4 outline-none'
+          >
             <SeekBackward10Icon className='h-10 w-10 group-data-[fullscreen]:h-20 group-data-[fullscreen]:w-20' />
-          </div>
+            <span className='sr-only'>Seek backward 10 seconds</span>
+          </button>
           <PlayButton className='flex h-20 w-20 group-data-[fullscreen]:h-36 group-data-[fullscreen]:w-36 items-center justify-center rounded-full bg-white/50 text-white ring-white/50 transition-all hover:bg-primary/70 focus-visible:ring-4 outline-none'>
             <PlayIcon className='h-12 w-12 group-data-[fullscreen]:h-24 group-data-[fullscreen]:w-24 hidden group-data-[paused]:block' />
             <PauseIcon className='h-12 w-12 group-data-[fullscreen]:h-24 group-data-[fullscreen]:w-24 hidden group-data-[playing]:block' />
           </PlayButton>
-          <div onClick={() => seek(10)}
-            className='flex h-16 w-16 group-data-[fullscreen]:h-32 group-data-[fullscreen]:w-32 items-center justify-center rounded-full bg-white/50 text-white ring-white/50 transition-all hover:bg-primary/70 focus:ring-4'>
+          <button
+            type='button'
+            onClick={() => seek(10)}
+            aria-label='Seek forward 10 seconds'
+            className='flex h-16 w-16 group-data-[fullscreen]:h-32 group-data-[fullscreen]:w-32 items-center justify-center rounded-full bg-white/50 text-white ring-white/50 transition-all hover:bg-primary/70 focus-visible:ring-4 outline-none'
+          >
             <SeekForward10Icon className='h-10 w-10 group-data-[fullscreen]:h-20 group-data-[fullscreen]:w-20' />
-          </div>
+            <span className='sr-only'>Seek forward 10 seconds</span>
+          </button>
         </div>
         <div className='absolute inset-x-0 bottom-0 w-full h-2/5 bg-gradient-to-t from-black/50 to-transparent pointer-events-none' />
         <Controls.Group className='absolute bottom-3 left-0 right-0 flex flex-col items-center px-2 py-4'>
@@ -245,13 +303,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit }) => {
                 <VolumeSlider.Thumb className='absolute left-[var(--slider-fill)] z-20 h-5 w-5 -translate-x-1/2 rounded-full border border-primary bg-white shadow-sm ring-white/40 will-change-[left] group-data-[active]:ring-4' />
               </VolumeSlider.Root>
               <Time type='duration' />
-              <button onClick={toggleFullscreen}
-                className='flex h-10 w-10 items-center justify-center rounded-full text-white ring-white/50 transition-all hover:bg-white/10 focus:ring-4'>
+              <button
+                type='button'
+                onClick={toggleFullscreen}
+                aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+                className='flex h-10 w-10 items-center justify-center rounded-full text-white ring-white/50 transition-all hover:bg-white/10 focus:ring-4 outline-none'
+              >
                 {isFullscreen ? (
                   <FullscreenExitIcon className='w-7 h-7' />
                 ) : (
                   <FullscreenIcon className='w-7 h-7' />
                 )}
+                <span className='sr-only'>{isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}</span>
               </button>
             </div>
           </div>
