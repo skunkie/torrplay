@@ -572,6 +572,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         onSettingsClick={() => updateModal('settings')}
         onSystemInfoClick={() => updateModal('system-info')}
         onTitleSearch={handleTitleFilterChange}
+        searchQuery={titleFilter}
         inert={Boolean(modal)}
       />
       <PageContainer inert={Boolean(modal)}>
