@@ -83,8 +83,13 @@ func run() error {
 
 	if !isWindowsService {
 		// Handle command-line arguments for non-service mode
-		if len(os.Args) > 1 && strings.ToLower(os.Args[1]) == "metadata" {
-			return runMetadataTool()
+		if len(os.Args) > 1 {
+			switch strings.ToLower(os.Args[1]) {
+			case "metadata":
+				return runMetadataTool()
+			case "mcp":
+				return runMCPTool()
+			}
 		}
 		// Run as a console app otherwise
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
