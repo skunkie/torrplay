@@ -582,6 +582,7 @@ function DemoContent() {
         torrent={selectedTorrent}
         open={modal === 'play' && !!selectedTorrent}
         onOpenChange={(isOpen: boolean) => !isOpen && updateModal(null)}
+        enablePreload={true}
       />
       <DemoDeleteTorrentDialog
         torrent={selectedTorrent}

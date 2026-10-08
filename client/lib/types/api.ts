@@ -199,12 +199,34 @@ interface TorrentUpdate {
   title?: string
 }
 
+// File index takes precedence when both fields are supplied. If both are omitted, file index 0 is preloaded.
+interface PreloadRequest {
+  fileIndex?: number,
+  filePath?: string,
+  magnet?: string
+}
+
+interface PreloadResponse {
+  activePeers: number,
+  completedBytes: number,
+  downloadRate: number,
+  // -1 means idle, evicted, failed, or readiness applies to the fully downloaded torrent.
+  fileIndex: number,
+  filePath?: string,
+  progress: number,
+  status: 'evicted' | 'failed' | 'idle' | 'preloading' | 'queued' | 'ready',
+  targetBytes: number,
+  totalPeers: number
+}
+
 export type {
   Auth,
   CreateTokenRequest,
   LogEntry,
   MemoryStats,
   PieceInfo,
+  PreloadRequest,
+  PreloadResponse,
   ReaderInfo,
   ScopedToken,
   Settings,

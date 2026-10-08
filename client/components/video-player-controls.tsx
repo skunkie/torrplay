@@ -35,8 +35,9 @@ import {
 import { X } from 'lucide-react';
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 
+import { formatBytes } from '@/lib/format-utils';
 import { type AudioTrackInfo } from '@/lib/mkv-audio';
-import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import { AudioTrackSelector } from './audio-track-selector';
 import { SubtitleTrackSelector } from './subtitle-track-selector';
@@ -153,7 +154,8 @@ interface VideoPlayerControlsProps {
   playlistNavigation?: {
     onPrevious?: () => void,
     onNext?: () => void
-  }
+  },
+  preloadBadge?: PreloadBadgeInfo | null
 }
 
 export function VideoPlayerControls({
@@ -169,6 +171,7 @@ export function VideoPlayerControls({
   selectedSubtitleTrack,
   onSelectSubtitleTrack,
   playlistNavigation,
+  preloadBadge,
 }: VideoPlayerControlsProps) {
   // At most one of the audio/subtitle track menus may be open at a time - opening one
   // closes the other, instead of letting both (and their overlapping click-outside
@@ -181,15 +184,46 @@ export function VideoPlayerControls({
 
   return (
     <>
+      {/* The title bar stays shown while preloading. On a small screen the
+          badge goes below it; on a larger one the badge, which matters more
+          then, stays at the top over the bar's left end. */}
+      {preloadBadge && (
+        <div
+          data-testid='player-preload-badge'
+          className={`pointer-events-none absolute ${title ? 'top-10' : 'top-2'} sm:top-3 left-2 sm:left-4 z-20 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/70 border border-white/10 text-xs font-medium text-white/90 shadow-md backdrop-blur-md`}
+        >
+          <span className='relative flex h-2 w-2'>
+            <span className='animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75' />
+            <span className='relative inline-flex rounded-full h-2 w-2 bg-sky-500' />
+          </span>
+          <span>Buffering {Math.min(100, Math.max(0, Math.round(preloadBadge.progress * 100)))}%</span>
+          {/* Gate both on totalPeers so a momentary 0 B/s rate stays visible once we have
+              real swarm data, instead of flickering in and out with the instantaneous rate. */}
+          {!!preloadBadge.totalPeers && (
+            <>
+              <span>· {formatBytes(preloadBadge.downloadRate ?? 0)}/s</span>
+              <span>· {preloadBadge.activePeers ?? 0}/{preloadBadge.totalPeers} peers</span>
+            </>
+          )}
+        </div>
+      )}
       <div className='pointer-events-none absolute inset-0 z-50 flex h-full w-full items-center justify-center'>
         <Spinner.Root
-          className='text-white opacity-0 transition-opacity duration-200 ease-linear media-buffering:animate-spin media-buffering:opacity-100'
+          className={`text-white transition-opacity duration-200 ease-linear ${
+            preloadBadge
+              ? 'animate-spin opacity-100'
+              : 'opacity-0 media-buffering:animate-spin media-buffering:opacity-100'
+          }`}
           size={84}
         >
-          <Spinner.Track className='opacity-25'
-            width={8} />
-          <Spinner.TrackFill className='opacity-75'
-            width={8} />
+          <Spinner.Track
+            className='opacity-25'
+            width={8}
+          />
+          <Spinner.TrackFill
+            className='opacity-75'
+            width={8}
+          />
         </Spinner.Root>
       </div>
       <div className='absolute inset-0 z-10 w-full opacity-0 group-data-[controls]:opacity-100 transition-opacity'>

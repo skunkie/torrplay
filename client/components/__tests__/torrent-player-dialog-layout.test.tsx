@@ -23,7 +23,6 @@ describe('TorrentPlayerDialogLayout', () => {
         open={true}
         onOpenChange={onOpenChange}
         videoFiles={mockVideoFiles}
-        selectedFile={null}
         setSelectedFile={setSelectedFile}
         isPlayerVisible={false}
         videoPlayerOptions={null}
@@ -44,7 +43,6 @@ describe('TorrentPlayerDialogLayout', () => {
         open={true}
         onOpenChange={onOpenChange}
         videoFiles={mockVideoFiles}
-        selectedFile={null}
         setSelectedFile={setSelectedFile}
         isPlayerVisible={false}
         videoPlayerOptions={null}
@@ -74,7 +72,6 @@ describe('TorrentPlayerDialogLayout', () => {
         open={true}
         onOpenChange={onOpenChange}
         videoFiles={mockVideoFiles}
-        selectedFile={mockVideoFiles[0]}
         setSelectedFile={setSelectedFile}
         isPlayerVisible={true}
         videoPlayerOptions={videoPlayerOptions}
@@ -95,7 +92,6 @@ describe('TorrentPlayerDialogLayout', () => {
         open={true}
         onOpenChange={onOpenChange}
         videoFiles={[]}
-        selectedFile={null}
         setSelectedFile={setSelectedFile}
         isPlayerVisible={false}
         videoPlayerOptions={null}
@@ -127,7 +123,6 @@ describe('TorrentPlayerDialogLayout', () => {
         open={true}
         onOpenChange={onOpenChange}
         videoFiles={mockVideoFiles}
-        selectedFile={mockVideoFiles[0]}
         setSelectedFile={setSelectedFile}
         isPlayerVisible={true}
         videoPlayerOptions={videoPlayerOptions}
@@ -162,7 +157,6 @@ describe('TorrentPlayerDialogLayout', () => {
         open={true}
         onOpenChange={onOpenChange}
         videoFiles={singleVideoFile}
-        selectedFile={singleVideoFile[0]}
         setSelectedFile={setSelectedFile}
         isPlayerVisible={true}
         videoPlayerOptions={videoPlayerOptions}
@@ -173,5 +167,31 @@ describe('TorrentPlayerDialogLayout', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
 
     expect(handleExit).toHaveBeenCalled();
+  });
+
+  it('renders preloading badge inside video player when preloadBadge is provided', () => {
+    render(
+      <TorrentPlayerDialogLayout
+        open={true}
+        onOpenChange={vi.fn()}
+        videoFiles={mockVideoFiles}
+        setSelectedFile={vi.fn()}
+        isPlayerVisible={true}
+        videoPlayerOptions={{
+          src: { src: 'http://test/video.mp4', type: 'video/mp4' },
+          title: 'episode1.mp4',
+          autoPlay: true,
+        }}
+        preloadBadge={{
+          progress: 0.7,
+          completedBytes: 7000000,
+          targetBytes: 10000000,
+        }}
+      />
+    );
+
+    const badge = screen.getByTestId('player-preload-badge');
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent('Buffering 70%');
   });
 });

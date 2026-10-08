@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { type TorrentFile } from '@/lib/types/api';
-import { type SubtitleTrackInfo } from '@/lib/video-utils';
+import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import { Button } from './ui/button';
 import { VideoPlayerLayout } from './video-player-layout';
@@ -22,7 +22,6 @@ interface TorrentPlayerDialogLayoutProps {
   open: boolean,
   onOpenChange: (open: boolean) => void,
   videoFiles: TorrentFile[],
-  selectedFile: TorrentFile | null,
   setSelectedFile: (file: TorrentFile) => void,
   isPlayerVisible: boolean,
   videoPlayerOptions: {
@@ -36,6 +35,7 @@ interface TorrentPlayerDialogLayoutProps {
     onPrevious?: () => void,
     onNext?: () => void
   },
+  preloadBadge?: PreloadBadgeInfo | null,
   isDemo?: boolean
 }
 
@@ -48,6 +48,7 @@ export const TorrentPlayerDialogLayout = ({
   videoPlayerOptions,
   handleExit,
   playlistNavigation,
+  preloadBadge,
   isDemo = false,
 }: TorrentPlayerDialogLayoutProps) => {
   if (isPlayerVisible && videoPlayerOptions) {
@@ -64,6 +65,7 @@ export const TorrentPlayerDialogLayout = ({
         options={videoPlayerOptions}
         onExit={handleExit}
         playlistNavigation={playlistNavigation}
+        preloadBadge={preloadBadge}
         isDemo={isDemo}
       />
     );
