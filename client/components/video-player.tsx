@@ -316,7 +316,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           if (onExit) onExit();
         } catch (error) {
           console.error(error);
-          if (onExit) onExit();
+          setUseExternalPlayer(false);
         }
       } else if (IS_NATIVE) {
         intentLaunched.current = true;
@@ -334,11 +334,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
             };
           }
 
-          IntentLauncher.startActivityAsync(intentPayload);
+          await IntentLauncher.startActivityAsync(intentPayload);
           if (onExit) onExit();
         } catch (error) {
           console.error('Failed to open URL with IntentLauncher', error);
-          if (onExit) onExit();
+          intentLaunched.current = false;
+          setUseExternalPlayer(false);
         }
       }
     };
