@@ -8,6 +8,7 @@ import { type VideoMimeType } from '@vidstack/react';
 import React from 'react';
 
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { type SubtitleTrackInfo } from '@/lib/video-utils';
 
 import VideoPlayer from './video-player';
 
@@ -20,7 +21,8 @@ interface VideoPlayerDialogProps {
       type: VideoMimeType
     },
     title: string,
-    autoPlay: boolean
+    autoPlay: boolean,
+    tracks?: SubtitleTrackInfo[]
   },
   onExit: () => void
 }

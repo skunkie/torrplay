@@ -507,4 +507,32 @@ describe('TorrentPlayerDialog', () => {
     });
   });
 
+  it('provides subtitle tracks from torrent files to the video player', () => {
+    const torrentWithSubs: Torrent = {
+      hash: 'subtorrent123',
+      title: 'Movie with Subs',
+      name: 'movie-subs',
+      magnet: 'magnet:?xt=urn:btih:subtorrent123',
+      files: [
+        { name: 'movie.mp4', path: 'movie.mp4', length: 5000 },
+        { name: 'movie.en.srt', path: 'subs/movie.en.srt', length: 50 },
+        { name: 'movie.es.vtt', path: 'subs/movie.es.vtt', length: 40 },
+      ],
+      storage: 'file',
+      pieceCount: 1,
+      pieceSize: 1,
+      totalSize: 5090,
+    };
+
+    render(
+      <TorrentPlayerDialog
+        torrent={torrentWithSubs}
+        open={true}
+        onOpenChange={vi.fn()}
+      />
+    );
+
+    const subButton = screen.getByRole('button', { name: /select subtitle track/i });
+    expect(subButton).toBeInTheDocument();
+  });
 });

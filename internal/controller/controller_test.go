@@ -217,6 +217,21 @@ func doGet(t *testing.T, router http.Handler, url string) *httptest.ResponseReco
 	return response.Recorder
 }
 
+func TestDemoStaticAssetRoute(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	found := false
+	err := chi.Walk(ctrl.router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if method == http.MethodGet && route == "/demo/*" {
+			found = true
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, found, "nested demo assets must be served by the static handler")
+}
+
 func addAllSampleTorrents(t *testing.T, ctrl *Controller) {
 	t.Helper()
 	for ih, magnet := range samples {

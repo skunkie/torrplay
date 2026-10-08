@@ -2,7 +2,8 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { render } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -37,11 +38,11 @@ describe('DemoVideoPlayer', () => {
   });
 
   it('shows seek backward and forward buttons', () => {
-    const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
+    render(<DemoVideoPlayer options={demoVideoOptions}
       onExit={vi.fn()} />);
 
-    const buttons = container.querySelectorAll('button');
-    expect(buttons.length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Seek backward 10 seconds' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Seek forward 10 seconds' })).toBeInTheDocument();
   });
 
   it('shows time slider controls', () => {
@@ -53,38 +54,23 @@ describe('DemoVideoPlayer', () => {
   });
 
   it('shows fullscreen control button', () => {
-    const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
+    render(<DemoVideoPlayer options={demoVideoOptions}
       onExit={vi.fn()} />);
 
-    const buttons = container.querySelectorAll('button');
-    expect(buttons.length).toBeGreaterThan(0);
-
-    let hasFullscreenButton = false;
-    buttons.forEach(btn => {
-      const svg = btn.querySelector('svg');
-      if (svg) {
-        const svgHtml = svg.outerHTML.toLowerCase();
-        if (svgHtml.includes('fullscreen') || svgHtml.includes('expand')) {
-          hasFullscreenButton = true;
-        }
-      }
-    });
-    expect(hasFullscreenButton).toBe(true);
+    expect(screen.getByRole('button', { name: 'Enter fullscreen' })).toBeInTheDocument();
   });
 
   it('shows close button when onExit is provided', () => {
-    const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
+    render(<DemoVideoPlayer options={demoVideoOptions}
       onExit={vi.fn()} />);
 
-    const closeButton = container.querySelector('button')?.closest('button');
-    expect(closeButton).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close player' })).toBeInTheDocument();
   });
 
   it('does not show close button when onExit is not provided', () => {
-    const { container } = render(<DemoVideoPlayer options={demoVideoOptions} />);
+    render(<DemoVideoPlayer options={demoVideoOptions} />);
 
-    const buttons = container.querySelectorAll('button');
-    expect(buttons.length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Close player' })).not.toBeInTheDocument();
   });
 
   it('has proper responsive design classes', () => {
@@ -123,14 +109,11 @@ describe('DemoVideoPlayer', () => {
 
   it('calls onExit when close button is clicked', async () => {
     const onExit = vi.fn();
-    const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
+    render(<DemoVideoPlayer options={demoVideoOptions}
       onExit={onExit} />);
 
-    const buttons = container.querySelectorAll('button');
-    expect(buttons.length).toBeGreaterThan(0);
-
-    const hasCloseButton = container.querySelector('button')?.closest('button');
-    expect(hasCloseButton).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Close player' }));
+    expect(onExit).toHaveBeenCalledTimes(1);
   });
 
   it('renders with proper text styling', () => {
@@ -141,11 +124,47 @@ describe('DemoVideoPlayer', () => {
     expect(textWhiteElements.length).toBeGreaterThan(0);
   });
 
-  it('renders audio track selector and allows selecting demo audio tracks', async () => {
+  it('does not fabricate audio tracks before media probing finds them', () => {
     const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
       onExit={vi.fn()} />);
 
     const audioTrackBtn = container.querySelector('button[aria-label="Select audio track"]');
-    expect(audioTrackBtn).toBeInTheDocument();
+    expect(audioTrackBtn).not.toBeInTheDocument();
+  });
+
+  it('always uses the internal player in demo mode', () => {
+    localStorage.setItem('external_player', 'vlc');
+    const { container } = render(<DemoVideoPlayer options={demoVideoOptions} />);
+
+    expect(container.querySelector('[data-media-player]')).toBeInTheDocument();
+    localStorage.removeItem('external_player');
+  });
+
+  it('shares the live player keyboard shortcut behavior', async () => {
+    render(<DemoVideoPlayer options={{
+      ...demoVideoOptions,
+      tracks: [{
+        id: 'english',
+        src: 'data:text/vtt,WEBVTT',
+        label: 'English',
+        type: 'vtt',
+        kind: 'subtitles',
+      }],
+    }} />);
+
+    fireEvent.keyDown(window, { key: 'c' });
+    await userEvent.click(screen.getByRole('button', { name: 'Select subtitle track' }));
+    expect(screen.getByRole('menuitemradio', { name: /English/ })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('uses the same accessible controls and visibility behavior as the live player', () => {
+    const { container } = render(<DemoVideoPlayer options={demoVideoOptions}
+      onExit={vi.fn()} />);
+
+    expect(screen.getByRole('button', { name: 'Play or pause' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mute or unmute' })).toBeInTheDocument();
+    expect(screen.getByRole('slider', { name: 'Seek' })).toBeInTheDocument();
+    expect(Array.from(container.querySelectorAll('div'))
+      .some(element => element.className.includes('group-data-[controls]:opacity-100'))).toBe(true);
   });
 });

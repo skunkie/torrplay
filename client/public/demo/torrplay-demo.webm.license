@@ -1,0 +1,14 @@
+SPDX-FileCopyrightText: 2016 Bjorn Falkevik
+SPDX-FileCopyrightText: 2026 TorrPlay contributors
+SPDX-License-Identifier: CC-BY-SA-4.0
+
+This file is adapted from “This is a 10 second testvideo with bars and tone”
+by Bjorn Falkevik:
+https://commons.wikimedia.org/wiki/File:This_is_a_10_second_testvideo_with_bars_and_tone.webm
+
+Original and adapted media are licensed under Creative Commons
+Attribution-ShareAlike 4.0 International:
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Changes: remuxed for the TorrPlay demo, with an additional named audio track
+and embedded WebVTT subtitles.
