@@ -49,11 +49,12 @@ export const TorrentPlayerDialog = ({ torrent, open, onOpenChange }: TorrentPlay
 
   const videoPlayerOptions = useMemo(() => {
     if (selectedFile && torrent) {
+      const streamUrl = getTorrentStreamUrl(torrent.hash, selectedFile.path);
+      const videoType = getVideoType(selectedFile.name);
       return {
-        src: {
-          src: getTorrentStreamUrl(torrent.hash, selectedFile.path),
-          type: getVideoType(selectedFile.name),
-        },
+        // Leave containers that Vidstack cannot describe untyped so the browser
+        // can determine the format instead of being told they are MP4.
+        src: videoType ? { src: streamUrl, type: videoType } : streamUrl,
         title: selectedFile.name,
         autoPlay: true,
       };
