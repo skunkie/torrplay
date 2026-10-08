@@ -73,3 +73,36 @@ describe('VideoPlayerControls', () => {
     expect(screen.queryByText(/Subtitles \(1\)/i)).not.toBeInTheDocument();
   });
 });
+
+describe('useVideoPlayerControls', () => {
+  it('toggleFullscreen decides from the live player state, not a stale isFullscreen mirror', async () => {
+    const enterFullscreen = vi.fn().mockResolvedValue(undefined);
+    const exitFullscreen = vi.fn().mockResolvedValue(undefined);
+    const rawPlayer = {
+      state: { fullscreen: false },
+      enterFullscreen,
+      exitFullscreen,
+    };
+    const player = { current: rawPlayer as unknown as MediaPlayerInstance };
+
+    const { result } = renderHook(() => useVideoPlayerControls({
+      player,
+      subtitleTracks: [],
+      selectedSubtitleTrack: null,
+      onSelectSubtitleTrack: vi.fn(),
+    }));
+
+    // The player is actually fullscreen (e.g. a source change forced the browser out
+    // of fullscreen and back in on a fresh player instance without the mirrored
+    // isFullscreen React state - which is still its initial `false` here - ever
+    // catching up). toggleFullscreen must still exit, not try to enter again.
+    rawPlayer.state.fullscreen = true;
+
+    await act(async () => {
+      result.current.toggleFullscreen();
+    });
+
+    expect(exitFullscreen).toHaveBeenCalledTimes(1);
+    expect(enterFullscreen).not.toHaveBeenCalled();
+  });
+});

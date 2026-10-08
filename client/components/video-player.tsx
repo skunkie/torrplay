@@ -38,13 +38,17 @@ export interface VideoPlayerProps {
     tracks?: SubtitleTrackInfo[]
   },
   onExit?: () => void,
+  playlistNavigation?: {
+    onPrevious?: () => void,
+    onNext?: () => void
+  },
   internalOnly?: boolean
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();
 const IS_TAURI = isTauri();
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, internalOnly = false }) => {
+const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, playlistNavigation, internalOnly = false }) => {
   const player = useRef<MediaPlayerInstance>(null);
   const intentLaunched = useRef(false);
   const [useExternalPlayer, setUseExternalPlayer] = useState(false);
@@ -364,7 +368,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, internalOnly
       onRateChange={handleRateChange}
       playsInline
     >
-      <MediaProvider />
+      {/* Keyed on streamUrl (not <MediaPlayer> itself) so switching sources forces a fresh
+          native media element - preventing stale/overlapping WASM audio across sources -
+          without removing the fullscreen element from the DOM. <MediaPlayer> is the element
+          the browser actually fullscreens, so keeping it mounted across playlist navigation
+          is what lets fullscreen survive next/previous. */}
+      <MediaProvider key={streamUrl ?? 'video-player'} />
       <VideoPlayerCaptions tracks={allSubtitleTracks}
         selectedTrackId={selectedSubtitleTrack} />
       <VideoPlayerControls
@@ -379,6 +388,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ options, onExit, internalOnly
         subtitleTracks={allSubtitleTracks}
         selectedSubtitleTrack={selectedSubtitleTrack}
         onSelectSubtitleTrack={handleSelectSubtitleTrack}
+        playlistNavigation={playlistNavigation}
       />
     </MediaPlayer>
   );

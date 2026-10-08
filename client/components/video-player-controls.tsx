@@ -23,8 +23,10 @@ import {
   FullscreenExitIcon,
   FullscreenIcon,
   MuteIcon,
+  NextIcon,
   PauseIcon,
   PlayIcon,
+  PreviousIcon,
   SeekBackward10Icon,
   SeekForward10Icon,
   VolumeHighIcon,
@@ -65,14 +67,18 @@ export function useVideoPlayerControls({
   const toggleFullscreen = useCallback(() => {
     if (!player.current) return;
     try {
-      const operation = isFullscreen
+      // Decide from the player's own live state rather than the isFullscreen closure
+      // value: a source change can force the browser out of fullscreen (e.g. removing
+      // the fullscreen element from the DOM) without onFullscreenChange ever reaching
+      // this player instance, leaving the mirrored state stale.
+      const operation = player.current.state.fullscreen
         ? player.current.exitFullscreen()
         : player.current.enterFullscreen();
       void Promise.resolve(operation).catch(error => console.error('Fullscreen error:', error));
     } catch (error) {
       console.error('Fullscreen error:', error);
     }
-  }, [isFullscreen, player]);
+  }, [player]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -143,7 +149,11 @@ interface VideoPlayerControlsProps {
   onSelectAudioTrack: (trackIndex: number) => void,
   subtitleTracks: SubtitleTrackInfo[],
   selectedSubtitleTrack: string | null,
-  onSelectSubtitleTrack: (trackId: string | null) => void
+  onSelectSubtitleTrack: (trackId: string | null) => void,
+  playlistNavigation?: {
+    onPrevious?: () => void,
+    onNext?: () => void
+  }
 }
 
 export function VideoPlayerControls({
@@ -158,6 +168,7 @@ export function VideoPlayerControls({
   subtitleTracks,
   selectedSubtitleTrack,
   onSelectSubtitleTrack,
+  playlistNavigation,
 }: VideoPlayerControlsProps) {
   // At most one of the audio/subtitle track menus may be open at a time - opening one
   // closes the other, instead of letting both (and their overlapping click-outside
@@ -240,6 +251,30 @@ export function VideoPlayerControls({
           <div className='w-full flex justify-between text-sm px-2 items-center'>
             <Time type='current' />
             <div className='flex items-center gap-x-2'>
+              {playlistNavigation && (
+                <>
+                  <button
+                    type='button'
+                    onClick={playlistNavigation.onPrevious}
+                    disabled={!playlistNavigation.onPrevious}
+                    aria-label='Previous video'
+                    className='flex h-10 w-10 items-center justify-center rounded-full text-white ring-white/50 transition-all hover:bg-white/10 focus:ring-4 outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent'
+                  >
+                    <PreviousIcon className='h-7 w-7' />
+                    <span className='sr-only'>Previous video</span>
+                  </button>
+                  <button
+                    type='button'
+                    onClick={playlistNavigation.onNext}
+                    disabled={!playlistNavigation.onNext}
+                    aria-label='Next video'
+                    className='flex h-10 w-10 items-center justify-center rounded-full text-white ring-white/50 transition-all hover:bg-white/10 focus:ring-4 outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent'
+                  >
+                    <NextIcon className='h-7 w-7' />
+                    <span className='sr-only'>Next video</span>
+                  </button>
+                </>
+              )}
               <MuteButton
                 aria-label='Mute or unmute'
                 className='flex h-10 w-10 items-center justify-center rounded-full text-white ring-white/50 transition-all hover:bg-white/10 focus:ring-4'
