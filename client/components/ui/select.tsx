@@ -11,9 +11,21 @@ import * as React from 'react';
 import { cn } from '@/lib/utils';
 
 function Select({
+  onValueChange,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Root>) {
+  // Radix syncs its hidden native select by dispatching a change event. When
+  // the value changes right after mounting (for example, when settings load
+  // while the dialog opens), the native select can report an empty string as
+  // a user change. Items cannot use an empty value, so drop it instead of
+  // clearing the controlled value. Uncontrolled selects are not protected
+  // because Radix stores the empty value before calling back.
+  const handleValueChange = React.useCallback((value: string) => {
+    if (value !== '') onValueChange?.(value);
+  }, [onValueChange]);
+
   return <SelectPrimitive.Root data-slot='select'
+    onValueChange={handleValueChange}
     {...props} />;
 }
 
