@@ -95,6 +95,8 @@ function enableNativeVideo() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Play Matroska, which jsdom, like Safari, reports it cannot.
+  vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockImplementation(type => type === 'video/x-matroska' ? 'maybe' : '');
   vi.stubGlobal('fetch', vi.fn(async () => new Response('WEBVTT\n\n')));
   vi.mocked(probeEmbeddedSubtitleTracks).mockResolvedValue([]);
   vi.mocked(loadEmbeddedSubtitleTrackVtt).mockImplementation(async (_url, _number, _fetch, _signal, onCues) => {

@@ -4,7 +4,7 @@
 
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import VideoPlayer from '@/components/video-player';
 import * as mkvAudioModule from '@/lib/mkv-audio';
@@ -73,9 +73,15 @@ vi.mock('@/lib/mkv-audio', async importOriginal => {
 describe('VideoPlayer MKV Audio Integration', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Play Matroska, which jsdom, like Safari, reports it cannot.
+    vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockImplementation(type => type === 'video/x-matroska' ? 'maybe' : '');
     mockEngine.selectTrack.mockReturnValue(true);
     mockEngine.setWasmActive.mockReturnValue(true);
     mockEngine.attachMediaElement.mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('probes audio tracks when source is MKV and initializes sync engine', async () => {

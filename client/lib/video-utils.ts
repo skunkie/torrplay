@@ -60,6 +60,24 @@ export const getVideoType = (filename?: string): VideoMimeType | undefined => {
   return undefined;
 };
 
+// isMatroskaStream reports whether a stream URL serves a Matroska (MKV) file,
+// named by its path query parameter, as in the TorrPlay stream API, or by the
+// URL path, as in Stremio playback URLs.
+export const isMatroskaStream = (url?: string): boolean => {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url, 'http://localhost');
+    return (parsed.searchParams.get('path') ?? parsed.pathname).toLowerCase().endsWith('.mkv');
+  } catch {
+    return false;
+  }
+};
+
+// canPlayMatroska reports whether the browser's video element may play a
+// Matroska file. Safari cannot play Matroska and reports so.
+export const canPlayMatroska = (): boolean =>
+  typeof document !== 'undefined' && document.createElement('video').canPlayType('video/x-matroska') !== '';
+
 export const getSubtitleType = (filename?: string): 'vtt' | 'srt' | 'ssa' | 'ass' | undefined => {
   if (!filename) return undefined;
   const lower = filename.toLowerCase();
