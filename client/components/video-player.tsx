@@ -9,6 +9,7 @@ import { ActivityAction, IntentLauncher, type IntentLauncherParams } from '@capg
 import { isTauri } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
+  type MediaErrorDetail,
   MediaPlayer,
   type MediaPlayerInstance,
   MediaProvider,
@@ -29,6 +30,22 @@ import { type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils
 import { getVidstackVideoElement } from '@/lib/vidstack-media';
 
 import { useVideoPlayerControls, VideoPlayerCaptions, VideoPlayerControls } from './video-player-controls';
+
+// Standard HTMLMediaElement error codes (MEDIA_ERR_*), which Vidstack forwards as-is
+// on `detail.code` for both native decode errors and its own source-resolution failures.
+const PLAYBACK_ERROR_MESSAGES: Record<number, string> = {
+  1: 'Playback was aborted.',
+  2: 'A network error interrupted playback. Check your connection and try again.',
+  3: 'This video could not be decoded by the internal player.',
+  4: 'This video container or codec is not supported by the internal player.',
+};
+
+function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
+  if (detail.code && PLAYBACK_ERROR_MESSAGES[detail.code]) {
+    return PLAYBACK_ERROR_MESSAGES[detail.code];
+  }
+  return detail.message || 'Playback failed in the internal player.';
+}
 
 export interface VideoPlayerProps {
   options: {
@@ -68,6 +85,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<number>(0);
   const [isWasmAudioActive, setIsWasmAudioActive] = useState<boolean>(false);
+  const [playbackError, setPlaybackError] = useState<{ source?: string, message: string } | null>(null);
   const syncEngineRef = useRef<MkvAudioSyncEngine | null>(null);
   const nativeAudioTrackIndexRef = useRef(0);
 
@@ -372,6 +390,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
   const handleCanPlay = useCallback(() => {
     canPlayRef.current = true;
+    setPlaybackError(null);
     if (!isPreloading && options.autoPlay) {
       tryPlay();
     }
@@ -392,6 +411,9 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     return null;
   }
 
+  const playbackErrorMessage = playbackError && playbackError.source === streamUrl
+    ? playbackError.message
+    : null;
   return (
     <MediaPlayer
       ref={player}
@@ -410,6 +432,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onSeeked={handleSeeked}
       onVolumeChange={handleVolumeChange}
       onRateChange={handleRateChange}
+      onError={detail => setPlaybackError({
+        source: streamUrl,
+        message: getPlaybackErrorMessage(detail),
+      })}
       playsInline
     >
       {/* Keyed on streamUrl (not <MediaPlayer> itself) so switching sources forces a fresh
@@ -418,6 +444,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
           the browser actually fullscreens, so keeping it mounted across playlist navigation
           is what lets fullscreen survive next/previous. */}
       <MediaProvider key={streamUrl ?? 'video-player'} />
+      {playbackErrorMessage && !isPreloading && (
+        <div
+          role='alert'
+          className='absolute inset-0 z-[5] flex items-center justify-center bg-black/85 px-6 text-center text-sm text-white sm:text-base'
+        >
+          {playbackErrorMessage}
+        </div>
+      )}
       <VideoPlayerCaptions tracks={allSubtitleTracks}
         selectedTrackId={selectedSubtitleTrack} />
       <VideoPlayerControls
