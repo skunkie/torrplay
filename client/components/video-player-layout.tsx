@@ -44,8 +44,11 @@ export const VideoPlayerLayout = ({
       open={open}
       onOpenChange={onOpenChange}
     >
-      <DialogContent variant='video'
-        showCloseButton={false}>
+      <DialogContent
+        variant='video'
+        showCloseButton={false}
+        onPointerDownOutside={e => e.preventDefault()}
+      >
         <DialogTitle className='sr-only'>{options.title ?? ''}</DialogTitle>
         <DialogDescription className='sr-only'>Video player for {options.title ?? 'video'}</DialogDescription>
         {open && (

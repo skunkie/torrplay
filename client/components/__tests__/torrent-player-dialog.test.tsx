@@ -346,6 +346,70 @@ describe('TorrentPlayerDialog', () => {
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  it('does not close the video player when clicking outside it, with a single file', async () => {
+    const onOpenChange = vi.fn();
+    render(
+      <TorrentPlayerDialog
+        torrent={mockTorrentSingleVideo}
+        open={true}
+        onOpenChange={onOpenChange}
+      />,
+    );
+
+    // Radix's outside-pointerdown listener attaches via a setTimeout(0) in an effect;
+    // let it register before firing, then give the (absent) dismissal a chance to happen.
+    await new Promise(resolve => setTimeout(resolve, 0));
+    fireEvent.pointerDown(document.body);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it('does not return to file selection when clicking outside the video player, with multiple files', async () => {
+    const onOpenChange = vi.fn();
+    render(
+      <TorrentPlayerDialog
+        torrent={mockTorrentMultipleVideos}
+        open={true}
+        onOpenChange={onOpenChange}
+      />,
+    );
+
+    const firstVideoButton = screen.getByText('video1.mp4');
+    fireEvent.click(firstVideoButton);
+
+    await waitFor(() => {
+      expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
+    });
+
+    fireEvent.pointerDown(document.body);
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(screen.queryByText('Select a video to play')).not.toBeInTheDocument();
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  it('still closes the file selection dialog when clicking outside it', async () => {
+    const onOpenChange = vi.fn();
+    render(
+      <TorrentPlayerDialog
+        torrent={mockTorrentMultipleVideos}
+        open={true}
+        onOpenChange={onOpenChange}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Select a video to play')).toBeInTheDocument();
+    });
+
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() => {
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    });
+  });
+
   it('does not exit video player immediately after selecting a file', async () => {
     const onOpenChange = vi.fn();
     render(
