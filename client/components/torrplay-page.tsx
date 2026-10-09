@@ -26,6 +26,7 @@ import { SystemInfoDialog } from '@/components/system-info-dialog';
 import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
 import { TorrentStatsDialog } from '@/components/torrent-stats-dialog';
+import { UpdateDialog } from '@/components/update-dialog';
 import { useKeyboardNavigation } from '@/hooks/use-keyboard-navigation';
 import { useTorrentFilterSettings } from '@/hooks/use-torrent-filter-settings';
 import {
@@ -34,6 +35,7 @@ import {
   getTorrents,
 } from '@/lib/api/torrents';
 import { getApiBaseUrl, HttpError } from '@/lib/api-client';
+import { useOptionalAppUpdate } from '@/lib/app-update-context';
 import { useAuth } from '@/lib/auth-context';
 import { useLiveUpdates } from '@/lib/live-updates-context';
 import type { Torrent } from '@/lib/types/api';
@@ -68,6 +70,7 @@ async function pollForTorrentReady(hash: string, timeout = 30000): Promise<Torre
 
 export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
   const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
+  const appUpdate = useOptionalAppUpdate();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -515,6 +518,8 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     closeHandlingDialog();
   };
 
+  const hasOpenDialog = Boolean(modal) || Boolean(appUpdate?.isDialogOpen);
+
   return (
     <>
       <Header
@@ -525,9 +530,9 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         onSystemInfoClick={() => updateModal('system-info')}
         onTitleSearch={handleTitleFilterChange}
         searchQuery={titleFilter}
-        inert={Boolean(modal)}
+        inert={hasOpenDialog}
       />
-      <PageContainer inert={Boolean(modal)}>
+      <PageContainer inert={hasOpenDialog}>
         <TorrentControls
           torrentsData={torrentsData}
           torrents={categories}
@@ -553,6 +558,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
         onOpenChange={() => updateModal(null)} />
       <SystemInfoDialog open={modal === 'system-info'}
         onOpenChange={() => updateModal(null)} />
+      <UpdateDialog deferWhile={Boolean(modal)} />
       <TorrentStatsDialog
         torrent={selectedTorrent}
         open={modal === 'stats' && !!selectedTorrent}
