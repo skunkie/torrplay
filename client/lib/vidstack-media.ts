@@ -26,3 +26,13 @@ export function getVidstackVideoElement(player: MediaPlayerInstance | null): HTM
   return asVideoElement(playerElement?.querySelector('video'))
     ?? asVideoElement(playerElement?.shadowRoot?.querySelector('video'));
 }
+
+/**
+ * Returns the playback position of the player's video element, or Vidstack's
+ * own when the element cannot be found. Vidstack updates its position only
+ * after a seek reports progress, so right after the resume seek it still
+ * reports the start of the file.
+ */
+export function getVidstackCurrentTime(player: MediaPlayerInstance | null): number {
+  return getVidstackVideoElement(player)?.currentTime ?? player?.currentTime ?? 0;
+}

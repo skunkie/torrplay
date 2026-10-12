@@ -7,6 +7,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { cancelPreload, getPreload, getTorrentStreamUrl, startPreload } from '@/lib/api/torrents';
+import { getPlaybackPositionSeconds, type PlaybackPositionKey } from '@/lib/playback-position';
 import { type PreloadRequest, type PreloadResponse, type Torrent, type TorrentFile } from '@/lib/types/api';
 import { getInitialVideoFile, getSubtitleTracksForVideo, getVideoFiles, getVideoType } from '@/lib/video-utils';
 
@@ -173,7 +174,11 @@ export const TorrentPlayerDialog = ({
     setActivePeers(0);
     setTotalPeers(0);
 
+    // Playback resumes from the file's saved position, so the preload caches
+    // the data there as well.
     const preloadRequest: PreloadRequest = { filePath: currentSelectedFile.path };
+    const playbackPositionSeconds = getPlaybackPositionSeconds(currentTorrent.hash, currentSelectedFile.path);
+    if (playbackPositionSeconds > 0) preloadRequest.playbackPositionSeconds = playbackPositionSeconds;
 
     // applyStatus shows a preload status, and reports whether the player has
     // stopped waiting for the preload, because it ended, is queued, or is
@@ -297,6 +302,10 @@ export const TorrentPlayerDialog = ({
   }, [selectedFile, torrent]);
 
   const isPlayerVisible = !!videoPlayerOptions;
+  const positionKey = useMemo<PlaybackPositionKey | undefined>(
+    () => (torrentHash && selectedFilePath ? { hash: torrentHash, filePath: selectedFilePath } : undefined),
+    [selectedFilePath, torrentHash],
+  );
   const selectedFileIndex = selectedFile
     ? videoFiles.findIndex(file => file.path === selectedFile.path)
     : -1;
@@ -350,6 +359,7 @@ export const TorrentPlayerDialog = ({
       handleExit={handleExit}
       playlistNavigation={playlistNavigation}
       preloadBadge={preloadBadge}
+      positionKey={positionKey}
     />
   );
 };

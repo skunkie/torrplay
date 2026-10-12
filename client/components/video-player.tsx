@@ -26,8 +26,9 @@ import {
   probeAudioTracks,
 } from '@/lib/mkv-audio';
 import { isMkvOrWebmStream } from '@/lib/mkv-subtitles';
+import { getPlaybackPositionSeconds, type PlaybackPositionKey, savePlaybackPositionSeconds } from '@/lib/playback-position';
 import { canPlayMatroska, isMatroskaStream, type PreloadBadgeInfo, type SubtitleTrackInfo } from '@/lib/video-utils';
-import { getVidstackVideoElement } from '@/lib/vidstack-media';
+import { getVidstackCurrentTime, getVidstackVideoElement } from '@/lib/vidstack-media';
 
 import { useVideoPlayerControls, VideoPlayerCaptions, VideoPlayerControls } from './video-player-controls';
 
@@ -40,6 +41,13 @@ const PLAYBACK_ERROR_MESSAGES: Record<number, string> = {
   4: 'This video container or codec is not supported by the internal player.',
 };
 
+// MATROSKA_UNSUPPORTED_MESSAGE replaces an MKV file where the video element
+// cannot play Matroska, as in Safari, every iOS browser, and the macOS app's
+// WebKit view. Such an element is never given the file: Safari may load it
+// indefinitely without reporting an error.
+const MATROSKA_UNSUPPORTED_MESSAGE =
+  'MKV files cannot be played here. Open the file in an external player.';
+
 function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
   if (detail.code && PLAYBACK_ERROR_MESSAGES[detail.code]) {
     return PLAYBACK_ERROR_MESSAGES[detail.code];
@@ -47,12 +55,9 @@ function getPlaybackErrorMessage(detail: MediaErrorDetail): string {
   return detail.message || 'Playback failed in the internal player.';
 }
 
-// MATROSKA_UNSUPPORTED_MESSAGE replaces an MKV file where the video element
-// cannot play Matroska, as in Safari, every iOS browser, and the macOS app's
-// WebKit view. Such an element is never given the file: Safari may load it
-// indefinitely without reporting an error.
-const MATROSKA_UNSUPPORTED_MESSAGE =
-  'MKV files cannot be played here. Open the file in an external player.';
+// PLAYBACK_POSITION_SAVE_INTERVAL_MS is how often playback saves its position
+// while it plays. Pausing, seeking, and leaving the source save it at once.
+const PLAYBACK_POSITION_SAVE_INTERVAL_MS = 5000;
 
 export interface VideoPlayerProps {
   options: {
@@ -67,7 +72,10 @@ export interface VideoPlayerProps {
     onNext?: () => void
   },
   internalOnly?: boolean,
-  preloadBadge?: PreloadBadgeInfo | null
+  preloadBadge?: PreloadBadgeInfo | null,
+  // positionKey, when set, names the torrent file whose playback resumes from
+  // its saved position and saves its position as it plays.
+  positionKey?: PlaybackPositionKey
 }
 
 const IS_NATIVE = Capacitor.isNativePlatform();
@@ -79,6 +87,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   playlistNavigation,
   internalOnly = false,
   preloadBadge,
+  positionKey,
 }) => {
   const isPreloading = !!preloadBadge;
   const player = useRef<MediaPlayerInstance>(null);
@@ -87,6 +96,14 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
   const [preferenceLoaded, setPreferenceLoaded] = useState(internalOnly);
   const hasPlayedRef = useRef(false);
   const handleEndedRef = useRef<(() => void) | null>(null);
+  // resumeFromRef holds the saved position the current source resumes from,
+  // and resumedRef whether the source has had its chance to resume. Positions
+  // are recorded only after that, so the start of a source never overwrites
+  // its saved position.
+  const resumeFromRef = useRef(0);
+  const resumedRef = useRef(false);
+  const lastPositionRef = useRef<number | null>(null);
+  const lastPositionSaveMsRef = useRef(0);
 
   // Audio track management
   const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
@@ -103,6 +120,40 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       : undefined;
 
   const matroskaUnsupported = useMemo(() => isMatroskaStream(streamUrl) && !canPlayMatroska(), [streamUrl]);
+
+  const positionHash = positionKey?.hash;
+  const positionFilePath = positionKey?.filePath;
+
+  // Each source resumes from the position saved for it when it loads, and its
+  // latest position is saved when it is left or the page is hidden.
+  useEffect(() => {
+    resumeFromRef.current = positionHash && positionFilePath
+      ? getPlaybackPositionSeconds(positionHash, positionFilePath)
+      : 0;
+    resumedRef.current = false;
+    lastPositionRef.current = null;
+    lastPositionSaveMsRef.current = 0;
+    const flush = () => {
+      if (positionHash && positionFilePath && lastPositionRef.current !== null) {
+        savePlaybackPositionSeconds(positionHash, positionFilePath, lastPositionRef.current);
+      }
+    };
+    window.addEventListener('pagehide', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      flush();
+    };
+  }, [positionHash, positionFilePath, streamUrl]);
+
+  const recordPosition = (positionSeconds: number, force: boolean) => {
+    if (!positionHash || !positionFilePath || !resumedRef.current || !hasPlayedRef.current) return;
+    if (!Number.isFinite(positionSeconds) || positionSeconds < 0) return;
+    lastPositionRef.current = positionSeconds;
+    const now = Date.now();
+    if (!force && now - lastPositionSaveMsRef.current < PLAYBACK_POSITION_SAVE_INTERVAL_MS) return;
+    lastPositionSaveMsRef.current = now;
+    savePlaybackPositionSeconds(positionHash, positionFilePath, positionSeconds);
+  };
 
   const isMkv = isMkvOrWebmStream(streamUrl) ||
     (typeof options.src === 'object' && 'type' in options.src && options.src.type === 'video/webm');
@@ -196,7 +247,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
 
             // If the player is already playing when probing finishes, start audio immediately
             if (player.current && !player.current.paused) {
-              engine.onPlay(player.current.currentTime);
+              engine.onPlay(getVidstackCurrentTime(player.current));
             }
           } else {
             setIsWasmAudioActive(false);
@@ -245,7 +296,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       setIsWasmAudioActive(activated);
       if (!activated) return;
       if (player.current && !player.current.paused) {
-        engine.onPlay(player.current.currentTime);
+        engine.onPlay(getVidstackCurrentTime(player.current));
       }
     } else {
       engine.setNativeTrackIndex(index);
@@ -259,6 +310,8 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onPause();
     }
+    // A finished file starts from the beginning next time.
+    recordPosition(0, true);
     if (handleEndedRef.current && hasPlayedRef.current) {
       handleEndedRef.current();
     }
@@ -269,7 +322,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (syncEngineRef.current && player.current) {
       const videoEl = getVidstackVideoElement(player.current);
       if (videoEl && syncEngineRef.current.attachMediaElement(videoEl) && isWasmAudioActive) {
-        syncEngineRef.current.onPlay(player.current.currentTime);
+        syncEngineRef.current.onPlay(getVidstackCurrentTime(player.current));
       } else if (isWasmAudioActive) {
         syncEngineRef.current.setWasmActive(false);
         setIsWasmAudioActive(false);
@@ -281,11 +334,17 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onPause();
     }
+    if (player.current && !player.current.state?.ended) {
+      recordPosition(getVidstackCurrentTime(player.current), true);
+    }
   };
 
   const handleSeeked = () => {
     if (isWasmAudioActive && syncEngineRef.current && player.current) {
-      syncEngineRef.current.onSeek(player.current.currentTime);
+      syncEngineRef.current.onSeek(getVidstackCurrentTime(player.current));
+    }
+    if (player.current) {
+      recordPosition(getVidstackCurrentTime(player.current), true);
     }
   };
 
@@ -293,6 +352,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (isWasmAudioActive && syncEngineRef.current) {
       syncEngineRef.current.onTimeUpdate(detail.currentTime);
     }
+    recordPosition(detail.currentTime, false);
   };
 
   const handleWaiting = () => {
@@ -305,7 +365,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     if (syncEngineRef.current && player.current) {
       const videoEl = getVidstackVideoElement(player.current);
       if (videoEl && syncEngineRef.current.attachMediaElement(videoEl) && isWasmAudioActive) {
-        syncEngineRef.current.onPlaying(player.current.currentTime);
+        syncEngineRef.current.onPlaying(getVidstackCurrentTime(player.current));
       } else if (isWasmAudioActive) {
         syncEngineRef.current.setWasmActive(false);
         setIsWasmAudioActive(false);
@@ -397,13 +457,31 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     }
   }, []);
 
+  // resume seeks the source to its saved position once. It seeks the video
+  // element as soon as its metadata loads, since Vidstack defers its own seeks
+  // until the source can play, by which time the browser has buffered the
+  // start of the file. Vidstack is given the position too, so the seek it
+  // defers does not return the source to where it started.
+  const resume = useCallback(() => {
+    if (resumedRef.current || !player.current) return;
+    resumedRef.current = true;
+    const resumeFrom = resumeFromRef.current;
+    const videoEl = getVidstackVideoElement(player.current);
+    const duration = videoEl?.duration ?? player.current.duration;
+    if (resumeFrom > 0 && (!duration || resumeFrom < duration)) {
+      if (videoEl) videoEl.currentTime = resumeFrom;
+      player.current.currentTime = resumeFrom;
+    }
+  }, []);
+
   const handleCanPlay = useCallback(() => {
     canPlayRef.current = true;
     setPlaybackError(null);
+    resume();
     if (!isPreloading && options.autoPlay) {
       tryPlay();
     }
-  }, [isPreloading, options.autoPlay, tryPlay]);
+  }, [isPreloading, options.autoPlay, resume, tryPlay]);
 
   useEffect(() => {
     if (prevPreloadingRef.current && !isPreloading && options.autoPlay) {
@@ -425,6 +503,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
     : playbackError && playbackError.source === streamUrl
       ? playbackError.message
       : null;
+
   return (
     <MediaPlayer
       ref={player}
@@ -432,6 +511,7 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({
       title={options.title}
       src={isPreloading || matroskaUnsupported ? undefined : options.src}
       autoPlay={options.autoPlay && !isPreloading}
+      onLoadedMetadata={resume}
       onCanPlay={handleCanPlay}
       onFullscreenChange={setIsFullscreen}
       onEnded={handleEnded}

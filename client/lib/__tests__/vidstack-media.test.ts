@@ -5,7 +5,7 @@
 import { type MediaPlayerInstance } from '@vidstack/react';
 import { describe, expect, it } from 'vitest';
 
-import { getVidstackVideoElement } from '../vidstack-media';
+import { getVidstackCurrentTime, getVidstackVideoElement } from '../vidstack-media';
 
 function playerWith(provider: unknown, element: HTMLElement): MediaPlayerInstance {
   return { provider, el: element } as unknown as MediaPlayerInstance;
@@ -36,5 +36,22 @@ describe('getVidstackVideoElement', () => {
 
     expect(getVidstackVideoElement(playerWith({}, root))).toBe(video);
     expect(getVidstackVideoElement(null)).toBeNull();
+  });
+});
+
+describe('getVidstackCurrentTime', () => {
+  it('reads the video element, which Vidstack may lag behind after a seek', () => {
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { value: 40, configurable: true });
+    const player = { provider: { media: video }, el: document.createElement('div'), currentTime: 0 };
+
+    expect(getVidstackCurrentTime(player as unknown as MediaPlayerInstance)).toBe(40);
+  });
+
+  it('falls back to Vidstack without a video element, and to zero without a player', () => {
+    const player = { provider: null, el: document.createElement('div'), currentTime: 12 };
+
+    expect(getVidstackCurrentTime(player as unknown as MediaPlayerInstance)).toBe(12);
+    expect(getVidstackCurrentTime(null)).toBe(0);
   });
 });

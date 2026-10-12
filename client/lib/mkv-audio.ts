@@ -252,6 +252,26 @@ export class MkvAudioSyncEngine {
     this.lastVideoFrameWallTime = null;
   }
 
+  // ensureVideoFrameSync starts observing the bound element's frames once
+  // playback starts, not when the element is attached, which happens before
+  // the player seeks to a saved position.
+  //
+  // A pending requestVideoFrameCallback changes how Chromium starts a source:
+  // it reports loadedmetadata before the first frame is ready (readyState 1
+  // rather than 4) and fires canplay only after the first seek completes. In
+  // the player, with the callback pending before the resume seek, Chromium
+  // then never reads the Matroska Cues and reaches the seek target by reading
+  // the file from its start, which a resume at 40 seconds took 30 seconds and
+  // 112 MB to do. A bare video element with the same callback, Web Audio
+  // routing, and play() during the seek seeks through the Cues, so another
+  // part of the player completes the trigger; it has not been isolated.
+  // Observing frames from playback on avoids it.
+  private ensureVideoFrameSync() {
+    if (this.boundElement && this.videoFrameElement !== this.boundElement) {
+      this.startVideoFrameSync(this.boundElement);
+    }
+  }
+
   private startVideoFrameSync(videoEl: HTMLMediaElement) {
     if (!(videoEl instanceof HTMLVideoElement) ||
       typeof videoEl.requestVideoFrameCallback !== 'function') return;
@@ -344,8 +364,6 @@ export class MkvAudioSyncEngine {
         this.updateGains();
         this.onError?.(err);
       }
-
-      this.startVideoFrameSync(videoEl);
     }
 
     this.syncAudioTracks();
@@ -378,6 +396,7 @@ export class MkvAudioSyncEngine {
 
   public onPlay(currentTime: number) {
     this.isPaused = false;
+    this.ensureVideoFrameSync();
     const ctx = this.initAudioContext();
     if (ctx.state === 'suspended') {
       ctx.resume();
@@ -389,6 +408,7 @@ export class MkvAudioSyncEngine {
 
   public onPlaying(currentTime: number) {
     this.isPaused = false;
+    this.ensureVideoFrameSync();
     const ctx = this.initAudioContext();
     if (ctx.state === 'suspended') {
       ctx.resume();
