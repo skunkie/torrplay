@@ -1078,6 +1078,9 @@ func (c *Controller) configureTorrentClient() error {
 			}
 		},
 		PriorityWindowFraction: 0.15,
+		// A player reads a container header before seeking to where playback
+		// starts, so a new reader reads ahead little until it reads on.
+		ReadaheadRampBytes: 1 << 20,
 		ReadObserver: func(mode stream.StorageMode, duration time.Duration) {
 			if mode == stream.FileStorage {
 				observeFileRead(duration)

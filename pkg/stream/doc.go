@@ -76,6 +76,16 @@
 // configured FileReadaheadBytes while active. Lingering readers hold no share
 // of the budget.
 //
+// With ReadaheadRampBytes set, a new reader, and one after a seek, reads ahead
+// at most twice what it has read since, and at least ReadaheadRampBytes or one
+// piece, until it reaches the readahead its share allows. A player's request
+// that reads only a container header before seeking to where playback starts
+// then downloads little past the header. A reader whose first read lands where
+// a reader of its file released within LingerTimeout stopped, as a player's
+// next range request does, continues that reader's ramp, even when another
+// reader of the file, such as one for audio decoding, kept the released one
+// from lingering.
+//
 // # Preloads
 //
 // Preload caches the head and tail of a file, where containers keep their

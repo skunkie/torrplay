@@ -1492,21 +1492,162 @@ func BenchmarkPriorityClaimResetAndClear(b *testing.B) {
 	}
 }
 
-func TestPoolAcquireSetsReadaheadShare(t *testing.T) {
-	const pieceLength = 64 << 10
-	c := newTestTorrentClient(t)
-	_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
-	pool := newTestPool(t, Config{Logger: testLogger()})
-	pool.SetReadaheadBudget(64 << 20)
-
-	_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
-	require.NoError(t, err)
-	defer release()
-
-	pool.mu.Lock()
-	defer pool.mu.Unlock()
-	plan := pool.planReadaheadLocked()
-	for _, sr := range pool.readers {
-		assert.Equal(t, readaheadForShare(plan.share, filePieceLength(sr.file)), sr.readahead, "a reader gets its readahead share")
+func TestReadaheadRamp(t *testing.T) {
+	const pieceLength, ramp = 64 << 10, 128 << 10
+	newReader := func(t *testing.T, mode StorageMode) (*Pool, *streamReader) {
+		t.Helper()
+		c := newTestTorrentClient(t)
+		_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
+		pool := newTestPool(t, Config{Logger: testLogger(), ReadaheadRampBytes: ramp, FileReadaheadBytes: 8 << 20})
+		pool.SetReadaheadBudget(64 << 20)
+		_, release, err := pool.Acquire(context.Background(), file, mode)
+		require.NoError(t, err)
+		t.Cleanup(release)
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		for _, sr := range pool.readers {
+			return pool, sr
+		}
+		t.Fatal("no reader")
+		return nil, nil
 	}
+	readahead := func(pool *Pool, sr *streamReader) int64 {
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		return sr.readahead
+	}
+	// readSequentially reports reads a piece apart from start to end.
+	readSequentially := func(pool *Pool, sr *streamReader, start, end int64) {
+		for offset := start; offset <= end; offset += pieceLength {
+			pool.updateReaderPosition(sr.readerID, offset)
+		}
+	}
+
+	for _, mode := range []StorageMode{MemoryStorage, FileStorage} {
+		t.Run(mode.String(), func(t *testing.T) {
+			pool, sr := newReader(t, mode)
+			assert.Equal(t, int64(ramp), readahead(pool, sr), "a new reader starts at the ramp")
+
+			// A reader that read 1 MiB reads ahead twice that.
+			readSequentially(pool, sr, 0, 1<<20)
+			assert.Equal(t, int64(2<<20), readahead(pool, sr))
+
+			// A seek starts the ramp again.
+			pool.updateReaderPosition(sr.readerID, 512<<20)
+			assert.Equal(t, int64(ramp), readahead(pool, sr))
+
+			// Reading on reaches the readahead the reader's share allows.
+			readSequentially(pool, sr, 512<<20, 544<<20)
+			pool.mu.Lock()
+			share := sr.shareReadahead
+			pool.mu.Unlock()
+			assert.Positive(t, share)
+			assert.Less(t, share, int64(64<<20))
+			assert.Equal(t, share, readahead(pool, sr))
+		})
+	}
+
+	t.Run("a reader taking over continues the reading it takes over", func(t *testing.T) {
+		for _, tt := range []struct {
+			name      string
+			firstRead int64
+			want      int64
+		}{
+			// A player's next range request starts where the last one stopped.
+			{name: "next range request", firstRead: 4<<20 + pieceLength, want: 8<<20 + 2*pieceLength},
+			{name: "seek elsewhere", firstRead: 512 << 20, want: ramp},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				c := newTestTorrentClient(t)
+				_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
+				pool := newTestPool(t, Config{Logger: testLogger(), ReadaheadRampBytes: ramp})
+				pool.SetReadaheadBudget(64 << 20)
+				_, releaseFirst, err := pool.Acquire(context.Background(), file, MemoryStorage)
+				require.NoError(t, err)
+				pool.mu.Lock()
+				var first *streamReader
+				for _, sr := range pool.readers {
+					first = sr
+				}
+				pool.mu.Unlock()
+				readSequentially(pool, first, 0, 4<<20)
+				releaseFirst()
+
+				_, releaseSecond, err := pool.Acquire(context.Background(), file, MemoryStorage)
+				require.NoError(t, err)
+				defer releaseSecond()
+				pool.mu.Lock()
+				var second *streamReader
+				for _, sr := range pool.readers {
+					if sr != first {
+						second = sr
+					}
+				}
+				pool.mu.Unlock()
+				require.NotNil(t, second)
+				pool.updateReaderPosition(second.readerID, tt.firstRead)
+				assert.Equal(t, tt.want, readahead(pool, second))
+			})
+		}
+	})
+
+	t.Run("a reader continues a reader released while another reader of its file is open", func(t *testing.T) {
+		// Audio decoding and subtitle extraction read the file beside the
+		// player, so a released playback reader closes rather than lingers.
+		c := newTestTorrentClient(t)
+		_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
+		pool := newTestPool(t, Config{Logger: testLogger(), ReadaheadRampBytes: ramp})
+		pool.SetReadaheadBudget(64 << 20)
+		_, releaseSidecar, err := pool.Acquire(context.Background(), file, MemoryStorage)
+		require.NoError(t, err)
+		defer releaseSidecar()
+		pool.mu.Lock()
+		known := make(map[*streamReader]bool)
+		for _, sr := range pool.readers {
+			known[sr] = true
+		}
+		pool.mu.Unlock()
+		acquire := func() (*streamReader, ReleaseFunc) {
+			_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
+			require.NoError(t, err)
+			pool.mu.Lock()
+			defer pool.mu.Unlock()
+			for _, sr := range pool.readers {
+				if !known[sr] {
+					known[sr] = true
+					return sr, release
+				}
+			}
+			t.Fatal("no new reader")
+			return nil, nil
+		}
+
+		first, releaseFirst := acquire()
+		readSequentially(pool, first, 0, 4<<20)
+		releaseFirst()
+		pool.mu.Lock()
+		_, lingers := pool.readers[first.readerID]
+		pool.mu.Unlock()
+		require.False(t, lingers, "a reader released beside another closes at once")
+
+		second, releaseSecond := acquire()
+		defer releaseSecond()
+		pool.updateReaderPosition(second.readerID, 4<<20+pieceLength)
+		assert.Equal(t, int64(8<<20+2*pieceLength), readahead(pool, second))
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		_, file := addSizedTorrent(t, c, "movie", pieceLength, 1<<30)
+		pool := newTestPool(t, Config{Logger: testLogger()})
+		pool.SetReadaheadBudget(64 << 20)
+		_, release, err := pool.Acquire(context.Background(), file, MemoryStorage)
+		require.NoError(t, err)
+		defer release()
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		for _, sr := range pool.readers {
+			assert.Equal(t, sr.shareReadahead, sr.readahead, "without a ramp a reader gets its share at once")
+		}
+	})
 }
