@@ -480,7 +480,7 @@ func TestBuildTSTorrentResponse(t *testing.T) {
 
 		assert.Positive(t, storageStats.WrittenBytes)
 
-		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 		defer ctrl.cancelPreload(to.InfoHash())
 		preload, ok := ctrl.preloadStatus(to.InfoHash())
 		require.True(t, ok)

@@ -70,7 +70,7 @@ func TestUpdateSettingsMemoryShrinkEvictsPreloadsThatNoLongerFit(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, patchMaxMemory(t, ctrl, 512<<20).Recorder.Code)
 	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
-	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 	preload, ok := ctrl.preloadStatus(to.InfoHash())
 	require.True(t, ok)
 	require.Equal(t, stream.PreloadRunning, preload.State, "the preload must run and hold its reservation")
@@ -124,7 +124,7 @@ func TestUpdateSettingsMemoryShrinkEvictsOnlyPreloadsThatDoNotFit(t *testing.T) 
 	reserved := make([]int64, 0, len(lengths))
 	for _, length := range lengths {
 		to := addSyntheticTorrent(t, ctrl, length, 1<<20)
-		require.True(t, ctrl.startPreload(to, to.Files()[0]))
+		require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 		preload, ok := ctrl.preloadStatus(to.InfoHash())
 		require.True(t, ok)
 		require.Equal(t, stream.PreloadRunning, preload.State, "both preloads must hold reservations")

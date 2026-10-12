@@ -128,6 +128,12 @@ type Config struct {
 	// Registry protects the pieces readers and preloads need from eviction.
 	// Nil disables eviction protection.
 	Registry ProtectionRegistry
+	// ResolveOffset, when set, resolves a playback position in file to the
+	// file-relative byte offset playback resumes from, reading the file's
+	// container index through r. It returns false when the file has no index
+	// it understands. A preload at a playback position calls it when it starts
+	// running; nil leaves such a preload with its head and tail.
+	ResolveOffset func(r io.ReaderAt, file *torrent.File, position time.Duration) (offset int64, ok bool, err error)
 }
 
 type prioritizedPiece struct {

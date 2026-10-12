@@ -730,7 +730,7 @@ func (c *Controller) startPreloadByFileIndex(to *torrent.Torrent, fileIndex *int
 		idx = 0
 	}
 
-	c.startPreload(to, files[idx])
+	c.startPreload(to, files[idx], 0)
 }
 
 func (c *Controller) parseLink(ctx context.Context, link *string) (*string, int, error) {

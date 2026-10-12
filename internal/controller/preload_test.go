@@ -10,6 +10,7 @@ import (
 	"crypto/sha1"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -111,6 +112,19 @@ func TestTorrentPreloadEndpoints(t *testing.T) {
 	repeated := doRequest(http.MethodPut, preloadURL, `{"file_index":0}`)
 	require.Equal(t, http.StatusOK, repeated.Code)
 	assert.Equal(t, startedStatus.TargetBytes, decodeStatus(repeated).TargetBytes)
+
+	// The movie is larger than a preload, so its preload plans a window at
+	// the position; a subtitle file is preloaded whole.
+	resumed := doRequest(http.MethodPut, preloadURL, `{"file_index":5,"playback_position_seconds":900.5}`)
+	require.Equal(t, http.StatusOK, resumed.Code)
+	poolStatus, ok := ctrl.streamPool.Load().PreloadStatus(ih)
+	require.True(t, ok)
+	assert.Equal(t, 900500*time.Millisecond, poolStatus.PlaybackPosition, "the preload must resume at the requested position")
+	require.Equal(t, http.StatusOK, doRequest(http.MethodPut, preloadURL, `{"file_index":0,"playback_position_seconds":900.5}`).Code)
+	poolStatus, ok = ctrl.streamPool.Load().PreloadStatus(ih)
+	require.True(t, ok)
+	assert.Zero(t, poolStatus.PlaybackPosition, "a file preloaded whole needs no window")
+	assert.Equal(t, http.StatusBadRequest, doRequest(http.MethodPut, preloadURL, `{"playback_position_seconds":-1}`).Code)
 
 	require.Equal(t, http.StatusNoContent, doRequest(http.MethodDelete, preloadURL, "").Code)
 	afterCancel := decodeStatus(doRequest(http.MethodGet, preloadURL, ""))
@@ -230,7 +244,7 @@ func TestStartPreloadSkipsWhenOnePieceExceedsBudget(t *testing.T) {
 	setTestMemoryLimit(t, ctrl, 32<<20)
 
 	to := addSyntheticTorrent(t, ctrl, 1<<30, 16<<20)
-	assert.False(t, ctrl.startPreload(to, to.Files()[0]))
+	assert.False(t, ctrl.startPreload(to, to.Files()[0], 0))
 	_, preloading := ctrl.preloadStatus(to.InfoHash())
 	assert.False(t, preloading)
 }
@@ -243,7 +257,7 @@ func TestStartPreloadSkipsWhileClientReconfigures(t *testing.T) {
 	ctrl.torrentClientUnavailable.Store(true)
 	defer ctrl.torrentClientUnavailable.Store(false)
 
-	assert.False(t, ctrl.startPreload(to, to.Files()[0]))
+	assert.False(t, ctrl.startPreload(to, to.Files()[0], 0))
 	_, preloading := ctrl.preloadStatus(to.InfoHash())
 	assert.False(t, preloading)
 }
@@ -279,7 +293,7 @@ func TestFailedClientReconfigureKeepsTorrentClientUnavailable(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
 
 	assert.True(t, ctrl.torrentClientUnavailable.Load())
-	assert.False(t, ctrl.startPreload(to, to.Files()[0]))
+	assert.False(t, ctrl.startPreload(to, to.Files()[0], 0))
 	rr = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/stream/%s?index=0", to.InfoHash()), http.NoBody)
 	ctrl.router.ServeHTTP(rr, req)
@@ -296,7 +310,7 @@ func TestStartPreloadRejectsTorrentFromPreviousClientGeneration(t *testing.T) {
 	setTestMemoryLimit(t, ctrl, 128<<20)
 
 	assert.Greater(t, ctrl.torrentGeneration.Load(), previousGeneration)
-	assert.False(t, ctrl.startPreload(to, file))
+	assert.False(t, ctrl.startPreload(to, file, 0))
 	_, preloading := ctrl.preloadStatus(to.InfoHash())
 	assert.False(t, preloading)
 }
@@ -317,7 +331,7 @@ func TestController_StartPreload(t *testing.T) {
 			ctrl.mu.Unlock()
 		}()
 
-		assert.False(t, ctrl.startPreload(to, to.Files()[0]))
+		assert.False(t, ctrl.startPreload(to, to.Files()[0], 0))
 		_, preloading := ctrl.preloadStatus(to.InfoHash())
 		assert.False(t, preloading)
 	})
@@ -378,7 +392,7 @@ func TestStreamDoesNotPausePreloads(t *testing.T) {
 
 	preloaded := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
 	played := addSyntheticTorrent(t, ctrl, 1<<30+1, 1<<20)
-	require.True(t, ctrl.startPreload(preloaded, preloaded.Files()[0]))
+	require.True(t, ctrl.startPreload(preloaded, preloaded.Files()[0], 0))
 	defer ctrl.cancelPreload(preloaded.InfoHash())
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -416,7 +430,7 @@ func TestController_PreloadResponse(t *testing.T) {
 		hashes := make([]metainfo.Hash, 0, 3)
 		for i := range 3 {
 			to := addSyntheticTorrent(t, ctrl, 1<<30+int64(i), 1<<20)
-			require.True(t, ctrl.startPreload(to, to.Files()[0]))
+			require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 			hashes = append(hashes, to.InfoHash())
 		}
 		defer func() {
@@ -443,7 +457,7 @@ func TestPreloadKeepsTorrentActive(t *testing.T) {
 	to := addSyntheticTorrent(t, ctrl, 1<<30, 1<<20)
 	ih := to.InfoHash()
 	assert.False(t, ctrl.hasTorrentReaders(ih))
-	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 	assert.True(t, ctrl.hasTorrentReaders(ih))
 	ctrl.cancelPreload(ih)
 	assert.False(t, ctrl.hasTorrentReaders(ih))
@@ -543,7 +557,7 @@ func TestStartPreloadFileStorageIgnoresMemoryLimit(t *testing.T) {
 	ctrl.torrentTracker.mu.Unlock()
 	defer ctrl.cancelPreload(ih)
 
-	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 	status, ok := ctrl.preloadStatus(ih)
 	require.True(t, ok)
 	assert.Equal(t, int64(32<<20), status.TargetBytes)
@@ -555,7 +569,7 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	to := addSintelTorrent(t, ctrl)
 	ih := to.InfoHash()
 
-	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 	to.Drop()
 	<-to.Closed()
 	assert.Equal(t, api.Idle, ctrl.preloadResponse(ih).Status, "a closed torrent must not report its preload")
@@ -563,7 +577,7 @@ func TestPreloadRemovedWhenTorrentCloses(t *testing.T) {
 	// Re-adding the torrent creates a new instance, which gets a new preload.
 	readded := addSintelTorrent(t, ctrl)
 	require.NotSame(t, to, readded)
-	require.True(t, ctrl.startPreload(readded, readded.Files()[0]))
+	require.True(t, ctrl.startPreload(readded, readded.Files()[0], 0))
 	assert.Equal(t, api.Preloading, ctrl.preloadResponse(ih).Status)
 	ctrl.cancelPreload(ih)
 }
@@ -755,7 +769,7 @@ func TestDeleteTorrentClearsPreload(t *testing.T) {
 	defer cleanup()
 	to := addSintelTorrent(t, ctrl)
 	ih := to.InfoHash()
-	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 
 	ctrl.mu.Lock()
 	err := ctrl.deleteTorrentLocked(ih)
@@ -789,7 +803,7 @@ func TestDeleteTorrentWithRunningPreloadRemovesFileStorage(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(torrentDir, "piece"), []byte("data"), 0o600))
 
 	// The torrent has no peers, so the preload keeps running.
-	require.True(t, ctrl.startPreload(to, to.Files()[0]))
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 0))
 	status, ok := ctrl.preloadStatus(ih)
 	require.True(t, ok)
 	require.Equal(t, stream.PreloadRunning, status.State, "preload must be running before the delete")
@@ -818,4 +832,22 @@ func TestDeleteTorrentWithRunningPreloadRemovesFileStorage(t *testing.T) {
 	_, err := ctrl.db.GetTorrent(ih)
 	require.ErrorIs(t, err, database.ErrTorrentNotFound)
 	assert.Equal(t, api.Idle, ctrl.preloadResponse(ih).Status, "the cancelled preload must not report a status")
+}
+
+func TestPlaybackPosition(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		seconds float64
+		want    time.Duration
+	}{
+		{name: "zero", seconds: 0, want: 0},
+		{name: "negative", seconds: -1, want: 0},
+		{name: "nan", seconds: math.NaN(), want: 0},
+		{name: "fractional", seconds: 1.5, want: 1500 * time.Millisecond},
+		{name: "too large", seconds: 1e300, want: math.MaxInt64},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, playbackPosition(tt.seconds))
+		})
+	}
 }

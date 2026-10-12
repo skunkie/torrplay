@@ -8,7 +8,8 @@
 //
 // It multiplexes multiple concurrent readers per torrent file, keeps a released
 // reader reading ahead briefly for the player's next request, caches the head
-// and tail of files before they are played, and coordinates with the storage
+// and tail of files, and the data where playback resumes, before they are
+// played, and coordinates with the storage
 // layer via the ProtectionRegistry interface to protect actively-read and
 // preloaded pieces from eviction.
 //
@@ -79,11 +80,24 @@
 //
 // Preload caches the head and tail of a file, where containers keep their
 // metadata and seek indexes, so its playback starts without waiting for them. A
-// torrent has at most one preload, and a request for another of its files
-// replaces it. Preloads never pause for playback, because the engine is shared
-// by every viewer: they have no reader, claim their pieces at PiecePriorityHigh,
-// and a watcher marks them ready once every piece is complete. At most two
-// preloads download at a time, in request order.
+// torrent has at most one preload, and a request for another of its files, or
+// for the same file at another resume position, replaces it. Preloads never
+// pause for playback, because the engine is shared by every viewer: they have
+// no reader, claim their pieces at PiecePriorityHigh, and a watcher marks them
+// ready once every piece is complete. At most two preloads download at a time,
+// in request order.
+//
+// PreloadAt preloads for playback that resumes at a position. Its head and
+// tail are only the file's first and last pieces, which usually hold the
+// container's header and seek index, and it keeps the rest, in whole pieces,
+// for a window at the position. As soon as the preload runs,
+// Config.ResolveOffset resolves the position to a byte offset through a
+// torrent reader, which downloads the pieces holding the container's seek
+// index first. The window is placed there, starting an eighth of its size
+// before the offset, and downloads with the head and tail; the preload is not
+// ready until it completes. Index pieces the lookup read outside the head and
+// tail are kept as well, each taking a piece from the window. When the
+// position cannot be resolved, the preload is ready with its head and tail.
 //
 // A memory-storage preload reserves its whole pieces in the preload share of
 // the readahead budget, reported by PreloadCapacity, and protects them from

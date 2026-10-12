@@ -8,6 +8,8 @@ import (
 	"context"
 	"crypto/sha1"
 	"fmt"
+	"io"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -920,7 +922,7 @@ func TestPool_PlanPreloadLocked(t *testing.T) {
 				pool.SetReadaheadBudget(48 * mib)
 
 				pool.mu.Lock()
-				pl, ok := pool.planPreloadLocked(file, MemoryStorage)
+				pl, ok := pool.planPreloadLocked(file, MemoryStorage, 0)
 				pool.mu.Unlock()
 				require.True(t, ok)
 				limit := preloadMemoryLimit(pool.PreloadCapacity())
@@ -938,12 +940,45 @@ func TestPool_PlanPreloadLocked(t *testing.T) {
 		pool.SetReadaheadBudget(16 * mib)
 
 		pool.mu.Lock()
-		_, fits := pool.planPreloadLocked(file, MemoryStorage)
-		pl, ok := pool.planPreloadLocked(file, FileStorage)
+		_, fits := pool.planPreloadLocked(file, MemoryStorage, 0)
+		pl, ok := pool.planPreloadLocked(file, FileStorage, 0)
 		pool.mu.Unlock()
 		assert.False(t, fits, "one 16 MiB piece exceeds the memory preload share")
 		require.True(t, ok)
 		assert.Equal(t, int64(maxPreloadBytes), pl.targetBytes)
+	})
+
+	t.Run("plans a resume window at a playback position", func(t *testing.T) {
+		for _, tt := range []struct {
+			name         string
+			length       int64
+			pieceLength  int64
+			wantHeadEnd  int64
+			wantPosition time.Duration
+			wantTarget   int64
+			windowPieces int
+		}{
+			{name: "one-piece boundaries", length: 1 << 30, pieceLength: mib, wantHeadEnd: mib, wantPosition: time.Minute, wantTarget: 32 * mib, windowPieces: 30},
+			// A one-piece head and tail take the whole budget, so the preload
+			// falls back to its ordinary head and tail.
+			{name: "no room for a window", length: 1 << 30, pieceLength: 16 * mib, wantHeadEnd: 16 * mib, wantTarget: 32 * mib},
+			{name: "file covered whole", length: 10 * mib, pieceLength: mib, wantHeadEnd: 2 * mib, wantTarget: 10 * mib},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				c := newTestTorrentClient(t)
+				_, file := addSizedTorrent(t, c, tt.name, tt.pieceLength, tt.length)
+				pool := newTestPool(t, Config{Logger: testLogger()})
+
+				pool.mu.Lock()
+				pl, ok := pool.planPreloadLocked(file, FileStorage, time.Minute)
+				pool.mu.Unlock()
+				require.True(t, ok)
+				assert.Equal(t, tt.wantPosition, pl.position)
+				assert.Equal(t, tt.windowPieces, pl.windowPieces)
+				assert.Equal(t, tt.wantHeadEnd, pl.headEnd)
+				assert.Equal(t, tt.wantTarget, pl.targetBytes)
+			})
+		}
 	})
 
 	t.Run("shares capacity between concurrent preloads", func(t *testing.T) {
@@ -1129,7 +1164,7 @@ func TestWaitForPieceChange(t *testing.T) {
 		changes <- change(1, false)
 		complete := map[int]bool{1: false, 2: false}
 
-		require.True(t, waitForPieceChange(context.Background(), to, changes, complete))
+		require.True(t, waitForPieceChange(context.Background(), to, changes, complete, nil))
 		assert.Equal(t, map[int]bool{1: false, 2: true}, complete, "later changes must win and unwatched pieces stay untracked")
 		assert.Empty(t, changes, "the burst must be drained")
 	})
@@ -1137,13 +1172,13 @@ func TestWaitForPieceChange(t *testing.T) {
 	t.Run("ends when the subscription closes", func(t *testing.T) {
 		changes := make(chan torrent.PieceStateChange)
 		close(changes)
-		assert.False(t, waitForPieceChange(context.Background(), to, changes, map[int]bool{}))
+		assert.False(t, waitForPieceChange(context.Background(), to, changes, map[int]bool{}, nil))
 	})
 
 	t.Run("ends with its context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		assert.False(t, waitForPieceChange(ctx, to, make(chan torrent.PieceStateChange), map[int]bool{}))
+		assert.False(t, waitForPieceChange(ctx, to, make(chan torrent.PieceStateChange), map[int]bool{}, nil))
 	})
 }
 
@@ -1179,4 +1214,294 @@ func TestPreloadMemoryLimit(t *testing.T) {
 	} {
 		assert.Equal(t, tt.want, preloadMemoryLimit(tt.capacity), "capacity %d", tt.capacity)
 	}
+}
+
+func TestPool_PreloadAt(t *testing.T) {
+	// A 512-byte budget leaves a 256-byte preload limit, four of the ten
+	// 64-byte pieces: a 64-byte head and tail, and two pieces for the window.
+	const budget, position = 512, 30 * time.Second
+	type resolveCall struct {
+		header   []byte
+		position time.Duration
+	}
+	newPool := func(t *testing.T, reg ProtectionRegistry, offset int64, ok bool) (*Pool, chan resolveCall) {
+		t.Helper()
+		calls := make(chan resolveCall, 1)
+		pool := New(Config{
+			Logger:   testLogger(),
+			Registry: reg,
+			ResolveOffset: func(r io.ReaderAt, _ *torrent.File, position time.Duration) (int64, bool, error) {
+				header := make([]byte, 8)
+				if _, err := r.ReadAt(header, 0); err != nil {
+					return 0, false, err
+				}
+				calls <- resolveCall{header: header, position: position}
+				return offset, ok, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+		return pool, calls
+	}
+	protected := func(reg *protectionRegistry) []int {
+		return slices.Sorted(maps.Keys(reg.protectedPieces()))
+	}
+	claimed := func(pool *Pool, to *torrent.Torrent) []int {
+		return slices.Sorted(maps.Keys(preloadClaims(pool, to)))
+	}
+
+	t.Run("places its window at the resolved offset before the head and tail are cached", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "movie")
+		reg := newProtectionRegistry()
+		// Offset 320 starts the 128-byte window 16 bytes earlier, in piece 4.
+		pool, calls := newPool(t, reg, 320, true)
+
+		status, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		assert.Equal(t, PreloadStatus{FilePath: file.Path(), PlaybackPosition: position, State: PreloadRunning, TargetBytes: 256}, status)
+		assert.Equal(t, []int{0, 9}, claimed(pool, to), "the window waits for its seek index")
+		assert.Equal(t, []int{0, 9}, protected(reg))
+
+		// The seek index reads only the first piece, so the window is placed
+		// while the tail still downloads.
+		writePieces(t, to, data, 0)
+		var call resolveCall
+		select {
+		case call = <-calls:
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "the playback position was not resolved")
+		}
+		assert.Equal(t, position, call.position)
+		assert.Equal(t, data[:8], call.header, "the seek index must read the file")
+		require.Eventually(t, func() bool { return slices.Equal(claimed(pool, to), []int{0, 4, 5, 9}) }, 5*time.Second, time.Millisecond)
+		assert.Equal(t, []int{0, 4, 5, 9}, protected(reg))
+
+		writePieces(t, to, data, 4, 5)
+		assert.Never(t, func() bool { return preloadState(pool, to.InfoHash()) == PreloadReady }, 50*time.Millisecond, time.Millisecond,
+			"the tail must complete before the preload is ready")
+		writePieces(t, to, data, 9)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+		status, _ = pool.PreloadStatus(to.InfoHash())
+		assert.Equal(t, int64(256), status.TargetBytes)
+		assert.Equal(t, []int{0, 4, 5, 9}, protected(reg), "a ready preload keeps its window protected")
+	})
+
+	t.Run("reports progress while it resolves the position", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "slow index")
+		release := make(chan struct{})
+		pool := New(Config{
+			Logger: testLogger(),
+			ResolveOffset: func(io.ReaderAt, *torrent.File, time.Duration) (int64, bool, error) {
+				<-release
+				return 320, true, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 9)
+		require.Eventually(t, func() bool {
+			status, _ := pool.PreloadStatus(to.InfoHash())
+			return status.CompletedBytes == 128
+		}, 5*time.Second, time.Millisecond, "the head and tail must count while the index is read")
+		assert.Equal(t, PreloadRunning, preloadState(pool, to.InfoHash()), "the window must be placed before the preload is ready")
+
+		close(release)
+		require.Eventually(t, func() bool { return slices.Equal(claimed(pool, to), []int{0, 4, 5, 9}) }, 5*time.Second, time.Millisecond)
+		writePieces(t, to, data, 4, 5)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+	})
+
+	t.Run("keeps the index pieces it read outside the head and tail", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "large index")
+		reg := newProtectionRegistry()
+		pool := New(Config{
+			Logger:   testLogger(),
+			Registry: reg,
+			ResolveOffset: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
+				// An index that spans the first five pieces.
+				if _, err := r.ReadAt(make([]byte, 300), 0); err != nil {
+					return 0, false, err
+				}
+				return 320, true, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 1, 2, 3, 4)
+		// Pieces 1 and 2 take both window pieces, so the window is gone, and
+		// the reservation holds no more of the index.
+		require.Eventually(t, func() bool { return slices.Equal(protected(reg), []int{0, 1, 2, 9}) }, 5*time.Second, time.Millisecond)
+		assert.Equal(t, []int{0, 1, 2, 9}, claimed(pool, to))
+		writePieces(t, to, data, 9)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+	})
+
+	t.Run("keeps the piece of the offset in a one-piece window", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "one piece window")
+		reg := newProtectionRegistry()
+		pool := New(Config{
+			Logger:   testLogger(),
+			Registry: reg,
+			ResolveOffset: func(r io.ReaderAt, _ *torrent.File, _ time.Duration) (int64, bool, error) {
+				// An index that spans the first two pieces leaves one window
+				// piece. Offset 320 starts piece 5, and a window starting 8
+				// bytes earlier would begin in piece 4.
+				if _, err := r.ReadAt(make([]byte, 70), 0); err != nil {
+					return 0, false, err
+				}
+				return 320, true, nil
+			},
+		})
+		t.Cleanup(pool.Close)
+		pool.SetReadaheadBudget(budget)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 1)
+		require.Eventually(t, func() bool { return slices.Equal(protected(reg), []int{0, 1, 5, 9}) }, 5*time.Second, time.Millisecond)
+	})
+
+	t.Run("keeps its window between the head and the tail", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file, data := addHashedTorrent(t, c, "late")
+		reg := newProtectionRegistry()
+		pool, _ := newPool(t, reg, 630, true)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		writePieces(t, to, data, 0, 9)
+		require.Eventually(t, func() bool { return slices.Equal(claimed(pool, to), []int{0, 7, 8, 9}) }, 5*time.Second, time.Millisecond)
+	})
+
+	t.Run("places its window in its own file's pieces in a multi-file torrent", func(t *testing.T) {
+		// The movie follows a 100-byte file, so its byte offsets are 100 bytes
+		// short of the torrent's.
+		const pieceLength, firstLength, movieLength = 64, 100, 640
+		data := make([]byte, firstLength+movieLength)
+		for i := range data {
+			data[i] = byte(i * 7)
+		}
+		var pieces []byte
+		for start := 0; start < len(data); start += pieceLength {
+			sum := sha1.Sum(data[start:min(start+pieceLength, len(data))])
+			pieces = append(pieces, sum[:]...)
+		}
+		infoBytes, err := bencode.Marshal(metainfo.Info{
+			Name:        "season",
+			PieceLength: pieceLength,
+			Pieces:      pieces,
+			Files: []metainfo.FileInfo{
+				{Length: firstLength, Path: []string{"extras.srt"}},
+				{Length: movieLength, Path: []string{"movie.mkv"}},
+			},
+		})
+		require.NoError(t, err)
+		c := newTestTorrentClient(t)
+		to, _ := addTestTorrentFromMetaInfo(t, c, &metainfo.MetaInfo{InfoBytes: infoBytes})
+		file := to.Files()[1]
+		reg := newProtectionRegistry()
+		// A 1 KiB budget leaves a 512-byte preload: the movie's first piece 1,
+		// which it shares with the other file, its short last piece 11, and
+		// six window pieces. File offset 320 would start the window 48 bytes
+		// earlier, but the window must end where the tail starts, at file
+		// offset 604, so it starts at file offset 220, in piece 5.
+		pool, _ := newPool(t, reg, 320, true)
+		pool.SetReadaheadBudget(1 << 10)
+
+		_, err = pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		assert.Equal(t, []int{1, 11}, claimed(pool, to))
+
+		writePieces(t, to, data, 1)
+		require.Eventually(t, func() bool {
+			return slices.Equal(claimed(pool, to), []int{1, 5, 6, 7, 8, 9, 10, 11})
+		}, 5*time.Second, time.Millisecond)
+		assert.Equal(t, []int{1, 5, 6, 7, 8, 9, 10, 11}, protected(reg))
+
+		writePieces(t, to, data, 5, 6, 7, 8, 9, 10, 11)
+		waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+	})
+
+	t.Run("is ready with its head and tail when the position cannot be resolved", func(t *testing.T) {
+		for _, tt := range []struct {
+			name     string
+			resolver bool
+		}{
+			{name: "unresolved", resolver: true},
+			{name: "no resolver", resolver: false},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				c := newTestTorrentClient(t)
+				to, file, data := addHashedTorrent(t, c, tt.name)
+				reg := newProtectionRegistry()
+				pool, _ := newPool(t, reg, 0, false)
+				if !tt.resolver {
+					pool.cfg.ResolveOffset = nil
+				}
+
+				_, err := pool.PreloadAt(file, MemoryStorage, position)
+				require.NoError(t, err)
+				writePieces(t, to, data, 0, 9)
+				waitForPreloadState(t, pool, to.InfoHash(), PreloadReady)
+				status, _ := pool.PreloadStatus(to.InfoHash())
+				assert.Equal(t, int64(128), status.TargetBytes)
+				assert.Equal(t, int64(128), status.CompletedBytes)
+				assert.Equal(t, []int{0, 9}, protected(reg))
+			})
+		}
+	})
+
+	t.Run("keeps a preload that a position without a window would plan the same", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		// A 200-byte file fits the 256-byte preload whole.
+		to, file := addSizedTorrent(t, c, "small", 64, 200)
+		pool, _ := newPool(t, nil, 0, false)
+
+		_, err := pool.Preload(file, MemoryStorage)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		first := pool.preloads[to.InfoHash()]
+		pool.mu.Unlock()
+
+		status, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		assert.Zero(t, status.PlaybackPosition)
+		pool.mu.Lock()
+		assert.Same(t, first, pool.preloads[to.InfoHash()])
+		pool.mu.Unlock()
+	})
+
+	t.Run("replaces a preload at another position", func(t *testing.T) {
+		c := newTestTorrentClient(t)
+		to, file := addSizedTorrent(t, c, "movie", 64, 640)
+		pool, _ := newPool(t, nil, 0, false)
+
+		_, err := pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		first := pool.preloads[to.InfoHash()]
+		pool.mu.Unlock()
+
+		_, err = pool.PreloadAt(file, MemoryStorage, position)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		assert.Same(t, first, pool.preloads[to.InfoHash()], "a request at the same position keeps the preload")
+		pool.mu.Unlock()
+
+		_, err = pool.PreloadAt(file, MemoryStorage, 2*position)
+		require.NoError(t, err)
+		pool.mu.Lock()
+		assert.NotSame(t, first, pool.preloads[to.InfoHash()])
+		pool.mu.Unlock()
+	})
 }

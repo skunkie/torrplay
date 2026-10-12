@@ -804,6 +804,46 @@ func TestClient_PreloadTorrent(t *testing.T) {
 	assert.Equal(t, api.Preloading, res.Status)
 }
 
+func TestPreloadTorrentPlaybackPosition(t *testing.T) {
+	hash := "08ada5a7a6183aae1e09d831df6748d566095a10"
+	var gotBody api.PreloadRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody = api.PreloadRequest{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+		_ = json.NewEncoder(w).Encode(api.PreloadResponse{Status: api.Preloading})
+	}))
+	defer ts.Close()
+	tool := NewServer(NewClient(ts.URL, "", ts.Client())).GetTool("preload_torrent")
+	require.NotNil(t, tool)
+	call := func(arguments map[string]any) (*mcp.CallToolResult, error) {
+		arguments["hash"] = hash
+		return tool.Handler(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "preload_torrent", Arguments: arguments},
+		})
+	}
+
+	t.Run("forwards the position", func(t *testing.T) {
+		res, err := call(map[string]any{"playback_position_seconds": 900.5})
+		require.NoError(t, err)
+		assert.False(t, res.IsError)
+		require.NotNil(t, gotBody.PlaybackPositionSeconds)
+		assert.InDelta(t, 900.5, *gotBody.PlaybackPositionSeconds, 0)
+	})
+
+	t.Run("omits a zero position", func(t *testing.T) {
+		res, err := call(map[string]any{"playback_position_seconds": 0})
+		require.NoError(t, err)
+		assert.False(t, res.IsError)
+		assert.Nil(t, gotBody.PlaybackPositionSeconds)
+	})
+
+	t.Run("rejects a negative position", func(t *testing.T) {
+		_, err := call(map[string]any{"playback_position_seconds": -1})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "playback_position_seconds")
+	})
+}
+
 func TestStreamingURLs(t *testing.T) {
 	client := NewClient("http://127.0.0.1:8090", "secret token", nil)
 	hash := "08ada5a7a6183aae1e09d831df6748d566095a10"

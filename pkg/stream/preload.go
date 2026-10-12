@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"slices"
 	"time"
 
@@ -61,9 +63,16 @@ type PreloadStatus struct {
 	FileIndex int
 	// FilePath is the preloaded file's path within its torrent.
 	FilePath string
+	// PlaybackPosition is the playback position the preload plans a resume
+	// window at, or zero for a preload without one. It stays set when the
+	// position cannot be resolved and the preload keeps its head and tail
+	// only.
+	PlaybackPosition time.Duration
 	// State is the preload's lifecycle state.
 	State PreloadState
-	// TargetBytes is the size of the preload's ranges.
+	// TargetBytes is the size of the preload's ranges. A preload at a playback
+	// position counts the resume window it plans until the window is placed,
+	// and only its head and tail if the window cannot be placed.
 	TargetBytes int64
 }
 
@@ -124,6 +133,9 @@ type preload struct {
 	mode                        StorageMode
 	// pieces holds the preload's pieces in ascending order.
 	pieces []int
+	// position is the playback position the resume window is planned at, or
+	// zero for a preload without one.
+	position time.Duration
 	// progressAt is when a running preload started running, last completed a
 	// piece, or last saw its torrent complete more data. The stall timeout
 	// runs from it.
@@ -133,17 +145,29 @@ type preload struct {
 	readyAt     time.Time
 	reservation preloadReservation
 	reserved    bool
+	// resolving reports that the playback position is being resolved.
+	resolving   bool
 	state       PreloadState
 	targetBytes int64
 	// torrentCompleted is the torrent's completed bytes when progressAt was
 	// last set.
 	torrentCompleted int64
+	// windowPieces is how many pieces the resume window may take. Zero means
+	// that the preload has no resume window.
+	windowPieces int
+	// windowPlaced reports that placing the resume window was attempted. A
+	// placed window holds the file-relative byte range
+	// [windowStart, windowEnd); an empty range means that the playback
+	// position could not be resolved.
+	windowPlaced           bool
+	windowStart, windowEnd int64
 }
 
 // preloadReservation is the protection budget held by a memory-storage
 // preload, the pieces it protects, and whether it protects both its file's
 // head and tail.
 type preloadReservation struct {
+	// bytes includes the resume window's pieces before the window is placed.
 	bytes            int64
 	coversBoundaries bool
 	// head and tail are the inclusive piece ranges protected from eviction
@@ -152,16 +176,23 @@ type preloadReservation struct {
 	// id identifies the reservation's protection in the registry. It is drawn
 	// from the reader ID sequence, so it never collides with a reader's.
 	id uint64
+	// placed holds the inclusive piece ranges protected as well once the
+	// resume window is placed: the window and the seek index pieces outside
+	// the head and tail it was resolved from.
+	placed []storage.PieceRange
 }
 
 // protection returns the piece ranges the reservation protects.
 func (r preloadReservation) protection() storage.Protection {
-	return storage.Protection{Active: []storage.PieceRange{r.head, r.tail}}
+	active := make([]storage.PieceRange, 0, 2+len(r.placed))
+	active = append(active, r.head, r.tail)
+	return storage.Protection{Active: append(active, r.placed...)}
 }
 
 // Preload starts caching the head and tail of file, replacing any preload of
-// another file of the same torrent, and returns the preload's status. A request
-// for the file already being preloaded, or already cached, returns that preload
+// another file of the same torrent, or of the same file at a resume position,
+// and returns the preload's status. A request for the file already being
+// preloaded, or already cached, without a resume window returns that preload
 // unchanged. Memory-storage preloads reserve their whole pieces
 // within the preload share of the readahead budget; file-storage preloads are
 // written to disk and reserve nothing. Preloads never pause for playback:
@@ -170,6 +201,23 @@ func (r preloadReservation) protection() storage.Protection {
 // ErrPreloadDoesNotFit, and holds no preload for the torrent, when not even
 // one piece fits the memory limit.
 func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, error) {
+	return p.PreloadAt(file, mode, 0)
+}
+
+// PreloadAt is Preload for playback that resumes at position. Its head and
+// tail are only the file's first and last pieces, which usually hold the
+// container's header and seek index, and the rest of the preload is a window
+// of the file's data at position. As soon as the preload runs,
+// Config.ResolveOffset resolves position to a byte offset through a torrent
+// reader, which downloads the pieces holding the container's seek index first,
+// and the window is placed there, starting an eighth of its size before the
+// offset, to download with the head and tail. When position cannot be
+// resolved, the preload is ready with its head and tail. A non-positive
+// position, or a file the preload
+// covers whole or leaves no piece of a window for, preloads as Preload does.
+// A request whose plan has a window at another position, or none where the
+// torrent's preload has one, replaces the preload.
+func (p *Pool) PreloadAt(file *torrent.File, mode StorageMode, position time.Duration) (PreloadStatus, error) {
 	if file == nil || file.Torrent() == nil || file.Torrent().Info() == nil {
 		return PreloadStatus{}, ErrInvalidFile
 	}
@@ -184,12 +232,20 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 	if p.closed {
 		return PreloadStatus{}, ErrPoolClosed
 	}
+	position = max(position, 0)
 	current := p.preloads[infoHash]
-	if current != nil && current.file == file && current.mode == mode && current.state <= PreloadReady {
+	holds := func(position time.Duration) bool {
+		return current != nil && current.file == file && current.mode == mode && current.position == position && current.state <= PreloadReady
+	}
+	if holds(position) {
 		return current.status(), nil
 	}
 
-	pl, ok := p.planPreloadLocked(file, mode)
+	pl, ok := p.planPreloadLocked(file, mode, position)
+	// A position that plans no window preloads as a request without one.
+	if ok && holds(pl.position) {
+		return current.status(), nil
+	}
 	p.removePreloadLocked(infoHash)
 	if !ok {
 		p.dispatchPreloadsLocked()
@@ -208,6 +264,7 @@ func (p *Pool) Preload(file *torrent.File, mode StorageMode) (PreloadStatus, err
 		slog.String("hash", infoHash.HexString()),
 		slog.String("file", file.Path()),
 		slog.Int64("targetBytes", pl.targetBytes),
+		slog.Duration("position", position),
 		slog.String("state", pl.state.String()))
 	return pl.status(), nil
 }
@@ -260,11 +317,12 @@ func (pl *preload) status() PreloadStatus {
 		completed = pl.targetBytes
 	}
 	return PreloadStatus{
-		CompletedBytes: completed,
-		FileIndex:      pl.fileIndex,
-		FilePath:       pl.file.Path(),
-		State:          pl.state,
-		TargetBytes:    pl.targetBytes,
+		CompletedBytes:   completed,
+		FileIndex:        pl.fileIndex,
+		FilePath:         pl.file.Path(),
+		PlaybackPosition: pl.position,
+		State:            pl.state,
+		TargetBytes:      pl.targetBytes,
 	}
 }
 
@@ -275,7 +333,8 @@ func (pl *preload) progress(complete map[int]bool) (completedBytes int64, allCom
 	pieceComplete := func(index int) bool { return complete[index] }
 	pieceLength := pl.file.Torrent().Info().PieceLength
 	completedBytes = completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), 0, pl.headEnd) +
-		completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), pl.tailStart, pl.tailEnd)
+		completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), pl.tailStart, pl.tailEnd) +
+		completedRangeBytes(pieceComplete, pieceLength, pl.file.Offset(), pl.windowStart, pl.windowEnd)
 	for _, index := range pl.pieces {
 		if !complete[index] {
 			return completedBytes, false
@@ -327,10 +386,13 @@ func (pl *preload) markProgress(now time.Time) {
 // planPreloadLocked sizes a preload of file. The head starts at the file's
 // beginning and the tail, when the file is large enough to have one, covers at
 // least a default boundary or one piece at its end, so container metadata at
-// either end is cached. Memory-storage preloads are trimmed to whole pieces
-// within their share of the preload capacity. It returns false when not even
-// one piece fits. Must be called with p.mu held.
-func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload, bool) {
+// either end is cached. A preload at a positive position caches only the file's
+// first and last pieces as its head and tail and keeps the rest of its budget,
+// in whole pieces, for a resume window, unless the budget covers the whole file
+// or leaves no piece for the window. Memory-storage preloads are trimmed to
+// whole pieces within their share of the preload capacity. It returns false
+// when not even one piece fits. Must be called with p.mu held.
+func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode, position time.Duration) (*preload, bool) {
 	info := file.Torrent().Info()
 	// File-storage preloads are written to disk and reserve no memory, so only
 	// the startup-latency ceiling bounds them.
@@ -344,8 +406,19 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload
 	}
 
 	startend := max(int64(defaultFileBoundaryBytes), info.PieceLength)
+	resume := position > 0 && file.Length() > budget
+	if !resume {
+		position = 0
+	}
 	var headEnd, tailStart, tailEnd int64
 	switch {
+	case resume:
+		// Playback that resumes reads only the container's header and seek
+		// index, which the file's first and last pieces usually hold.
+		pieceLength := max(info.PieceLength, 1)
+		headEnd = min(pieceLength-file.Offset()%pieceLength, file.Length())
+		tailStart = max((file.Offset()+file.Length()-1)/pieceLength*pieceLength-file.Offset(), headEnd)
+		tailEnd = file.Length()
 	case file.Length() <= startend, budget <= startend:
 		headEnd = budget
 	default:
@@ -364,24 +437,35 @@ func (p *Pool) planPreloadLocked(file *torrent.File, mode StorageMode) (*preload
 		return nil, false
 	}
 	boundaryBytes := boundaryPieceBytes(info, headStart, headEndPiece, tailStartPiece, tailEndPiece)
+	windowPieces := 0
+	if resume {
+		windowPieces = int(max(limit-boundaryBytes, 0) / max(info.PieceLength, 1))
+		if windowPieces == 0 {
+			return p.planPreloadLocked(file, mode, 0)
+		}
+	}
 	pl := &preload{
-		file:      file,
-		fileIndex: slices.Index(file.Torrent().Files(), file),
-		headEnd:   headEnd,
-		infoHash:  file.Torrent().InfoHash(),
-		mode:      mode,
-		pieces:    slices.Collect(boundaryPieces(headStart, headEndPiece, tailStartPiece, tailEndPiece)),
-		state:     PreloadQueued,
-		tailEnd:   tailEnd,
-		tailStart: tailStart,
+		file:         file,
+		fileIndex:    slices.Index(file.Torrent().Files(), file),
+		headEnd:      headEnd,
+		infoHash:     file.Torrent().InfoHash(),
+		mode:         mode,
+		pieces:       slices.Collect(boundaryPieces(headStart, headEndPiece, tailStartPiece, tailEndPiece)),
+		position:     position,
+		state:        PreloadQueued,
+		tailEnd:      tailEnd,
+		tailStart:    tailStart,
+		windowPieces: windowPieces,
 		reservation: preloadReservation{
-			bytes:            boundaryBytes,
-			coversBoundaries: preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
+			bytes: boundaryBytes + int64(windowPieces)*info.PieceLength,
+			// A resume preload's single head and tail pieces are smaller than
+			// the boundaries playback readers protect, so readers keep theirs.
+			coversBoundaries: !resume && preloadCoversBoundaries(file.Length(), headEnd, tailStart, tailEnd),
 			head:             storage.PieceRange{Start: headStart, End: headEndPiece},
 			tail:             storage.PieceRange{Start: tailStartPiece, End: tailEndPiece},
 		},
 	}
-	pl.targetBytes = pl.rangeBytes()
+	pl.targetBytes = pl.rangeBytes() + min(int64(windowPieces)*info.PieceLength, pl.windowCeiling()-headEnd)
 	return pl, true
 }
 
@@ -455,9 +539,159 @@ func preloadProtectionCapacity(totalBudget int64) int64 {
 	return max(totalBudget-playbackReserve, 0)
 }
 
-// rangeBytes returns the size of the preload's head and tail ranges.
+// rangeBytes returns the size of the preload's head and tail ranges and of
+// its resume window once placed.
 func (pl *preload) rangeBytes() int64 {
-	return pl.headEnd + (pl.tailEnd - pl.tailStart)
+	return pl.headEnd + (pl.tailEnd - pl.tailStart) + (pl.windowEnd - pl.windowStart)
+}
+
+// windowCeiling returns the file-relative offset a resume window must end
+// by: the start of the tail, or the end of a file without one.
+func (pl *preload) windowCeiling() int64 {
+	if pl.tailEnd > pl.tailStart {
+		return pl.tailStart
+	}
+	return pl.file.Length()
+}
+
+// awaitingWindow reports whether the preload plans a resume window it has not
+// yet tried to place.
+func (pl *preload) awaitingWindow() bool {
+	return pl.windowPieces > 0 && !pl.windowPlaced
+}
+
+// resolveResumeOffset resolves the preload's playback position to a
+// file-relative byte offset through Config.ResolveOffset, reading the file with a
+// torrent reader that stops when ctx ends. It also returns the pieces the seek
+// index was read from. It returns false when the pool has no ResolveOffset or the
+// position cannot be resolved.
+func (p *Pool) resolveResumeOffset(ctx context.Context, pl *preload) (int64, []int, bool) {
+	if p.cfg.ResolveOffset == nil {
+		return 0, nil, false
+	}
+	reader := pl.file.NewReader()
+	defer func() { _ = reader.Close() }()
+	reader.SetContext(ctx)
+	// The index is read in small scattered pieces, which a readahead would
+	// only add downloads to.
+	reader.SetReadahead(0)
+	index := &indexReader{file: pl.file, pieces: make(map[int]struct{}), reader: reader}
+	offset, ok, err := p.cfg.ResolveOffset(index, pl.file, pl.position)
+	if err != nil {
+		if ctx.Err() == nil {
+			p.logger.Debug("failed to resolve preload playback position",
+				slog.String("hash", pl.infoHash.HexString()),
+				slog.String("file", pl.file.Path()),
+				slog.Duration("position", pl.position),
+				slog.Any("err", err))
+		}
+		return 0, nil, false
+	}
+	return offset, slices.Sorted(maps.Keys(index.pieces)), ok && offset >= 0 && offset < pl.file.Length()
+}
+
+// indexReader reads at offsets of a torrent reader of file by seeking it first,
+// and records the torrent pieces it reads.
+type indexReader struct {
+	file   *torrent.File
+	pieces map[int]struct{}
+	reader torrent.Reader
+}
+
+// ReadAt implements io.ReaderAt.
+func (r *indexReader) ReadAt(b []byte, off int64) (int, error) {
+	if _, err := r.reader.Seek(off, io.SeekStart); err != nil {
+		return 0, err
+	}
+	n, err := io.ReadFull(r.reader, b)
+	if pieceLength := filePieceLength(r.file); n > 0 && pieceLength > 0 {
+		for index := (r.file.Offset() + off) / pieceLength; index*pieceLength < r.file.Offset()+off+int64(n); index++ {
+			r.pieces[int(index)] = struct{}{}
+		}
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		// A read cut short by the end of the file reports io.EOF, as
+		// io.ReaderAt requires.
+		err = io.EOF
+	}
+	return n, err
+}
+
+// placeWindowLocked places a preload's resume window at the file-relative
+// offset, or records that it has none when ok is false. The seek index pieces
+// the offset was resolved from that lie outside the head and tail are kept as
+// they are, each taking a piece from the window, up to all of its pieces. The
+// window takes the rest of the preload's windowPieces whole pieces, starts an
+// eighth of its size before offset, and stays between the head and the tail.
+// The window's and the index pieces join the preload's pieces, claims, and
+// protection. Must be called with p.mu held.
+func (p *Pool) placeWindowLocked(pl *preload, offset int64, indexPieces []int, ok bool) {
+	pl.windowPlaced = true
+	if !ok {
+		pl.targetBytes = pl.rangeBytes()
+		p.logger.Debug("preload has no resume window",
+			slog.String("hash", pl.infoHash.HexString()),
+			slog.String("file", pl.file.Path()),
+			slog.Duration("position", pl.position))
+		return
+	}
+	var index []int
+	for _, piece := range indexPieces {
+		if _, found := slices.BinarySearch(pl.pieces, piece); !found {
+			index = append(index, piece)
+		}
+	}
+	// The reservation holds windowPieces pieces beyond the head and tail, so
+	// an index larger than that is kept only in part.
+	index = index[:min(len(index), pl.windowPieces)]
+	pieceLength := max(pl.file.Torrent().Info().PieceLength, 1)
+	fileOffset := pl.file.Offset()
+	windowPieces := max(pl.windowPieces-len(index), 0)
+	windowBytes := int64(windowPieces) * pieceLength
+	ceiling := pl.windowCeiling()
+	if windowPieces > 0 {
+		start := max(min(offset-windowBytes/8, ceiling-windowBytes), pl.headEnd)
+		startPiece := (fileOffset + start) / pieceLength
+		if offset < ceiling {
+			// Aligning the start down to a whole piece must not leave out the
+			// piece the offset lies in, unless the tail holds it.
+			startPiece = max(startPiece, (fileOffset+offset)/pieceLength-int64(windowPieces)+1)
+		}
+		pl.windowStart = max(startPiece*pieceLength-fileOffset, pl.headEnd)
+		pl.windowEnd = min((startPiece+int64(windowPieces))*pieceLength-fileOffset, ceiling)
+	}
+	if pl.windowEnd <= pl.windowStart {
+		pl.windowStart, pl.windowEnd = 0, 0
+	}
+	pl.targetBytes = pl.rangeBytes()
+	for _, piece := range index {
+		pl.reservation.placed = append(pl.reservation.placed, storage.PieceRange{Start: piece, End: piece})
+	}
+	if pl.windowEnd > pl.windowStart {
+		pl.reservation.placed = append(pl.reservation.placed, storage.PieceRange{
+			Start: int((fileOffset + pl.windowStart) / pieceLength),
+			End:   int((fileOffset + pl.windowEnd - 1) / pieceLength),
+		})
+	}
+	for _, placed := range pl.reservation.placed {
+		for piece := placed.Start; piece <= placed.End; piece++ {
+			pl.pieces = append(pl.pieces, piece)
+		}
+	}
+	slices.Sort(pl.pieces)
+	pl.pieces = slices.Compact(pl.pieces)
+	if pl.reserved && p.cfg.Registry != nil {
+		p.cfg.Registry.SetProtection(pl.infoHash, pl.reservation.id, pl.reservation.protection())
+	}
+	p.claimPreloadLocked(pl)
+	p.logger.Debug("placed preload resume window",
+		slog.String("hash", pl.infoHash.HexString()),
+		slog.String("file", pl.file.Path()),
+		slog.Duration("position", pl.position),
+		slog.Int64("offset", offset),
+		slog.Int64("windowStart", pl.windowStart),
+		slog.Int64("windowEnd", pl.windowEnd),
+		slog.Int("indexPieces", len(index)))
 }
 
 // dispatchPreloadsLocked starts queued preloads in FIFO order while fewer than
@@ -523,7 +757,10 @@ func (p *Pool) startPreloadLocked(pl *preload) {
 // watchPreload follows the piece states of a preload's ranges for as long as
 // the preload runs or is ready. It marks the preload ready once every piece is
 // complete, and running again if storage evicts one of its pieces, and it
-// removes the preload when its torrent closes.
+// removes the preload when its torrent closes. When a preload with a resume
+// window starts running, a goroutine resolves the playback position and places
+// the window, which the preload must complete before it can become ready,
+// while the watcher goes on reporting the progress of the head and tail.
 func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	to := pl.file.Torrent()
 	// Subscribe before reading the piece states, so no change between the
@@ -532,6 +769,8 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 	sub := to.SubscribePieceStateChanges()
 	defer sub.Close()
 	pieces := completedPieces(to, pl.pieces)
+	// windowSignal wakes the watcher when the resume window is placed.
+	windowSignal := make(chan struct{}, 1)
 
 	for {
 		p.mu.Lock()
@@ -539,11 +778,51 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 			p.mu.Unlock()
 			return
 		}
+		// Pieces join a preload only when its window is placed.
+		var added []int
+		if len(pl.pieces) > len(pieces) {
+			for _, index := range pl.pieces {
+				if _, tracked := pieces[index]; !tracked {
+					added = append(added, index)
+				}
+			}
+		}
+		p.mu.Unlock()
+		if len(added) > 0 {
+			// Changes to the added pieces delivered before they were watched
+			// are applied after this read, in order, so their tracked states
+			// still end at the latest ones.
+			maps.Copy(pieces, completedPieces(to, added))
+		}
+
+		p.mu.Lock()
+		if ctx.Err() != nil {
+			p.mu.Unlock()
+			return
+		}
+		// The window is placed under p.mu, so progress reads it there too.
 		completedBytes, complete := pl.progress(pieces)
 		p.updatePreloadLocked(pl, completedBytes, complete)
+		if pl.state == PreloadRunning && pl.awaitingWindow() && !pl.resolving {
+			// Resolving waits for the index pieces to download, so it runs
+			// apart from the watcher, which keeps reporting progress.
+			pl.resolving = true
+			p.preloadWatchers.Go(func() {
+				offset, indexPieces, ok := p.resolveResumeOffset(ctx, pl)
+				p.mu.Lock()
+				if ctx.Err() == nil && p.preloads[pl.infoHash] == pl {
+					p.placeWindowLocked(pl, offset, indexPieces, ok)
+				}
+				p.mu.Unlock()
+				select {
+				case windowSignal <- struct{}{}:
+				default:
+				}
+			})
+		}
 		p.mu.Unlock()
 
-		if !waitForPieceChange(ctx, to, sub.Values, pieces) {
+		if !waitForPieceChange(ctx, to, sub.Values, pieces, windowSignal) {
 			if ctx.Err() == nil {
 				p.mu.Lock()
 				if p.preloads[pl.infoHash] == pl {
@@ -561,7 +840,7 @@ func (p *Pool) watchPreload(ctx context.Context, pl *preload) {
 // records the new completion in complete, and records the changes already
 // delivered as well, so that a burst causes one check. It also returns true
 // when wake is signalled. It returns false when ctx ends or the torrent closes.
-func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, complete map[int]bool) bool {
+func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan torrent.PieceStateChange, complete map[int]bool, wake <-chan struct{}) bool {
 	record := func(change torrent.PieceStateChange) bool {
 		if _, watched := complete[change.Index]; !watched {
 			return false
@@ -575,6 +854,8 @@ func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan
 			return false
 		case <-to.Closed():
 			return false
+		case <-wake:
+			return true
 		case change, ok := <-changes:
 			if !ok {
 				return false
@@ -598,7 +879,8 @@ func waitForPieceChange(ctx context.Context, to *torrent.Torrent, changes <-chan
 }
 
 // updatePreloadLocked records a preload's progress. A running preload whose
-// pieces are all complete becomes ready and gives up its priority claims. A
+// pieces are all complete becomes ready and gives up its priority claims,
+// unless its resume window is still to be placed. A
 // ready preload that lost a piece is removed when it is due for removal
 // anyway; otherwise it runs again, or waits first in the queue, keeping its
 // reservation, while every preload slot is taken. Must be called with p.mu
@@ -612,7 +894,7 @@ func (p *Pool) updatePreloadLocked(pl *preload, completedBytes int64, complete b
 	}
 	pl.completedBytes = completedBytes
 	switch {
-	case pl.state == PreloadRunning && complete:
+	case pl.state == PreloadRunning && complete && !pl.awaitingWindow():
 		pl.state = PreloadReady
 		now := time.Now()
 		// A preload that downloads a lost piece again keeps the ready TTL it

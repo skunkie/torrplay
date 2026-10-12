@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,7 +18,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -35,6 +38,8 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
 	"github.com/torrplay/torrplay/internal/utils"
+	"github.com/torrplay/torrplay/pkg/stream"
+	"golang.org/x/time/rate"
 )
 
 type localWebseedFixture struct {
@@ -932,4 +937,207 @@ func TestIntegrationDownloaderFollowsStreaming(t *testing.T) {
 	// Dropping the torrent closes its lingering reader within a second.
 	to.Drop()
 	require.Eventually(t, downloading, 3*time.Second, time.Millisecond, "closing the last reader must resume the background download at once")
+}
+
+// matroskaFixture returns a Matroska file of clusters clusterSize bytes each,
+// one second apart, with a SeekHead locating the Cues after them, and the
+// file offset of each cluster.
+func matroskaFixture(clusters, clusterSize int) ([]byte, []int64) {
+	element := func(id []byte, payload ...[]byte) []byte {
+		data := bytes.Join(payload, nil)
+		// Eight-byte sizes keep every element's size independent of its
+		// content's values.
+		size := make([]byte, 8)
+		binary.BigEndian.PutUint64(size, uint64(len(data)))
+		size[0] = 0x01
+		return slices.Concat(id, size, data)
+	}
+	uint64Bytes := func(value uint64) []byte {
+		return binary.BigEndian.AppendUint64(nil, value)
+	}
+	seekHead := func(cuesPosition uint64) []byte {
+		return element([]byte{0x11, 0x4D, 0x9B, 0x74}, element([]byte{0x4D, 0xBB},
+			element([]byte{0x53, 0xAB}, []byte{0x1C, 0x53, 0xBB, 0x6B}),
+			element([]byte{0x53, 0xAC}, uint64Bytes(cuesPosition))))
+	}
+	info := element([]byte{0x15, 0x49, 0xA9, 0x66}, element([]byte{0x2A, 0xD7, 0xB1}, uint64Bytes(1_000_000)))
+	tracks := element([]byte{0x16, 0x54, 0xAE, 0x6B}, element([]byte{0xAE},
+		element([]byte{0xD7}, uint64Bytes(1)),
+		element([]byte{0x83}, uint64Bytes(1))))
+	filler := bytes.Repeat([]byte("torrplay-cluster\n"), clusterSize/17+1)[:clusterSize-12]
+	cluster := element([]byte{0x1F, 0x43, 0xB6, 0x75}, filler)
+
+	headerLength := uint64(len(seekHead(0)) + len(info) + len(tracks))
+	positions := make([]uint64, clusters)
+	cuePoints := make([][]byte, 0, clusters)
+	for i := range positions {
+		positions[i] = headerLength + uint64(i*len(cluster))
+		cuePoints = append(cuePoints, element([]byte{0xBB},
+			element([]byte{0xB3}, uint64Bytes(uint64(i)*1000)),
+			element([]byte{0xB7},
+				element([]byte{0xF7}, uint64Bytes(1)),
+				element([]byte{0xF1}, uint64Bytes(positions[i])))))
+	}
+	segmentPayload := make([][]byte, 0, clusters+4)
+	segmentPayload = append(segmentPayload, seekHead(headerLength+uint64(clusters*len(cluster))), info, tracks)
+	for range clusters {
+		segmentPayload = append(segmentPayload, cluster)
+	}
+	segmentPayload = append(segmentPayload, element([]byte{0x1C, 0x53, 0xBB, 0x6B}, cuePoints...))
+	ebml := element([]byte{0x1A, 0x45, 0xDF, 0xA3})
+	file := slices.Concat(ebml, element([]byte{0x18, 0x53, 0x80, 0x67}, segmentPayload...))
+
+	segmentDataStart := int64(len(ebml) + 12)
+	offsets := make([]int64, clusters)
+	for i, position := range positions {
+		offsets[i] = segmentDataStart + int64(position)
+	}
+	return file, offsets
+}
+
+// A preload at a playback position caches the cluster the file's Matroska
+// Cues point to for that position, besides the file's head and tail.
+func TestIntegrationPreloadAtPlaybackPosition(t *testing.T) {
+	payload, clusterOffsets := matroskaFixture(64, 64<<10)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "Sintel.mkv", time.Time{}, bytes.NewReader(payload))
+	}))
+	t.Cleanup(server.Close)
+	ctrl := newIntegrationTestController(t)
+	ih := saveWebseedTorrent(t, ctrl, webseedMetaInfo(t, payload, server.URL, "Sintel.mkv"), len(payload), api.Memory)
+	// The webseed sends the whole file, so memory storage smaller than it
+	// keeps only the pieces the preload protects, and those of the latest
+	// writes.
+	require.NoError(t, ctrl.storageClient.Load().SetMaxMemory(768<<10))
+	pool := ctrl.streamPool.Load()
+	// A 1 MiB budget leaves a 512 KiB preload: a head and tail of 128 KiB
+	// and a window of the remaining whole pieces.
+	pool.SetReadaheadBudget(1 << 20)
+	to, ok := ctrl.clientTorrent(ih)
+	require.True(t, ok)
+
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 30*time.Second))
+	require.Eventually(t, func() bool {
+		status, ok := pool.PreloadStatus(ih)
+		return ok && status.State == stream.PreloadReady
+	}, 10*time.Second, 10*time.Millisecond)
+	status, _ := pool.PreloadStatus(ih)
+	assert.Greater(t, status.TargetBytes, int64(256<<10), "the window must be placed")
+
+	cached := func(offset int64) bool {
+		return to.Piece(int(offset / localWebseedPieceLength)).State().Complete
+	}
+	assert.True(t, cached(0), "the head must be cached")
+	assert.True(t, cached(int64(len(payload))-1), "the tail with the Cues must be cached")
+	assert.True(t, cached(clusterOffsets[30]), "the cluster at the position must be cached")
+	assert.True(t, cached(clusterOffsets[32]), "the window must extend past the position")
+	assert.False(t, cached(clusterOffsets[10]), "data away from the position must not be cached")
+}
+
+// newRateLimitedSeeder returns a torrent client listening on loopback TCP that
+// seeds payload, the single file of meta, uploading at most bytesPerSecond, as
+// a slow swarm does.
+func newRateLimitedSeeder(t *testing.T, meta *metainfo.MetaInfo, payload []byte, bytesPerSecond int) *torrent.Client {
+	t.Helper()
+	info, err := meta.UnmarshalInfo()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	path := filepath.Join(append([]string{dir, info.Name}, info.Files[0].Path...)...)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, payload, 0o600))
+
+	config := torrent.NewDefaultClientConfig()
+	config.DataDir = dir
+	config.Seed = true
+	config.NoDHT = true
+	config.DisablePEX = true
+	config.DisableTrackers = true
+	config.DisableWebtorrent = true
+	config.DisableWebseeds = true
+	config.NoDefaultPortForwarding = true
+	config.DisableUTP = true
+	config.DisableIPv6 = true
+	config.SetListenAddr("127.0.0.1:0")
+	config.UploadRateLimiter = rate.NewLimiter(rate.Limit(bytesPerSecond), 32<<10)
+	seeder, err := torrent.NewClient(config)
+	require.NoError(t, err)
+	t.Cleanup(func() { seeder.Close() })
+	to, err := seeder.AddTorrent(meta)
+	require.NoError(t, err)
+	require.NoError(t, to.VerifyDataContext(t.Context()))
+	// Verified pieces are marked complete asynchronously.
+	require.Eventually(t, to.Complete().Bool, 10*time.Second, 10*time.Millisecond, "the seeder must hold the whole file")
+	return seeder
+}
+
+// A preload at a playback position fetched from a slow peer spends its
+// bandwidth on the data playback resumes from: besides the file's first and
+// last pieces, which hold the header and Cues, it downloads the window at the
+// position and nothing else from the start of the file.
+func TestIntegrationPreloadAtPlaybackPositionFromSlowPeer(t *testing.T) {
+	payload, clusterOffsets := matroskaFixture(128, 64<<10)
+	meta := webseedMetaInfo(t, payload, "", "Sintel.mkv")
+	meta.UrlList = nil
+	seeder := newRateLimitedSeeder(t, meta, payload, 256<<10)
+
+	runtimeConfig := testControllerRuntimeConfig()
+	runtimeConfig.configureClient = func(config *torrent.ClientConfig) {
+		config.NoDHT = true
+		config.DisablePEX = true
+		config.DisableTrackers = true
+		config.DisableWebtorrent = true
+		config.DisableWebseeds = true
+		config.NoDefaultPortForwarding = true
+		config.DisableUTP = true
+		config.DisableIPv6 = true
+		config.SetListenAddr("127.0.0.1:0")
+	}
+	ctrl, _ := newTestControllerWithRuntimeConfig(t, runtimeConfig)
+	ctrl.Start()
+	_, err := ctrl.loadTorrentSpec(torrent.TorrentSpecFromMetaInfo(meta), api.Memory)
+	require.NoError(t, err)
+	ih := saveTorrentRecord(t, ctrl, meta, len(payload), api.Memory)
+	pool := ctrl.streamPool.Load()
+	// A 1 MiB budget leaves a 512 KiB preload: a head and tail of 128 KiB
+	// and a window of the remaining whole pieces, about two seconds of the
+	// seeder's upload.
+	pool.SetReadaheadBudget(1 << 20)
+	to, ok := ctrl.clientTorrent(ih)
+	require.True(t, ok)
+	sub := to.SubscribePieceStateChanges()
+	defer sub.Close()
+
+	require.True(t, ctrl.startPreload(to, to.Files()[0], 60*time.Second))
+	to.AddClientPeer(seeder)
+
+	completedAt := make(map[int]time.Time)
+	ready := time.NewTicker(10 * time.Millisecond)
+	defer ready.Stop()
+	timeout := time.After(30 * time.Second)
+wait:
+	for {
+		select {
+		case change := <-sub.Values:
+			if _, seen := completedAt[change.Index]; change.Complete && !seen {
+				completedAt[change.Index] = time.Now()
+			}
+		case <-ready.C:
+			if status, ok := pool.PreloadStatus(ih); ok && status.State == stream.PreloadReady {
+				break wait
+			}
+		case <-timeout:
+			require.FailNow(t, "the preload did not become ready")
+		}
+	}
+
+	piece := func(offset int64) int { return int(offset / localWebseedPieceLength) }
+	_, windowDone := completedAt[piece(clusterOffsets[60])]
+	assert.True(t, windowDone, "the cluster at the position must be preloaded")
+	_, first := completedAt[0]
+	_, last := completedAt[to.NumPieces()-1]
+	assert.True(t, first && last, "the header and Cues must be preloaded")
+	for index := 1; index < piece(128<<10); index++ {
+		_, done := completedAt[index]
+		assert.False(t, done, "piece %d at the start of the file must not be preloaded", index)
+	}
 }
