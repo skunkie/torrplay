@@ -160,6 +160,7 @@ export function useSubtitleTracks({
     const controller = new AbortController();
     activeScan.current = controller;
     const startedAt = getVidstackCurrentTime(instance);
+    let skipped = false;
     loadEmbeddedSubtitleTrackVtt(embeddedStreamUrl, info.embeddedTrackNumber!, fetch, controller.signal, cues => {
       if (controller.signal.aborted) return;
       for (const cue of cues) {
@@ -185,10 +186,12 @@ export function useSubtitleTracks({
       cache: sourceCache,
       currentTime: () => getVidstackCurrentTime(instance),
       waitForTimeChange: signal => waitForTimeChange(instance, signal),
+      onSkip: () => { skipped = true; },
     }).then(() => {
       if (!controller.signal.aborted) {
-        // A scan started near a seek target has not loaded the earlier movie.
-        if (startedAt <= SUBTITLE_SEEK_PREROLL_SECONDS) completed.current.add(track);
+        // A scan started near a seek target, or one that skipped clusters
+        // playback had passed, has not loaded the earlier movie.
+        if (startedAt <= SUBTITLE_SEEK_PREROLL_SECONDS && !skipped) completed.current.add(track);
       }
     }).catch(error => {
       if (!controller.signal.aborted) {
