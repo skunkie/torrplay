@@ -1,0 +1,501 @@
+// SPDX-FileCopyrightText: 2026 TorrPlay
+//
+// SPDX-License-Identifier: MIT
+
+package media
+
+import (
+	"encoding/binary"
+	"io"
+	"math"
+)
+
+// maxMP4TableBytes bounds the size of one sample table read from a file, so a
+// crafted file cannot make the resolver allocate and download more. It holds
+// the sample sizes of 4M samples, over 18 hours of video at 60 frames per
+// second.
+const maxMP4TableBytes = 16 << 20
+
+// mp4Box is an ISO BMFF box: its four-character type and the file range
+// [dataStart, dataEnd) of its data after its header.
+type mp4Box struct {
+	dataEnd   int64
+	dataStart int64
+	typ       string
+}
+
+// mp4Edit is an edit list entry: its duration in the movie timescale and the
+// media time it starts at in the media timescale, or -1 for an empty edit.
+type mp4Edit struct {
+	duration  uint64
+	mediaTime int64
+}
+
+// mp4SampleTable holds what a video track's sample table and edit list need
+// to map a presentation time to a byte offset. Times are in the media
+// timescale, except the edits' durations, which are in the movie timescale.
+type mp4SampleTable struct {
+	chunkOffsets []uint64
+	edits        []mp4Edit
+	movieScale   uint32
+	sampleSizes  []uint32
+	stsc         []mp4SampleToChunk
+	stss         []uint32
+	stts         []mp4TimeToSample
+	timescale    uint32
+	uniformSize  uint32
+}
+
+// mp4SampleToChunk is a sample-to-chunk entry: the 1-based chunk from which
+// every chunk holds samplesPerChunk samples, up to the next entry's chunk.
+type mp4SampleToChunk struct {
+	firstChunk      uint32
+	samplesPerChunk uint32
+}
+
+// mp4TimeToSample is a time-to-sample entry: count consecutive samples that
+// each last delta media timescale units.
+type mp4TimeToSample struct {
+	count uint32
+	delta uint32
+}
+
+// resolveMP4Offset resolves positionSeconds to the file offset of the last
+// sync sample of the first video track at or before it, reading the track's
+// sample tables from moov. It reports false for a file without moov, a
+// fragmented file, whose samples are indexed outside moov, or one without a
+// video track.
+func resolveMP4Offset(reader io.ReaderAt, size int64, positionSeconds float64) (int64, bool, error) {
+	moov, found, err := findMP4Box(reader, 0, size, "moov")
+	if err != nil || !found {
+		return 0, false, err
+	}
+
+	movieScale, err := readMP4MovieTimescale(reader, moov)
+	if err != nil {
+		return 0, false, err
+	}
+
+	children, err := listMP4Boxes(reader, moov.dataStart, moov.dataEnd)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, child := range children {
+		if child.typ != "trak" {
+			continue
+		}
+		table, isVideo, parseErr := readMP4Track(reader, child, movieScale)
+		if parseErr != nil {
+			return 0, false, parseErr
+		}
+		if !isVideo {
+			continue
+		}
+		offset, resolved := table.resolveOffset(positionSeconds)
+		if !resolved || offset < 0 || offset >= size {
+			return 0, false, nil
+		}
+		return offset, true, nil
+	}
+
+	return 0, false, nil
+}
+
+// readMP4MovieTimescale returns the movie timescale from moov's mvhd, or zero
+// without one.
+func readMP4MovieTimescale(reader io.ReaderAt, moov mp4Box) (uint32, error) {
+	mvhd, found, err := findMP4Box(reader, moov.dataStart, moov.dataEnd, "mvhd")
+	if err != nil || !found {
+		return 0, err
+	}
+	buffer := make([]byte, 24)
+	if err := readAtFull(reader, buffer, mvhd.dataStart); err != nil {
+		return 0, err
+	}
+	if buffer[0] == 1 {
+		return binary.BigEndian.Uint32(buffer[20:24]), nil
+	}
+	return binary.BigEndian.Uint32(buffer[12:16]), nil
+}
+
+// readMP4Track reads the sample table and edit list of a trak, and reports
+// whether it is a video track. A track that is not video is not read further.
+func readMP4Track(reader io.ReaderAt, trak mp4Box, movieScale uint32) (mp4SampleTable, bool, error) {
+	var table mp4SampleTable
+	table.movieScale = movieScale
+
+	mdia, found, err := findMP4Box(reader, trak.dataStart, trak.dataEnd, "mdia")
+	if err != nil || !found {
+		return table, false, err
+	}
+	hdlr, found, err := findMP4Box(reader, mdia.dataStart, mdia.dataEnd, "hdlr")
+	if err != nil || !found {
+		return table, false, err
+	}
+	handler := make([]byte, 12)
+	if err := readAtFull(reader, handler, hdlr.dataStart); err != nil {
+		return table, false, err
+	}
+	if string(handler[8:12]) != "vide" {
+		return table, false, nil
+	}
+
+	mdhd, found, err := findMP4Box(reader, mdia.dataStart, mdia.dataEnd, "mdhd")
+	if err != nil || !found {
+		return table, true, err
+	}
+	mdhdHeader := make([]byte, 24)
+	if err := readAtFull(reader, mdhdHeader, mdhd.dataStart); err != nil {
+		return table, true, err
+	}
+	if mdhdHeader[0] == 1 {
+		table.timescale = binary.BigEndian.Uint32(mdhdHeader[20:24])
+	} else {
+		table.timescale = binary.BigEndian.Uint32(mdhdHeader[12:16])
+	}
+	if table.timescale == 0 {
+		return table, true, errInvalidContainer
+	}
+
+	if edts, hasEdits, findErr := findMP4Box(reader, trak.dataStart, trak.dataEnd, "edts"); findErr != nil {
+		return table, true, findErr
+	} else if hasEdits {
+		if elst, hasList, listErr := findMP4Box(reader, edts.dataStart, edts.dataEnd, "elst"); listErr != nil {
+			return table, true, listErr
+		} else if hasList {
+			table.edits, err = readMP4EditList(reader, elst)
+			if err != nil {
+				return table, true, err
+			}
+		}
+	}
+
+	minf, found, err := findMP4Box(reader, mdia.dataStart, mdia.dataEnd, "minf")
+	if err != nil || !found {
+		return table, true, err
+	}
+	stbl, found, err := findMP4Box(reader, minf.dataStart, minf.dataEnd, "stbl")
+	if err != nil || !found {
+		return table, true, err
+	}
+	boxes, err := listMP4Boxes(reader, stbl.dataStart, stbl.dataEnd)
+	if err != nil {
+		return table, true, err
+	}
+	for _, box := range boxes {
+		switch box.typ {
+		case "co64":
+			table.chunkOffsets, err = readMP4Table(reader, box, 8, binary.BigEndian.Uint64)
+		case "stco":
+			table.chunkOffsets, err = readMP4Table(reader, box, 4, func(entry []byte) uint64 {
+				return uint64(binary.BigEndian.Uint32(entry))
+			})
+		case "stsc":
+			table.stsc, err = readMP4Table(reader, box, 12, func(entry []byte) mp4SampleToChunk {
+				return mp4SampleToChunk{
+					firstChunk:      binary.BigEndian.Uint32(entry),
+					samplesPerChunk: binary.BigEndian.Uint32(entry[4:]),
+				}
+			})
+		case "stss":
+			table.stss, err = readMP4Table(reader, box, 4, binary.BigEndian.Uint32)
+		case "stsz":
+			table.uniformSize, table.sampleSizes, err = readMP4SampleSizes(reader, box)
+		case "stts":
+			table.stts, err = readMP4Table(reader, box, 8, func(entry []byte) mp4TimeToSample {
+				return mp4TimeToSample{
+					count: binary.BigEndian.Uint32(entry),
+					delta: binary.BigEndian.Uint32(entry[4:]),
+				}
+			})
+		}
+		if err != nil {
+			return table, true, err
+		}
+	}
+
+	return table, true, nil
+}
+
+// resolveOffset returns the file offset of the last sync sample at or before
+// positionSeconds, or of the sample there when every sample is a sync
+// sample. It reports false when the tables do not locate that sample.
+func (table mp4SampleTable) resolveOffset(positionSeconds float64) (int64, bool) {
+	if table.timescale == 0 || len(table.stts) == 0 || len(table.stsc) == 0 || len(table.chunkOffsets) == 0 {
+		return 0, false
+	}
+	targetTime := table.mediaTime(positionSeconds)
+	sample := table.sampleAtTime(targetTime)
+	if len(table.stss) > 0 {
+		targetNumber := sample + 1
+		syncSample := table.stss[0]
+		for _, candidate := range table.stss {
+			if uint64(candidate) > targetNumber {
+				break
+			}
+			syncSample = candidate
+		}
+		if syncSample == 0 {
+			return 0, false
+		}
+		sample = uint64(syncSample - 1)
+	}
+
+	chunk, firstSample, ok := table.chunkForSample(sample)
+	if !ok || chunk >= uint64(len(table.chunkOffsets)) {
+		return 0, false
+	}
+	offset := table.chunkOffsets[chunk]
+	for current := firstSample; current < sample; current++ {
+		size, hasSize := table.sampleSize(current)
+		if !hasSize || math.MaxUint64-offset < uint64(size) {
+			return 0, false
+		}
+		offset += uint64(size)
+	}
+	if offset > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(offset), true
+}
+
+// mediaTime maps a presentation time in seconds to a media time in the media
+// timescale through the edit list.
+func (table mp4SampleTable) mediaTime(positionSeconds float64) uint64 {
+	if len(table.edits) == 0 || table.movieScale == 0 {
+		return scaleToUnits(positionSeconds, float64(table.timescale))
+	}
+	presentation := positionSeconds * float64(table.movieScale)
+	mediaPerMovieUnit := float64(table.timescale) / float64(table.movieScale)
+	add := func(a, b uint64) uint64 {
+		if math.MaxUint64-a < b {
+			return math.MaxUint64
+		}
+		return a + b
+	}
+	// ended is the media time where the latest media edit so far ends, which
+	// an empty edit after it shows.
+	var elapsed float64
+	var ended uint64
+	for index, edit := range table.edits {
+		duration := float64(edit.duration)
+		// The last edit also takes positions past the end of the edits, whose
+		// durations are rounded.
+		if presentation < elapsed+duration || index == len(table.edits)-1 {
+			if edit.mediaTime < 0 {
+				return ended
+			}
+			return add(uint64(edit.mediaTime), scaleToUnits(presentation-elapsed, mediaPerMovieUnit))
+		}
+		if edit.mediaTime >= 0 {
+			ended = add(uint64(edit.mediaTime), scaleToUnits(duration, mediaPerMovieUnit))
+		}
+		elapsed += duration
+	}
+	return ended
+}
+
+// sampleAtTime returns the 0-based sample playing at media time target, or
+// the last sample for a time past them.
+func (table mp4SampleTable) sampleAtTime(target uint64) uint64 {
+	var elapsed, sample uint64
+	for _, entry := range table.stts {
+		entryDuration := uint64(entry.count) * uint64(entry.delta)
+		if entry.delta > 0 && target < elapsed+entryDuration {
+			return sample + (target-elapsed)/uint64(entry.delta)
+		}
+		elapsed += entryDuration
+		sample += uint64(entry.count)
+	}
+	if sample == 0 {
+		return 0
+	}
+	return sample - 1
+}
+
+// chunkForSample returns the 0-based chunk holding sample target and the
+// first sample of that chunk, or false when the tables do not reach it.
+func (table mp4SampleTable) chunkForSample(target uint64) (uint64, uint64, bool) {
+	var firstSample uint64
+	for index, entry := range table.stsc {
+		if entry.firstChunk == 0 || entry.samplesPerChunk == 0 {
+			return 0, 0, false
+		}
+		firstChunk := uint64(entry.firstChunk - 1)
+		nextChunk := uint64(len(table.chunkOffsets))
+		if index+1 < len(table.stsc) {
+			nextChunk = uint64(table.stsc[index+1].firstChunk - 1)
+		}
+		if nextChunk < firstChunk {
+			return 0, 0, false
+		}
+		spanSamples := (nextChunk - firstChunk) * uint64(entry.samplesPerChunk)
+		if target < firstSample+spanSamples {
+			relative := target - firstSample
+			chunkDelta := relative / uint64(entry.samplesPerChunk)
+			return firstChunk + chunkDelta, firstSample + chunkDelta*uint64(entry.samplesPerChunk), true
+		}
+		firstSample += spanSamples
+	}
+	return 0, 0, false
+}
+
+// sampleSize returns the size of sample, or false when the table has none for
+// it.
+func (table mp4SampleTable) sampleSize(sample uint64) (uint32, bool) {
+	if table.uniformSize > 0 {
+		return table.uniformSize, true
+	}
+	if sample >= uint64(len(table.sampleSizes)) {
+		return 0, false
+	}
+	return table.sampleSizes[sample], true
+}
+
+// findMP4Box returns the first box of type typ in [start, end), reading box
+// headers only up to it. It stops at a movie fragment, whose samples follow
+// the fragments' own indexes rather than moov's sample tables, so a fragmented
+// file is not walked fragment by fragment.
+func findMP4Box(reader io.ReaderAt, start, end int64, typ string) (mp4Box, bool, error) {
+	var found mp4Box
+	ok := false
+	err := walkMP4Boxes(reader, start, end, func(box mp4Box) bool {
+		if box.typ == typ {
+			found, ok = box, true
+		}
+		return !ok && box.typ != "moof"
+	})
+	return found, ok, err
+}
+
+// listMP4Boxes returns the boxes in [start, end).
+func listMP4Boxes(reader io.ReaderAt, start, end int64) ([]mp4Box, error) {
+	boxes := make([]mp4Box, 0, 8)
+	err := walkMP4Boxes(reader, start, end, func(box mp4Box) bool {
+		boxes = append(boxes, box)
+		return true
+	})
+	if err != nil {
+		return nil, err
+	}
+	return boxes, nil
+}
+
+// walkMP4Boxes calls visit with each box in [start, end) in order until visit
+// returns false.
+func walkMP4Boxes(reader io.ReaderAt, start, end int64, visit func(mp4Box) bool) error {
+	for offset := start; offset+8 <= end; {
+		header := make([]byte, 16)
+		if err := readAtFull(reader, header[:8], offset); err != nil {
+			return err
+		}
+		boxSize := int64(binary.BigEndian.Uint32(header[:4]))
+		headerSize := int64(8)
+		switch boxSize {
+		case 1:
+			if err := readAtFull(reader, header[8:16], offset+8); err != nil {
+				return err
+			}
+			largeSize := binary.BigEndian.Uint64(header[8:16])
+			if largeSize > math.MaxInt64 {
+				return errInvalidContainer
+			}
+			boxSize = int64(largeSize)
+			headerSize = 16
+		case 0:
+			boxSize = end - offset
+		}
+		boxEnd, valid := checkedEnd(offset, boxSize, end)
+		if !valid || boxSize < headerSize {
+			return errInvalidContainer
+		}
+		if !visit(mp4Box{
+			dataEnd:   boxEnd,
+			dataStart: offset + headerSize,
+			typ:       string(header[4:8]),
+		}) {
+			return nil
+		}
+		offset = boxEnd
+	}
+	return nil
+}
+
+// readMP4Table reads the table of a full box, whose count of entrySize-byte
+// entries follows its version and flags, decoding each entry with decode. A
+// table larger than maxMP4TableBytes is refused before it is allocated or
+// read.
+func readMP4Table[T any](reader io.ReaderAt, box mp4Box, entrySize int64, decode func([]byte) T) ([]T, error) {
+	header := make([]byte, 8)
+	if err := readAtFull(reader, header, box.dataStart); err != nil {
+		return nil, err
+	}
+	size := int64(binary.BigEndian.Uint32(header[4:8])) * entrySize
+	if size > maxMP4TableBytes {
+		return nil, errInvalidContainer
+	}
+	if _, valid := checkedEnd(box.dataStart+8, size, box.dataEnd); !valid {
+		return nil, errInvalidContainer
+	}
+	buffer := make([]byte, size)
+	if err := readAtFull(reader, buffer, box.dataStart+8); err != nil {
+		return nil, err
+	}
+	entries := make([]T, size/entrySize)
+	for index := range entries {
+		entries[index] = decode(buffer[int64(index)*entrySize:])
+	}
+	return entries, nil
+}
+
+// readMP4SampleSizes reads an stsz box: the size shared by every sample, or
+// zero and each sample's size. A table larger than maxMP4TableBytes is
+// refused before it is allocated or read.
+func readMP4SampleSizes(reader io.ReaderAt, box mp4Box) (uint32, []uint32, error) {
+	header := make([]byte, 12)
+	if err := readAtFull(reader, header, box.dataStart); err != nil {
+		return 0, nil, err
+	}
+	uniform := binary.BigEndian.Uint32(header[4:8])
+	count := binary.BigEndian.Uint32(header[8:12])
+	if uniform > 0 {
+		return uniform, nil, nil
+	}
+	if int64(count)*4 > maxMP4TableBytes {
+		return 0, nil, errInvalidContainer
+	}
+	if _, valid := checkedEnd(box.dataStart+12, int64(count)*4, box.dataEnd); !valid {
+		return 0, nil, errInvalidContainer
+	}
+	buffer := make([]byte, int(count)*4)
+	if err := readAtFull(reader, buffer, box.dataStart+12); err != nil {
+		return 0, nil, err
+	}
+	sizes := make([]uint32, count)
+	for index := range sizes {
+		sizes[index] = binary.BigEndian.Uint32(buffer[index*4 : index*4+4])
+	}
+	return 0, sizes, nil
+}
+
+// readMP4EditList reads the entries of an elst box of either version.
+func readMP4EditList(reader io.ReaderAt, box mp4Box) ([]mp4Edit, error) {
+	version := make([]byte, 1)
+	if err := readAtFull(reader, version, box.dataStart); err != nil {
+		return nil, err
+	}
+	if version[0] == 1 {
+		return readMP4Table(reader, box, 20, func(entry []byte) mp4Edit {
+			return mp4Edit{
+				duration:  binary.BigEndian.Uint64(entry),
+				mediaTime: int64(binary.BigEndian.Uint64(entry[8:])), //nolint:gosec // The media time is a signed 64-bit field.
+			}
+		})
+	}
+	return readMP4Table(reader, box, 12, func(entry []byte) mp4Edit {
+		return mp4Edit{
+			duration:  uint64(binary.BigEndian.Uint32(entry)),
+			mediaTime: int64(int32(binary.BigEndian.Uint32(entry[4:]))), //nolint:gosec // The media time is a signed 32-bit field.
+		}
+	})
+}
