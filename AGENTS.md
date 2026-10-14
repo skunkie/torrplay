@@ -15,7 +15,7 @@ SPDX-License-Identifier: MIT
 - **Body Requirements**: For a non-trivial commit, add a body after a blank line and use `-` bullets. Write each bullet as a complete sentence ending with a period.
 - **Content Focus**: Use body bullets to describe observable behavior, important implementation or safety details, and relevant test coverage. Do not narrate file-by-file edits.
 - **Timestamp Symmetry**: When rebasing, amending, or squashing commits, ensure `GIT_COMMITTER_DATE` matches `GIT_AUTHOR_DATE`.
-- **Atomic Buildability**: Ensure every commit compiles and verifies cleanly: run backend compilation (`go build ./...`), all Go tests (`go test ./...`), and linter checks (`golangci-lint run` or `make lint`). When modifying OpenAPI schema or generator inputs, also run the OpenAPI zero-diff check (`go generate ./...`). When modifying `client/`, run frontend tests, linting, and build verification (`pnpm --prefix client test -- --run`, `pnpm --prefix client lint`, and `pnpm --prefix client build`).
+- **Atomic Buildability**: Ensure every commit compiles and verifies cleanly: run backend compilation (`go build ./...`), all Go tests (`go test ./...`), linter checks (`golangci-lint run` or `make lint`), and the REUSE licensing check (`reuse lint` or `make lint-reuse`). When modifying OpenAPI schema or generator inputs, also run the OpenAPI zero-diff check (`go generate ./...`). When modifying `client/`, run frontend tests, linting, and build verification (`pnpm --prefix client test -- --run`, `pnpm --prefix client lint`, and `pnpm --prefix client build`).
 
 Example:
 

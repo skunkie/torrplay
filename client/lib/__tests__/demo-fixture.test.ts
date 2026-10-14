@@ -87,7 +87,9 @@ describe('demo media fixture', () => {
   it('ships attribution for the adapted media', async () => {
     const license = await readFile(resolve(process.cwd(), 'public/demo/torrplay-demo.webm.license'), 'utf8');
 
+    // REUSE-IgnoreStart
     expect(license).toContain('SPDX-License-Identifier: CC-BY-SA-4.0');
+    // REUSE-IgnoreEnd
     expect(license).toContain('Bjorn Falkevik');
     expect(license).toContain('https://commons.wikimedia.org/wiki/File:This_is_a_10_second_testvideo_with_bars_and_tone.webm');
     expect(license).toContain('Changes: remuxed for the TorrPlay demo');

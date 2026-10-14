@@ -1,0 +1,114 @@
+version = 1
+
+# Lockfiles and checksum databases are rewritten by their package managers,
+# which drop any comment header, so cover them here instead of in-file.
+[[annotations]]
+path = [
+  "go.sum",
+  "client/pnpm-lock.yaml",
+  "client/src-tauri/Cargo.lock",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 TorrPlay"
+SPDX-License-Identifier = "MIT"
+
+# Generated sources are rewritten in full by their generators: oapi-codegen
+# for the API, and `cap sync` for the Capacitor Gradle files. Cover them
+# here instead of in-file.
+[[annotations]]
+path = [
+  "internal/api/api.gen.go",
+  "client/android/app/capacitor.build.gradle",
+  "client/android/capacitor.settings.gradle",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 TorrPlay"
+SPDX-License-Identifier = "MIT"
+
+# JSON has no comment syntax, so cover these here instead of in-file.
+[[annotations]]
+path = [
+  "client/cache/config.json",
+  "client/package.json",
+  "client/src-tauri/capabilities/default.json",
+  "client/src-tauri/tauri.conf.json",
+  "client/src-tauri/tauri.macos.conf.json",
+  "client/src-tauri/tauri.windows.conf.json",
+  "client/tsconfig.json",
+  "winres/winres.json",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 TorrPlay"
+SPDX-License-Identifier = "MIT"
+
+# Raster images and icon bundles cannot carry a comment header. They are
+# renditions of the TorrPlay logo and the DLNA media icons. The Tauri icons
+# directory is covered whole, including its XML launcher definitions,
+# because `tauri icon` regenerates all of it.
+[[annotations]]
+path = [
+  "client/android/app/src/main/res/**/*.png",
+  "client/assets/logo.png",
+  "client/public/icon-*.png",
+  "client/src-tauri/icons/**",
+  "internal/dlna/icons/**/*.png",
+  "winres/icon.ico",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 TorrPlay"
+SPDX-License-Identifier = "MIT"
+
+# The README screenshots show the demo, whose torrents carry the posters of
+# Blender's open movies: Sintel, Big Buck Bunny and Tears of Steel under
+# CC-BY-3.0, and Cosmos Laundromat under CC-BY-4.0. The settings screenshot
+# shows only part of the Tears of Steel poster behind the dialog.
+[[annotations]]
+path = "docs/main.png"
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+  "2026 TorrPlay",
+  "2008-2015 Blender Foundation",
+]
+SPDX-License-Identifier = "MIT AND CC-BY-3.0 AND CC-BY-4.0"
+
+[[annotations]]
+path = "docs/settings.png"
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+  "2026 TorrPlay",
+  "2012 Blender Foundation",
+]
+SPDX-License-Identifier = "MIT AND CC-BY-3.0"
+
+# The demo subtitles are served to players verbatim and one of them is muxed
+# into the demo video, so a comment header in the file itself would end up
+# in the cues. Cover them here instead of in-file.
+[[annotations]]
+path = "client/public/demo/subtitles/*.vtt"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 TorrPlay"
+SPDX-License-Identifier = "MIT"
+
+# The installer shows this file as the license text, so a header in the file
+# itself would be shown above the license.
+[[annotations]]
+path = "wix/license.rtf"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 TorrPlay"
+SPDX-License-Identifier = "MIT"
+
+# The Gradle wrapper is copied from the Gradle distribution unmodified, as
+# are its gradlew scripts, which carry the same notice in-file.
+[[annotations]]
+path = "client/android/gradle/wrapper/gradle-wrapper.jar"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2015 the original author or authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# The Sintel torrent is the one WebTorrent publishes for Blender's open
+# movie; it holds the movie's file list and piece hashes, not the movie.
+[[annotations]]
+path = "internal/controller/testdata/sintel.torrent"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2017 WebTorrent, LLC"
+SPDX-License-Identifier = "MIT"

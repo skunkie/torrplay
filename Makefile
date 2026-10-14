@@ -69,6 +69,13 @@ format-api:
 lint-api:
 	$(YAMLFMT) -lint api/api.yaml
 
+lint-reuse:
+	@if ! command -v reuse >/dev/null 2>&1; then \
+		echo "reuse not found. Install it from https://reuse.software/" >&2; \
+		exit 1; \
+	fi; \
+	reuse lint
+
 lint: lint-api
 	@if ! command -v golangci-lint >/dev/null 2>&1 && ! [ -x "$$(go env GOPATH)/bin/golangci-lint" ]; then \
 		echo "golangci-lint not found. Installing..."; \
@@ -100,6 +107,7 @@ help:
 	@echo "  format-api       - Format the OpenAPI schema"
 	@echo "  lint-api         - Check OpenAPI schema formatting"
 	@echo "  lint             - Check OpenAPI formatting and run golangci-lint"
+	@echo "  lint-reuse       - Check REUSE licensing information"
 	@echo "  test             - Run the fast offline test suite"
 	@echo "  test-integration - Run local controller integration tests"
 	@echo "  help             - Show this help message"
@@ -116,4 +124,4 @@ help:
 	@echo "  make format-api                    # Format the OpenAPI schema"
 	@echo ""
 
-.PHONY: all android application client docker format-api generate help lint lint-api test test-integration
+.PHONY: all android application client docker format-api generate help lint lint-api lint-reuse test test-integration

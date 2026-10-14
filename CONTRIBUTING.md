@@ -131,3 +131,5 @@ We have a [Code of Conduct](./CODE_OF_CONDUCT.md), please follow it in all your 
 ## License
 
 By contributing to TorrPlay, you agree that your contributions will be licensed under its [MIT License](./LICENSE).
+
+TorrPlay follows the [REUSE](https://reuse.software/) specification. Every file carries an SPDX copyright and license header, or is covered by `REUSE.toml`, and `reuse lint` (or `make lint-reuse`) fails when one does not, so a new file needs its header. A `.license` file beside a file is reserved for a notice that has to ship with it, such as the attribution for the demo video.
