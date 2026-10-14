@@ -40,6 +40,7 @@ import (
 	"github.com/torrplay/torrplay/internal/piececompletion"
 	appsettings "github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/stremio"
+	"github.com/torrplay/torrplay/internal/textsearch"
 	"github.com/torrplay/torrplay/internal/utils"
 	memstorage "github.com/torrplay/torrplay/pkg/storage"
 	"github.com/torrplay/torrplay/pkg/stream"
@@ -782,6 +783,12 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 	}
 	if params.Names != nil {
 		opts = append(opts, nameOpt(*params.Names...))
+	}
+	if params.Saved != nil {
+		opts = append(opts, savedOpt(*params.Saved))
+	}
+	if params.Search != nil {
+		opts = append(opts, searchOpt(*params.Search, params.Fuzzy != nil && *params.Fuzzy))
 	}
 
 	ts, err := c.listTorrentsRLocked(r, opts...)
@@ -2505,6 +2512,32 @@ func nameOpt(names ...string) func([]*api.Torrent) []*api.Torrent {
 		}
 
 		return opted
+	}
+}
+
+// savedOpt returns a filter function that keeps either the torrents saved to
+// the database or only those merely loaded in the torrent client. Only a
+// database record carries a creation time.
+func savedOpt(saved bool) func([]*api.Torrent) []*api.Torrent {
+	return func(ts []*api.Torrent) []*api.Torrent {
+		opted := make([]*api.Torrent, 0, len(ts))
+		for _, t := range ts {
+			if (t.CreatedAt != nil) == saved {
+				opted = append(opted, t)
+			}
+		}
+
+		return opted
+	}
+}
+
+// searchOpt returns a filter function that keeps torrents whose title or name
+// matches every term of query, best match first.
+func searchOpt(query string, fuzzy bool) func([]*api.Torrent) []*api.Torrent {
+	return func(ts []*api.Torrent) []*api.Torrent {
+		return textsearch.Search(ts, query, fuzzy, func(t *api.Torrent) []string {
+			return []string{utils.Val(t.Title), t.Name}
+		})
 	}
 }
 

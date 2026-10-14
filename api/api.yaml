@@ -212,12 +212,15 @@ paths:
       tags:
         - v1
       summary: List all torrents.
-      description: Returns a paginated list of all torrents currently managed by the system. Supports filtering by torrent IDs.
+      description: Returns a paginated list of all torrents currently managed by the system. Supports filtering by category, info hash, name, database persistence and a free-text search query.
       operationId: listTorrents
       parameters:
         - $ref: "#/components/parameters/TorrentCategories"
         - $ref: "#/components/parameters/TorrentHashes"
         - $ref: "#/components/parameters/TorrentNames"
+        - $ref: "#/components/parameters/TorrentSaved"
+        - $ref: "#/components/parameters/TorrentSearch"
+        - $ref: "#/components/parameters/TorrentSearchFuzzy"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
       responses:
@@ -1130,6 +1133,29 @@ components:
         items:
           type: string
         example: ["Sintel"]
+    TorrentSaved:
+      name: saved
+      in: query
+      description: When `true`, return only torrents saved to the database and omit torrents that are merely loaded in the torrent client. When `false`, return only the latter.
+      required: false
+      schema:
+        type: boolean
+    TorrentSearch:
+      name: search
+      in: query
+      description: Free-text query matched against torrent titles and names. Matching ignores case, diacritics and punctuation, so `sintel 2010` matches `Sintel.2010.1080p`, and every whitespace-separated term of the query must match. A query of punctuation alone, such as `-`, is matched as text that titles and names must contain, each whitespace-separated part in either. When set, results are ordered by match quality, best first.
+      required: false
+      schema:
+        type: string
+        example: "sintel 2010"
+    TorrentSearchFuzzy:
+      name: fuzzy
+      in: query
+      description: When `true`, a `search` term also matches a word within a small edit distance of it, so `sintl` matches `Sintel`. Terms shorter than five characters or containing digits never match approximately, and approximate matches rank below exact ones.
+      required: false
+      schema:
+        type: boolean
+        default: false
     Limit:
       name: limit
       in: query
