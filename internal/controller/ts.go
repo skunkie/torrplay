@@ -349,16 +349,17 @@ func (c *Controller) TSTorrents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Action == api.TSTorrentRequestActionList {
-		c.mu.RLock()
-		defer c.mu.RUnlock()
 		resp := []api.TSTorrentResponse{}
-		ts, err := c.listTorrentsRLocked(r)
+		ts, err := c.listTorrents(r)
 		if err != nil {
 			api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		c.mu.RLock()
+		client := c.client
+		c.mu.RUnlock()
 		for _, t := range ts {
-			to, ok := c.client.Torrent(t.Hash)
+			to, ok := client.Torrent(t.Hash)
 			if !ok {
 				to = nil
 			}

@@ -5,13 +5,18 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
@@ -109,4 +114,110 @@ func TestListTorrentsSearchAndSavedFilters(t *testing.T) {
 		result = list(t, url.Values{"limit": {"1"}, "offset": {"1"}, "search": {"bunny"}})
 		assert.Equal(t, []string{"Big Buck Bunnyland Extras"}, names(result))
 	})
+}
+
+// addStalledTorrents loads count torrents the client can never fetch metadata
+// for, since the test client has no peers, trackers, or DHT.
+func addStalledTorrents(t *testing.T, ctrl *Controller, count int) {
+	t.Helper()
+	for i := range count {
+		var ih metainfo.Hash
+		ih[0], ih[1] = 0xee, byte(i)
+		_, _ = ctrl.client.AddTorrentInfoHash(ih)
+	}
+}
+
+// tryLockWithin reports whether mu could be locked for writing within timeout,
+// releasing it again if so.
+func tryLockWithin(mu *sync.RWMutex, timeout time.Duration) bool {
+	for deadline := time.Now().Add(timeout); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if mu.TryLock() {
+			mu.Unlock()
+			return true
+		}
+	}
+
+	return false
+}
+
+func TestGotInfoBy(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	primeSampleMetadata(t, ctrl, bunnyHash)
+	resolved, ok := ctrl.client.Torrent(bunnyHash)
+	require.True(t, ok)
+	<-resolved.GotInfo()
+	stalled, _ := ctrl.client.AddTorrentInfoHash(metainfo.Hash{0xee})
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	t.Run("prefers resolved metadata over an expired context", func(t *testing.T) {
+		assert.True(t, gotInfoBy(expired, resolved))
+	})
+
+	t.Run("gives up on unresolved metadata once the context is done", func(t *testing.T) {
+		assert.False(t, gotInfoBy(expired, stalled))
+	})
+}
+
+func TestListTorrentsWaitsForStalledMetadataOutsideTheLock(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	addAllSampleTorrents(t, ctrl)
+	addStalledTorrents(t, ctrl, 10)
+
+	t.Run("shares one wait across stalled torrents", func(t *testing.T) {
+		start := time.Now()
+		rr := doGet(t, ctrl.router, "/api/v1/torrents")
+		require.Equal(t, http.StatusOK, rr.Code)
+		assert.Less(t, time.Since(start), 5*loadedInfoWait)
+
+		var result api.ListTorrents
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
+		assert.Equal(t, len(samples), result.Total)
+	})
+
+	t.Run("stops waiting once the request is cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/torrents", http.NoBody)
+
+		start := time.Now()
+		ts, err := ctrl.listTorrents(req)
+		require.NoError(t, err)
+		assert.Less(t, time.Since(start), loadedInfoWait/2)
+		assert.Len(t, ts, len(samples))
+	})
+
+	for name, newRequest := range map[string]func() *http.Request{
+		"lets writers take the lock while listing": func() *http.Request {
+			return httptest.NewRequest(http.MethodGet, "/api/v1/torrents", http.NoBody)
+		},
+		"lets writers take the lock while building a playlist": func() *http.Request {
+			return httptest.NewRequest(http.MethodGet, "/api/v1/playlist", http.NoBody)
+		},
+		"lets writers take the lock while listing for TorrServer clients": func() *http.Request {
+			req := httptest.NewRequest(http.MethodPost, "/torrents", strings.NewReader(`{"action":"list"}`))
+			req.Header.Set("Content-Type", "application/json")
+			return req
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			listed := make(chan int)
+			go func() {
+				rec := httptest.NewRecorder()
+				ctrl.router.ServeHTTP(rec, newRequest())
+				listed <- rec.Code
+			}()
+			time.Sleep(loadedInfoWait / 5)
+
+			// Polling rather than blocking keeps a writer that is never let in
+			// from deadlocking a handler that takes the read lock twice.
+			assert.True(t, tryLockWithin(&ctrl.mu, loadedInfoWait/2))
+			assert.Equal(t, http.StatusOK, <-listed)
+		})
+	}
 }

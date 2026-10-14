@@ -309,9 +309,6 @@ func (c *Controller) GetMemoryStats(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params api.GetPlaylistParams) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	const suffix = ".m3u"
 	audioExtensions := []string{
 		".aac",
@@ -372,7 +369,7 @@ func (c *Controller) GetPlaylist(w http.ResponseWriter, r *http.Request, params 
 		opts = append(opts, nameOpt(name))
 	}
 
-	ts, err := c.listTorrentsRLocked(r, opts...)
+	ts, err := c.listTorrents(r, opts...)
 	if err != nil {
 		api.HandleError(w, err)
 		return
@@ -771,9 +768,6 @@ func (c *Controller) HealthCheck(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params api.ListTorrentsParams) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	var opts []torrentsOpt
 	if params.Categories != nil {
 		opts = append(opts, categoryOpt(*params.Categories...))
@@ -791,7 +785,7 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 		opts = append(opts, searchOpt(*params.Search, params.Fuzzy != nil && *params.Fuzzy))
 	}
 
-	ts, err := c.listTorrentsRLocked(r, opts...)
+	ts, err := c.listTorrents(r, opts...)
 	if err != nil {
 		api.HandleError(w, err)
 		return
@@ -1982,8 +1976,19 @@ func (c *Controller) startPosterUpdate(ih metainfo.Hash, urlStr string) {
 	})
 }
 
-func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) ([]*api.Torrent, error) {
+// loadedInfoWait bounds how long a listing waits, in total, for torrents
+// loaded in the client to resolve their metadata.
+const loadedInfoWait = 100 * time.Millisecond
+
+// listTorrents lists the database rows and the torrents merely loaded in the
+// client, applying opts. It holds c.mu only to snapshot both, and waits for
+// unresolved metadata after releasing it, so stalled torrents never hold up
+// writers.
+func (c *Controller) listTorrents(r *http.Request, opts ...torrentsOpt) ([]*api.Torrent, error) {
+	c.mu.RLock()
 	dbTs, err := c.db.GetTorrents()
+	loaded := c.client.Torrents()
+	c.mu.RUnlock()
 	if err != nil {
 		return nil, api.NewError(err.Error(), http.StatusInternalServerError)
 	}
@@ -1997,14 +2002,11 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 
 	// untrackedTorrents holds torrents that are loaded in the torrent client but have not yet been added to the database.
 	var untrackedTorrents []*api.Torrent
-	for _, to := range c.client.Torrents() {
-		if _, ok := tsMap[to.InfoHash()]; !ok {
-			select {
-			case <-to.GotInfo():
-				untrackedTorrents = append(untrackedTorrents, torrentToMetadata(to))
-			case <-time.After(100 * time.Millisecond):
-				continue
-			}
+	infoCtx, cancel := context.WithTimeout(r.Context(), loadedInfoWait)
+	defer cancel()
+	for _, to := range loaded {
+		if _, ok := tsMap[to.InfoHash()]; !ok && gotInfoBy(infoCtx, to) {
+			untrackedTorrents = append(untrackedTorrents, torrentToMetadata(to))
 		}
 	}
 
@@ -2027,6 +2029,22 @@ func (c *Controller) listTorrentsRLocked(r *http.Request, opts ...torrentsOpt) (
 	}
 
 	return ts, nil
+}
+
+// gotInfoBy reports whether to has its metadata by the time ctx is done,
+// preferring metadata that is already there over an expired context.
+func gotInfoBy(ctx context.Context, to *torrent.Torrent) bool {
+	select {
+	case <-to.GotInfo():
+		return true
+	case <-ctx.Done():
+	}
+	select {
+	case <-to.GotInfo():
+		return true
+	default:
+		return false
+	}
 }
 
 // hasTorrentReaders returns true if the torrent has any stream pool readers
