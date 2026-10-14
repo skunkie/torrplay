@@ -112,6 +112,8 @@ fix(controller): move debug profiler to loopback-only listener
 - **Container Hierarchy & Validation**:
   - Use structured IDs (`0` for root, `4` for Categories, `category:<name>` for category containers).
   - Validate IDs with `isItemID` rather than naive path splitting to preserve compatibility with category names containing slashes.
+- **Title Search**:
+  - Decide `dc:title` `contains` and `doesNotContain` search conditions with `internal/textsearch`, tolerating typos, through `search.MatchesWith`, so renderer searches match titles the way the REST API and Stremio do; other properties keep case-insensitive substring matching.
 - **Streaming Headers & Renderer Compatibility**:
   - Preserve DLNA header negotiation: return `contentFeatures.dlna.org` and the default `transferMode.dlna.org: Streaming` when the client requests content features, and honor an explicitly requested transfer mode.
 - **Synchronous Service Lifecycle**:

@@ -27,6 +27,7 @@ import (
 	"github.com/ethulhu/helix/xmltypes"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/textsearch"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -203,6 +204,47 @@ func (cd *ContentDirectory) IncrementSystemUpdateID() {
 	cd.systemUpdateID++
 }
 
+// newTitleContains returns a search `contains` operator for criteria that
+// matches titles the same way as the TorrPlay API's torrent search, so a
+// renderer's search box finds "Sintel.2010.1080p" for "sintel 2010" and
+// tolerates typos. Other properties keep a plain case-insensitive substring
+// test. The criteria's title operands are parsed up front and never written
+// again, so every object a search visits reuses them and the operator is safe
+// to share.
+func newTitleContains(criteria search.Criteria) search.ContainsFunc {
+	queries := make(map[string]textsearch.Query)
+	if query, ok := criteria.(search.Query); ok {
+		collectTitleQueries(query.Expr, queries)
+	}
+
+	return func(property, value, operand string) bool {
+		if property != "dc:title" {
+			return search.ContainsFold(property, value, operand)
+		}
+		query, ok := queries[operand]
+		if !ok {
+			query = textsearch.NewQuery(operand, true)
+		}
+
+		return query.Matches(value)
+	}
+}
+
+// collectTitleQueries parses the operand of every title containment condition
+// in expr into queries.
+func collectTitleQueries(expr search.Expr, queries map[string]textsearch.Query) {
+	switch e := expr.(type) {
+	case search.LogicExpr:
+		for _, sub := range e.SubExprs {
+			collectTitleQueries(sub, queries)
+		}
+	case search.BinaryExpr:
+		if e.Property == "dc:title" && (e.Op == search.Contains || e.Op == search.DoesNotContain) {
+			queries[e.Operand] = textsearch.NewQuery(e.Operand, true)
+		}
+	}
+}
+
 func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criteria search.Criteria, startingIndex, requestedCount uint, sortCriteria xmltypes.CommaSeparatedStrings) (*upnpav.DIDLLite, uint, error) {
 	torrents, err := cd.db.GetTorrents()
 	if err != nil {
@@ -260,6 +302,7 @@ func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criter
 
 	var matchingContainers []upnpav.Container
 	var matchingItems []upnpav.Item
+	titleContains := newTitleContains(criteria)
 
 	for _, torrent := range torrentsToSearch {
 		mediaFiles := getMediaFiles(torrent.Files)
@@ -280,7 +323,7 @@ func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criter
 				ChildCount: len(mediaFiles),
 			}
 
-			if search.Matches(container, criteria) {
+			if search.MatchesWith(container, criteria, titleContains) {
 				matchingContainers = append(matchingContainers, container)
 			}
 		}
@@ -332,7 +375,7 @@ func (cd *ContentDirectory) Search(_ context.Context, id upnpav.ObjectID, criter
 				Resources:    resources,
 			}
 
-			if search.Matches(item, criteria) {
+			if search.MatchesWith(item, criteria, titleContains) {
 				matchingItems = append(matchingItems, item)
 			}
 		}

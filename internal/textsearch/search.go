@@ -44,9 +44,9 @@ type matchScore struct {
 // fields contain each of its whitespace-separated parts as text, in their
 // order.
 func Search[T any](items []T, query string, fuzzy bool, fields func(T) []string) []T {
-	terms := splitWords(query)
-	if len(terms) == 0 {
-		return matchText(items, strings.Fields(foldText(query)), fields)
+	q := NewQuery(query, fuzzy)
+	if q.isBlank() {
+		return items
 	}
 
 	type scoredItem struct {
@@ -55,7 +55,7 @@ func Search[T any](items []T, query string, fuzzy bool, fields func(T) []string)
 	}
 	scored := make([]scoredItem, 0, len(items))
 	for _, item := range items {
-		if score, ok := scoreTerms(terms, splitWords(strings.Join(fields(item), " ")), fuzzy); ok {
+		if score, ok := q.score(fields(item)); ok {
 			scored = append(scored, scoredItem{item: item, score: score})
 		}
 	}
@@ -75,20 +75,49 @@ func Search[T any](items []T, query string, fuzzy bool, fields func(T) []string)
 	return matches
 }
 
-// matchText keeps the items whose fields contain every text part, in their
-// order, and every item when there are no parts.
-func matchText[T any](items []T, parts []string, fields func(T) []string) []T {
-	if len(parts) == 0 {
-		return items
-	}
-	matches := make([]T, 0, len(items))
-	for _, item := range items {
-		if containsTextParts(fields(item), parts) {
-			matches = append(matches, item)
-		}
+// Query is a search query split into its terms once, so it can be matched
+// against many items.
+type Query struct {
+	fuzzy bool
+	terms []string
+	// textParts are the folded, whitespace-separated parts of a query
+	// without terms, such as "-" or "...", which are then matched as plain
+	// text rather than as words.
+	textParts []string
+}
+
+// NewQuery parses query for matching; fuzzy lets its terms tolerate typos.
+func NewQuery(query string, fuzzy bool) Query {
+	q := Query{fuzzy: fuzzy, terms: splitWords(query)}
+	if len(q.terms) == 0 {
+		q.textParts = strings.Fields(foldText(query))
 	}
 
-	return matches
+	return q
+}
+
+// Matches reports whether fields match every term of the query, as Search
+// would keep them. A blank query matches anything, and a query of punctuation
+// alone matches fields that contain each of its parts as text.
+func (q Query) Matches(fields ...string) bool {
+	if q.isBlank() {
+		return true
+	}
+	_, ok := q.score(fields)
+
+	return ok
+}
+
+func (q Query) isBlank() bool {
+	return len(q.terms) == 0 && len(q.textParts) == 0
+}
+
+func (q Query) score(fields []string) (matchScore, bool) {
+	if len(q.terms) == 0 {
+		return matchScore{}, containsTextParts(fields, q.textParts)
+	}
+
+	return scoreTerms(q.terms, splitWords(strings.Join(fields, " ")), q.fuzzy)
 }
 
 // containsTextParts reports whether every part occurs in one of fields. A

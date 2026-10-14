@@ -79,7 +79,6 @@ func TestSearch(t *testing.T) {
 			"Sintel.2010.1080p.mkv", "Tears.of.Steel.2012.BDRip", "Caminandes.Llamigos.2016", "Élan.Vital.2001",
 			"Llama's.Journey.2019", "Wing’s.Flight.2021", "Zo.2009", "Hauptstraße.Tour.1998", "ΚΑΛΟΣ.ΔΡΟΜΟΣ.2008",
 		}},
-		{name: "folds full-width punctuation", query: "＿", want: []string{"Big_Buck_Bunny_720p"}},
 		{name: "finds nothing for punctuation no field contains", query: " .,! ", want: []string{}},
 		{name: "requires every punctuation part", query: "' .", want: []string{"Llama's.Journey.2019", "Wing’s.Flight.2021"}},
 		{name: "rejects punctuation parts no single item has", query: "_ .", want: []string{}},
@@ -143,6 +142,34 @@ func TestSearch(t *testing.T) {
 		}
 		assert.Equal(t, append(wholeWords, insideWords...), releaseNames(Search(releases, "sintel", false, releaseFields)))
 	})
+}
+
+func TestQuery_Matches(t *testing.T) {
+	tests := []struct {
+		name   string
+		query  string
+		fuzzy  bool
+		fields []string
+		want   bool
+	}{
+		{name: "matches every term across fields", query: "sintel 2010", fields: []string{"Sintel", "2010.1080p"}, want: true},
+		{name: "requires every term", query: "sintel 2014", fields: []string{"Sintel.2010"}, want: false},
+		{name: "leaves typos unmatched without fuzzy", query: "sintl", fields: []string{"Sintel"}, want: false},
+		{name: "tolerates typos with fuzzy", query: "sintl", fuzzy: true, fields: []string{"Sintel"}, want: true},
+		{name: "matches anything for a blank query", query: "  ", fields: []string{"Sintel"}, want: true},
+		{name: "matches punctuation alone as text", query: "...", fields: []string{"Sintel..."}, want: true},
+		{name: "rejects punctuation the fields lack", query: "...", fields: []string{"Sintel.2010"}, want: false},
+		{name: "folds full-width punctuation", query: "！", fields: []string{"Sintel!"}, want: true},
+		{name: "matches each punctuation part in any field", query: ". .", fields: []string{"Sintel.", ".2010"}, want: true},
+		{name: "requires every punctuation part", query: "- .", fields: []string{"Sintel-2010"}, want: false},
+		{name: "never matches punctuation across fields", query: "..", fields: []string{"Sintel.", ".2010"}, want: false},
+		{name: "reads a typographic apostrophe as a plain one", query: "'", fields: []string{"Wing’s"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, NewQuery(tt.query, tt.fuzzy).Matches(tt.fields...))
+		})
+	}
 }
 
 func TestWithinEditDistance(t *testing.T) {

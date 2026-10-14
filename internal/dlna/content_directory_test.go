@@ -8,7 +8,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/textsearch"
 )
 
 func TestClampUint(t *testing.T) {
@@ -221,6 +225,39 @@ func TestContentDirectory_Search(t *testing.T) {
 		assert.Equal(t, testTorrentFileName, didl.Items[0].Title)
 	})
 
+	t.Run("search titles like the torrent search", func(t *testing.T) {
+		tests := []struct {
+			name       string
+			criteria   string
+			containers []string
+			items      []string
+		}{
+			{name: "matches words in any order", criteria: `dc:title contains "torrent test"`, containers: []string{"Test Torrent"}},
+			{name: "tolerates typos", criteria: `dc:title contains "torrnet"`, containers: []string{"Test Torrent"}},
+			{name: "negates the match for doesNotContain", criteria: `dc:title doesNotContain "torrent test"`, items: []string{testTorrentFileName}},
+			{name: "matches punctuation alone as text", criteria: `dc:title doesNotContain "."`, containers: []string{"Test Torrent"}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				criteria, err := search.Parse(tt.criteria)
+				require.NoError(t, err)
+
+				didl, _, err := service.contentDirectory.Search(context.Background(), "0", criteria, 0, 10, nil)
+				require.NoError(t, err)
+				containers := make([]string, 0, len(didl.Containers))
+				for _, container := range didl.Containers {
+					containers = append(containers, container.Title)
+				}
+				items := make([]string, 0, len(didl.Items))
+				for _, item := range didl.Items {
+					items = append(items, item.Title)
+				}
+				assert.ElementsMatch(t, tt.containers, containers)
+				assert.ElementsMatch(t, tt.items, items)
+			})
+		}
+	})
+
 	t.Run("search video items by upnp:class (Vimu query)", func(t *testing.T) {
 		criteria, err := search.Parse(`upnp:class derivedfrom "object.item.videoItem"`)
 		require.NoError(t, err)
@@ -283,6 +320,63 @@ func TestContentDirectory_Search(t *testing.T) {
 			assert.ErrorIs(t, err, contentdirectory.ErrNoSuchObject)
 		})
 	})
+}
+
+func TestNewTitleContains(t *testing.T) {
+	parse := func(t *testing.T, src string) search.Criteria {
+		t.Helper()
+		criteria, err := search.Parse(src)
+		require.NoError(t, err)
+
+		return criteria
+	}
+
+	tests := []struct {
+		name     string
+		criteria string
+		property string
+		value    string
+		operand  string
+		want     bool
+	}{
+		{name: "matches title words", criteria: `dc:title contains "sintel 2010"`, property: "dc:title", value: "Sintel.2010.1080p", operand: "sintel 2010", want: true},
+		{name: "matches title operands missing from the criteria", criteria: `upnp:class derivedfrom "object.item"`, property: "dc:title", value: "Sintel.2010", operand: "2010 sintel", want: true},
+		{name: "keeps substring matching for other properties", criteria: `@id contains "item 1"`, property: "@id", value: "item.1", operand: "item 1", want: false},
+		{name: "ignores case for other properties", criteria: `@id contains "item.1"`, property: "@id", value: "Item.1", operand: "item.1", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, newTitleContains(parse(t, tt.criteria))(tt.property, tt.value, tt.operand))
+		})
+	}
+
+	t.Run("is safe to share between concurrent searches", func(t *testing.T) {
+		titleContains := newTitleContains(parse(t, `dc:title contains "sintel" or dc:title contains "spring"`))
+		// Operands missing from the criteria are matched too, so a matcher that
+		// stored them would write from every goroutine at once.
+		var wg sync.WaitGroup
+		for worker := range 8 {
+			wg.Go(func() {
+				for i := range 1000 {
+					assert.True(t, titleContains("dc:title", "Sintel.2010", "sintel"))
+					assert.False(t, titleContains("dc:title", "Spring.2019", fmt.Sprintf("llama %d %d", worker, i)))
+				}
+			})
+		}
+		wg.Wait()
+	})
+}
+
+func TestCollectTitleQueries(t *testing.T) {
+	criteria, err := search.Parse(`upnp:class derivedfrom "object.item" and (dc:title contains "spring" or dc:title doesNotContain "sintel") and @id contains "item"`)
+	require.NoError(t, err)
+	query, ok := criteria.(search.Query)
+	require.True(t, ok)
+
+	queries := make(map[string]textsearch.Query)
+	collectTitleQueries(query.Expr, queries)
+	assert.ElementsMatch(t, []string{"spring", "sintel"}, slices.Collect(maps.Keys(queries)))
+	assert.True(t, queries["spring"].Matches("Spring.2019"))
 }
 
 func TestContentDirectory_FileURI(t *testing.T) {
