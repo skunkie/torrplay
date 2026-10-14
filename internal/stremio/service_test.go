@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,66 @@ func setupTestService(t *testing.T, streamHandler StreamHandlerFunc, authValidat
 	logger := slog.New(slog.DiscardHandler)
 
 	return NewService(db, "/posters/", logger, streamHandler, authValidator)
+}
+
+func TestCatalogSearch(t *testing.T) {
+	movie := func(hash, name string, createdAt time.Time) *database.Torrent {
+		return &database.Torrent{Torrent: api.Torrent{
+			Category:  utils.Ptr("Movies"),
+			CreatedAt: &createdAt,
+			Files:     []api.TorrentFile{{Length: 1000, Name: name + ".mkv", Path: name + ".mkv"}},
+			Hash:      metainfo.NewHashFromHex(strings.Repeat(hash, 40)),
+			Name:      name,
+		}}
+	}
+	day := func(n int) time.Time { return time.Date(2026, 1, n, 10, 0, 0, 0, time.UTC) }
+	db := &mockDB{torrents: []*database.Torrent{
+		movie("1", "Spring.2019", day(1)),
+		movie("2", "Springtime.Walk", day(2)),
+		movie("3", "Sintel.2010.1080p", day(3)),
+		movie("4", "Caminandes.Gran.Dillama", day(4)),
+		movie("5", "Caminandes.Llamigos", day(5)),
+	}}
+	service := NewService(db, "/posters/", slog.New(slog.DiscardHandler), nil, nil)
+
+	search := func(t *testing.T, extra string) []string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/stremio/catalog/movie/torrplay_movies/"+extra+".json", http.NoBody)
+		w := httptest.NewRecorder()
+		service.ServeHTTP(w, req)
+		resp := w.Result()
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+
+		var cat CatalogResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&cat))
+		names := make([]string, 0, len(cat.Metas))
+		for _, meta := range cat.Metas {
+			names = append(names, meta.Name)
+		}
+
+		return names
+	}
+
+	t.Run("matches separate words of dotted release names", func(t *testing.T) {
+		assert.Equal(t, []string{"Sintel.2010.1080p"}, search(t, "search=1080p%20sintel"))
+	})
+
+	t.Run("tolerates typos", func(t *testing.T) {
+		assert.Equal(t, []string{"Sintel.2010.1080p"}, search(t, "search=sintle"))
+	})
+
+	t.Run("ranks the best match first", func(t *testing.T) {
+		assert.Equal(t, []string{"Spring.2019", "Springtime.Walk"}, search(t, "search=spring"))
+	})
+
+	t.Run("keeps the newest first among equal matches", func(t *testing.T) {
+		assert.Equal(t, []string{"Caminandes.Llamigos", "Caminandes.Gran.Dillama"}, search(t, "search=caminandes"))
+	})
+
+	t.Run("skips past ranked matches", func(t *testing.T) {
+		assert.Equal(t, []string{"Springtime.Walk"}, search(t, "search=spring&skip=1"))
+	})
 }
 
 func TestManifest(t *testing.T) {

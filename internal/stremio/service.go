@@ -22,6 +22,7 @@ import (
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/buildinfo"
 	"github.com/torrplay/torrplay/internal/database"
+	"github.com/torrplay/torrplay/internal/textsearch"
 	"github.com/torrplay/torrplay/internal/utils"
 )
 
@@ -294,18 +295,6 @@ func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, catalogT
 			}
 		}
 
-		if search != "" {
-			query := strings.ToLower(search)
-			name := strings.ToLower(t.Name)
-			var title string
-			if t.Title != nil {
-				title = strings.ToLower(*t.Title)
-			}
-			if !strings.Contains(name, query) && !strings.Contains(title, query) {
-				continue
-			}
-		}
-
 		filtered = append(filtered, t)
 	}
 
@@ -317,6 +306,12 @@ func (s *Service) handleCatalog(w http.ResponseWriter, r *http.Request, catalogT
 			return filtered[i].Hash.HexString() < filtered[j].Hash.HexString()
 		}
 		return iAt.After(jAt)
+	})
+
+	// A search reorders by match quality, keeping the newest first among
+	// equally good matches.
+	filtered = textsearch.Search(filtered, search, true, func(t *database.Torrent) []string {
+		return []string{utils.Val(t.Title), t.Name}
 	})
 
 	// Apply skip pagination.

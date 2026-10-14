@@ -125,6 +125,8 @@ fix(controller): move debug profiler to loopback-only listener
 - **Metadata Classification & Series Parsing**:
   - Automatically classify media torrents into movies and series.
   - Parse season and episode indices from filenames using standard naming regexes (`SxxExx`, `1x02`, `ep/episode`) so series episodes are properly grouped and indexed in Stremio.
+- **Catalog Search**:
+  - Match catalog `search` with `internal/textsearch`, tolerating typos and ordering the best match first and the newest first among equal matches, so Stremio and the REST API search alike.
 - **Direct Stream Dispatch & URL Formatting**:
   - Format stream URLs as `/stremio/play/{hash}/{fileIdx}/{filename}` to allow external video players (ExoPlayer on Android TV, VLC) to accurately infer MIME types and display filenames.
   - Route stream playback through the standard streaming handler with HTTP response controller deadline clearing.
