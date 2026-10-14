@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "tsBuildInfoFile": "tsconfig.typecheck.tsbuildinfo"
+  },
+  "exclude": ["node_modules", ".next/types/app"]
+}

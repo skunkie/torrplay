@@ -93,7 +93,7 @@ Please format your Go code with `gofmt` before committing.
 
 #### Frontend
 
-The frontend uses ESLint to enforce a consistent coding style. Please run `pnpm run lint` in the `client` directory to check for any linting errors.
+The frontend uses ESLint to enforce a consistent coding style. Please run `pnpm run lint` and `pnpm run typecheck` in the `client` directory to check for linting and type errors.
 
 ### Commit Message Guidelines
 

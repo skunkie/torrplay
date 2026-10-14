@@ -43,7 +43,7 @@ describe('playback-bounded subtitle extraction', () => {
     expect(fetchFn).toHaveBeenCalledTimes(before);
     clock.advance(35);
     await vi.waitFor(() => expect(clock.waitForTimeChange).toHaveBeenCalledTimes(3));
-    expect(cues.at(-1)?.startTime).toBe(60);
+    expect(cues[cues.length - 1]?.startTime).toBe(60);
     expect(fetchFn.mock.calls.length - before).toBeLessThanOrEqual(3);
     const stopped = expect(loading).rejects.toMatchObject({ name: 'AbortError' });
     controller.abort();
@@ -101,7 +101,7 @@ describe('playback-bounded subtitle extraction', () => {
       cache: new SubtitleSourceCache('/movie.mkv'), ...playbackClock(105),
     });
     expect(cues[0].startTime).toBe(80);
-    expect(cues.at(-1)?.startTime).toBe(120);
+    expect(cues[cues.length - 1]?.startTime).toBe(120);
     expect(fetchFn.mock.calls.length).toBeLessThanOrEqual(7);
   });
 

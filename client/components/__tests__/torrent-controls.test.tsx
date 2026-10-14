@@ -6,6 +6,8 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { Torrent } from '@/lib/types/api';
+
 import { TorrentControls } from '../torrent-controls';
 
 describe('TorrentControls', () => {
@@ -60,7 +62,7 @@ describe('TorrentControls', () => {
     expect(screen.getAllByText('0 of 0 torrents').length).toBeGreaterThan(0);
   });
 
-  const sampleTorrent = {
+  const sampleTorrent: Torrent = {
     hash: '123',
     name: 'Test',
     title: 'Test',
@@ -75,7 +77,7 @@ describe('TorrentControls', () => {
     files: [],
   };
 
-  const sampleTorrent2 = {
+  const sampleTorrent2: Torrent = {
     ...sampleTorrent,
     hash: '456',
     name: 'Test 2',

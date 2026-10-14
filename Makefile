@@ -69,6 +69,16 @@ format-api:
 lint-api:
 	$(YAMLFMT) -lint api/api.yaml
 
+client-deps: client/node_modules/.modules.yaml
+
+client/node_modules/.modules.yaml: client/package.json client/pnpm-lock.yaml client/pnpm-workspace.yaml
+	pnpm --prefix client install --frozen-lockfile
+	touch $@
+
+lint-client: client-deps
+	pnpm --prefix client typecheck
+	pnpm --prefix client lint
+
 lint-reuse:
 	@if ! command -v reuse >/dev/null 2>&1; then \
 		echo "reuse not found. Install it from https://reuse.software/" >&2; \
@@ -90,6 +100,9 @@ lint: lint-api
 test:
 	go test ./...
 
+test-client: client-deps
+	pnpm --prefix client test -- --run
+
 test-integration:
 	go test -count=1 -tags=integration -run '^TestIntegration' ./internal/controller
 
@@ -100,6 +113,7 @@ help:
 	@echo "Targets:"
 	@echo "  all              - Build all artifacts (application, android, docker) (default)"
 	@echo "  client           - Build web artifacts"
+	@echo "  client-deps      - Install client dependencies"
 	@echo "  application      - Build the application"
 	@echo "  android          - Build the Android APK files"
 	@echo "  docker           - Build the multi-platform Docker image"
@@ -107,8 +121,10 @@ help:
 	@echo "  format-api       - Format the OpenAPI schema"
 	@echo "  lint-api         - Check OpenAPI schema formatting"
 	@echo "  lint             - Check OpenAPI formatting and run golangci-lint"
+	@echo "  lint-client      - Type-check and lint the client"
 	@echo "  lint-reuse       - Check REUSE licensing information"
 	@echo "  test             - Run the fast offline test suite"
+	@echo "  test-client      - Run the client test suite"
 	@echo "  test-integration - Run local controller integration tests"
 	@echo "  help             - Show this help message"
 	@echo ""
@@ -124,4 +140,4 @@ help:
 	@echo "  make format-api                    # Format the OpenAPI schema"
 	@echo ""
 
-.PHONY: all android application client docker format-api generate help lint lint-api lint-reuse test test-integration
+.PHONY: all android application client client-deps docker format-api generate help lint lint-api lint-client lint-reuse test test-client test-integration

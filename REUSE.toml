@@ -35,6 +35,7 @@ path = [
   "client/src-tauri/tauri.macos.conf.json",
   "client/src-tauri/tauri.windows.conf.json",
   "client/tsconfig.json",
+  "client/tsconfig.typecheck.json",
   "winres/winres.json",
 ]
 precedence = "aggregate"
