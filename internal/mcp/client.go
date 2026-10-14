@@ -110,17 +110,41 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body an
 	return nil
 }
 
+// ListTorrentsOptions narrows and pages a torrent listing. Zero values leave
+// the listing unfiltered and unpaged.
+type ListTorrentsOptions struct {
+	// Category keeps only torrents of this category.
+	Category string
+	// Limit caps the number of torrents returned.
+	Limit int
+	// Offset skips this many torrents.
+	Offset int
+	// Saved, when set, keeps only torrents saved to the database (true) or
+	// only those merely loaded in the torrent client (false).
+	Saved *bool
+	// Search keeps the torrents whose title or name matches it, tolerating
+	// typos, ordered best match first.
+	Search string
+}
+
 // ListTorrents retrieves a list of torrents from TorrPlay.
-func (c *Client) ListTorrents(ctx context.Context, limit, offset *int, category *string) (*api.ListTorrents, error) {
+func (c *Client) ListTorrents(ctx context.Context, opts ListTorrentsOptions) (*api.ListTorrents, error) {
 	values := url.Values{}
-	if limit != nil && *limit > 0 {
-		values.Set("limit", strconv.Itoa(*limit))
+	if opts.Category != "" {
+		values.Set("categories", opts.Category)
 	}
-	if offset != nil && *offset >= 0 {
-		values.Set("offset", strconv.Itoa(*offset))
+	if opts.Limit > 0 {
+		values.Set("limit", strconv.Itoa(opts.Limit))
 	}
-	if category != nil && *category != "" {
-		values.Set("categories", *category)
+	if opts.Offset > 0 {
+		values.Set("offset", strconv.Itoa(opts.Offset))
+	}
+	if opts.Saved != nil {
+		values.Set("saved", strconv.FormatBool(*opts.Saved))
+	}
+	if opts.Search != "" {
+		values.Set("search", opts.Search)
+		values.Set("fuzzy", "true")
 	}
 
 	endpoint := "/api/v1/torrents"

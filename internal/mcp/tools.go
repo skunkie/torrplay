@@ -42,6 +42,19 @@ func validateMagnet(magnet string) (string, error) {
 	return clean, nil
 }
 
+// optionalBool reads an optional boolean argument. It reports whether the
+// argument was given, and returns an error when its value is not a boolean.
+func optionalBool(req mcp.CallToolRequest, name string) (value, isSet bool, err error) {
+	if _, ok := req.GetArguments()[name]; !ok {
+		return false, false, nil
+	}
+	value, err = req.RequireBool(name)
+	if err != nil {
+		return false, false, err
+	}
+	return value, true, nil
+}
+
 // unsetInt is the sentinel returned by optionalIndex when an integer argument is absent.
 const unsetInt = math.MinInt
 
@@ -68,32 +81,40 @@ func registerTools(s *server.MCPServer, client *Client) {
 			mcp.WithInteger("limit", mcp.Description("Maximum number of torrents to return (default 50).")),
 			mcp.WithInteger("offset", mcp.Description("Pagination offset (default 0).")),
 			mcp.WithString("category", mcp.Description("Optional category to filter by (e.g. Movies, Series).")),
+			mcp.WithBoolean("saved", mcp.Description("Optional: true lists only torrents saved to the database, false only those merely loaded in the torrent client.")),
+			mcp.WithString("search", mcp.Description("Optional free-text query matched against torrent titles and names, tolerating typos; results are ordered best match first.")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			var limit, offset *int
-			l, err := optionalIndex(req, "limit")
+			opts := ListTorrentsOptions{
+				Category: req.GetString("category", ""),
+				Search:   req.GetString("search", ""),
+			}
+			limit, err := optionalIndex(req, "limit")
 			if err != nil {
 				return nil, err
 			}
-			if l != unsetInt {
-				if l == 0 {
+			if limit != unsetInt {
+				if limit == 0 {
 					return nil, errors.New("limit must be greater than zero")
 				}
-				limit = &l
+				opts.Limit = limit
 			}
-			o, err := optionalIndex(req, "offset")
+			offset, err := optionalIndex(req, "offset")
 			if err != nil {
 				return nil, err
 			}
-			if o != unsetInt {
-				offset = &o
+			if offset != unsetInt {
+				opts.Offset = offset
 			}
-			var category *string
-			if cat := req.GetString("category", ""); cat != "" {
-				category = &cat
+			saved, isSavedSet, err := optionalBool(req, "saved")
+			if err != nil {
+				return nil, err
+			}
+			if isSavedSet {
+				opts.Saved = &saved
 			}
 
-			list, err := client.ListTorrents(ctx, limit, offset, category)
+			list, err := client.ListTorrents(ctx, opts)
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to list torrents: %v", err)), nil
 			}

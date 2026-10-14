@@ -715,7 +715,7 @@ func TestClientReturnsErrorsWhenServerIsUnreachable(t *testing.T) {
 	client := NewClient("http://127.0.0.1:59999", "", nil)
 	ctx := context.Background()
 
-	_, err := client.ListTorrents(ctx, nil, nil, nil)
+	_, err := client.ListTorrents(ctx, ListTorrentsOptions{})
 	assert.Error(t, err)
 
 	_, err = client.GetTorrent(ctx, "abc", "")
@@ -739,10 +739,25 @@ func TestClientRequestParameters(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ts.URL, "", ts.Client())
-	category := "Movies"
-	_, err := client.ListTorrents(context.Background(), nil, nil, &category)
+	_, err := client.ListTorrents(context.Background(), ListTorrentsOptions{Category: "Movies", Limit: 10, Offset: 20})
 	require.NoError(t, err)
-	assert.Equal(t, "Movies", (<-requests).URL.Query().Get("categories"))
+	listQuery := (<-requests).URL.Query()
+	assert.Equal(t, "Movies", listQuery.Get("categories"))
+	assert.Equal(t, "10", listQuery.Get("limit"))
+	assert.Equal(t, "20", listQuery.Get("offset"))
+	assert.False(t, listQuery.Has("saved"))
+	assert.False(t, listQuery.Has("search"))
+	assert.False(t, listQuery.Has("fuzzy"))
+
+	saved := false
+	_, err = client.ListTorrents(context.Background(), ListTorrentsOptions{Saved: &saved, Search: "sintel 2010"})
+	require.NoError(t, err)
+	searchQuery := (<-requests).URL.Query()
+	assert.Equal(t, "sintel 2010", searchQuery.Get("search"))
+	assert.Equal(t, "true", searchQuery.Get("fuzzy"))
+	assert.Equal(t, "false", searchQuery.Get("saved"))
+	assert.False(t, searchQuery.Has("limit"))
+	assert.False(t, searchQuery.Has("offset"))
 
 	err = client.DeleteTorrent(context.Background(), "08ada5a7a6183aae1e09d831df6748d566095a10")
 	require.NoError(t, err)
@@ -769,6 +784,62 @@ func TestSearchSystemLogsForwardsFilters(t *testing.T) {
 	assert.Equal(t, "hash ABC", query.Get("q"))
 	assert.Equal(t, "ERROR", query.Get("level"))
 	assert.Equal(t, "metadata failed", entries[0].Message)
+}
+
+func TestListTorrentsToolForwardsArguments(t *testing.T) {
+	var queries []url.Values
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries = append(queries, r.URL.Query())
+		_ = json.NewEncoder(w).Encode(api.ListTorrents{})
+	}))
+	t.Cleanup(ts.Close)
+
+	tool := NewServer(NewClient(ts.URL, "", ts.Client())).GetTool("list_torrents")
+	require.NotNil(t, tool)
+	call := func(arguments map[string]any) (*mcp.CallToolResult, error) {
+		return tool.Handler(context.Background(), mcp.CallToolRequest{
+			Params: mcp.CallToolParams{Name: "list_torrents", Arguments: arguments},
+		})
+	}
+
+	t.Run("maps every argument to the listing request", func(t *testing.T) {
+		queries = nil
+		res, err := call(map[string]any{"category": "Movies", "limit": 10, "offset": 20, "saved": true, "search": "sintl"})
+		require.NoError(t, err)
+		assert.False(t, res.IsError)
+		require.Len(t, queries, 1)
+		assert.Equal(t, url.Values{
+			"categories": {"Movies"},
+			"fuzzy":      {"true"},
+			"limit":      {"10"},
+			"offset":     {"20"},
+			"saved":      {"true"},
+			"search":     {"sintl"},
+		}, queries[0])
+	})
+
+	t.Run("lists only loaded torrents on request", func(t *testing.T) {
+		queries = nil
+		_, err := call(map[string]any{"saved": false})
+		require.NoError(t, err)
+		require.Len(t, queries, 1)
+		assert.Equal(t, url.Values{"saved": {"false"}}, queries[0])
+	})
+
+	for name, arguments := range map[string]map[string]any{
+		"rejects a zero limit":        {"limit": 0},
+		"rejects a negative offset":   {"offset": -1},
+		"rejects a negative limit":    {"limit": -1},
+		"rejects a non-boolean saved": {"saved": "maybe"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			queries = nil
+			res, err := call(arguments)
+			require.Error(t, err)
+			assert.Nil(t, res)
+			assert.Empty(t, queries)
+		})
+	}
 }
 
 func TestClient_PreloadTorrent(t *testing.T) {

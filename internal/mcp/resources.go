@@ -51,7 +51,7 @@ func registerResources(s *server.MCPServer, client *Client) {
 			mcp.WithMIMEType("application/json"),
 		),
 		jsonResource("torrents", func(ctx context.Context) (*api.ListTorrents, error) {
-			return client.ListTorrents(ctx, nil, nil, nil)
+			return client.ListTorrents(ctx, ListTorrentsOptions{})
 		}),
 	)
 
