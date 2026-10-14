@@ -27,17 +27,18 @@ import { TorrentControls } from '@/components/torrent-controls';
 import { TorrentGrid } from '@/components/torrent-grid';
 import { TorrentStatsDialog } from '@/components/torrent-stats-dialog';
 import { UpdateDialog } from '@/components/update-dialog';
+import { useDebouncedValue } from '@/hooks/use-debounced-value';
 import { useKeyboardNavigation } from '@/hooks/use-keyboard-navigation';
 import { useTorrentFilterSettings } from '@/hooks/use-torrent-filter-settings';
 import {
   addTorrentFromMagnet,
   getTorrent,
-  getTorrents,
 } from '@/lib/api/torrents';
 import { getApiBaseUrl, HttpError } from '@/lib/api-client';
 import { useOptionalAppUpdate } from '@/lib/app-update-context';
 import { useAuth } from '@/lib/auth-context';
 import { useLiveUpdates } from '@/lib/live-updates-context';
+import { getTorrentList, isAwaitingSearch, visibleTorrents } from '@/lib/torrent-list';
 import type { Torrent } from '@/lib/types/api';
 
 const TorrentPlayerDialog = dynamic(
@@ -46,6 +47,8 @@ const TorrentPlayerDialog = dynamic(
     ssr: false,
   }
 );
+
+const SEARCH_DEBOUNCE_MS = 300;
 
 interface CustomWindow extends Window {
   handleTorrentFileBase64?: (base64Data: string) => void
@@ -82,8 +85,13 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     handleCategoryFilterChange,
     sortBy,
     handleSortByChange,
+    searchSortBy,
+    handleSearchSortByChange,
     isDesktop,
   } = useTorrentFilterSettings({ searchParams });
+  const query = titleFilter.trim();
+  const isSearching = query !== '';
+  const search = useDebouncedValue(query, SEARCH_DEBOUNCE_MS);
 
   const [isOffline, setIsOffline] = useState(false);
   const { liveUpdatesPaused, setLiveUpdatesPaused } = useLiveUpdates();
@@ -119,9 +127,10 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
   const hash = searchParams.get('hash');
 
   const { data: torrentsData, mutate, isLoading, error } = useSWR(
-    isAuthenticated ? 'torrents' : null,
-    () => getTorrents({}),
+    isAuthenticated ? ['torrents', search] : null,
+    ([, searchKey]: [string, string]) => getTorrentList(searchKey),
     {
+      keepPreviousData: true,
       refreshInterval: liveUpdatesPaused || isOffline ? 0 : 5000,
       revalidateOnFocus: false,
       shouldRetryOnError: !isOffline,
@@ -389,38 +398,11 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
       });
     }
   };
-  const filteredAndSortedTorrents = useMemo(() => {
-    const filtered = torrentsData?.torrents
-      ? torrentsData.torrents.filter(torrent => {
-        const titleMatch =
-          !titleFilter ||
-          (torrent.title || torrent.name || '')
-            .toLowerCase()
-            .includes(titleFilter.toLowerCase());
-        const categoryMatch = !categoryFilter || (torrent.category || '') === categoryFilter;
-        return titleMatch && categoryMatch;
-      })
-      : [];
-    return filtered.slice().sort((a, b) => {
-      const aInDb = a.createdAt !== undefined;
-      const bInDb = b.createdAt !== undefined;
-
-      if (aInDb !== bInDb) {
-        return aInDb ? 1 : -1;
-      }
-      switch (sortBy) {
-        case 'name':
-          return (a.title || a.name || '').localeCompare(b.title || b.name || '');
-        case 'size':
-          return (b.totalSize || 0) - (a.totalSize || 0);
-        case 'updated':
-          return new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-        case 'date':
-        default:
-          return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-      }
-    });
-  }, [torrentsData, titleFilter, categoryFilter, sortBy]);
+  const isSearchPending = isAwaitingSearch(torrentsData, query, Boolean(error));
+  const filteredAndSortedTorrents = useMemo(
+    () => visibleTorrents(torrentsData, { categoryFilter, query, searchSortBy, sortBy }),
+    [torrentsData, categoryFilter, query, searchSortBy, sortBy],
+  );
 
   if (isAuthLoading) {
     return (
@@ -465,6 +447,13 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
             Attempting to reconnect...
           </p>
           <p className='text-sm 4xl:text-md text-muted-foreground mt-2'>API URL: {getApiBaseUrl()}</p>
+        </div>
+      );
+    }
+    if (filteredAndSortedTorrents.length === 0 && isSearchPending) {
+      return (
+        <div className='text-center py-16'>
+          <p className='text-muted-foreground'>Searching torrents...</p>
         </div>
       );
     }
@@ -539,9 +528,11 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
           filteredAndSortedTorrents={filteredAndSortedTorrents}
           categoryFilter={categoryFilter}
           onCategoryFilterChange={handleCategoryFilterChange}
-          sortBy={sortBy}
-          onSortByChange={handleSortByChange}
+          sortBy={isSearching ? searchSortBy : sortBy}
+          onSortByChange={isSearching ? handleSearchSortByChange : handleSortByChange}
           onAddTorrent={() => updateModal('add')}
+          isSearchPending={isSearchPending}
+          isSearching={isSearching}
           titleFilter={titleFilter}
           topControlsRef={topControlsRef}
           mobileControlsRef={mobileControlsRef}

@@ -163,6 +163,8 @@ fix(controller): move debug profiler to loopback-only listener
 - **Accessibility & Focus Restoration**:
   - Restore keyboard focus to triggering elements when dismissing dialogs using `DialogTriggerContext` or Radix `onCloseAutoFocus`.
   - Apply the HTML `inert` attribute to background containers while modal dialogs are active.
+- **Torrent Search**:
+  - Search through the `search` and `fuzzy` filters of `GET /api/v1/torrents`, so the client tolerates typos and orders the best match first as the REST API, Stremio, and DLNA do. Until the server answers the current query, narrow the list to torrents whose title or name contains every whitespace-separated part of the query, ignoring case and accents; `/demo` has no server and always uses that match.
 - **Audio Demuxing & Decoding**:
   - Use `MkvAudioSyncEngine` with Mediabunny and WASM decoders for formats not natively supported by browsers (AC-3, E-AC-3, DTS).
   - Route standard browser audio codecs (AAC, MP3, Opus, FLAC) directly to native HTML5 audio elements to minimize CPU and battery overhead.

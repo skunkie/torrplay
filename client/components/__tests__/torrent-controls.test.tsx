@@ -32,6 +32,34 @@ describe('TorrentControls', () => {
     expect(onAddTorrent).toHaveBeenCalled();
   });
 
+  it('offers the relevance order only while searching', () => {
+    const onSortByChange = vi.fn();
+    const { container, unmount } = render(<TorrentControls {...defaultProps} />);
+    fireEvent.click(container.querySelector('#sort-select')!);
+    expect(screen.getByRole('option', { name: 'Name' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Relevance' })).toBeNull();
+    unmount();
+
+    const searching = render(<TorrentControls {...defaultProps}
+      isSearching
+      onSortByChange={onSortByChange} />);
+    fireEvent.click(searching.container.querySelector('#sort-select')!);
+    fireEvent.click(screen.getByRole('option', { name: 'Relevance' }));
+    expect(onSortByChange).toHaveBeenCalledWith('relevance');
+  });
+
+  it('shows a pending search instead of an empty count', () => {
+    const { rerender } = render(<TorrentControls {...defaultProps}
+      isSearchPending
+      titleFilter='sintl' />);
+    expect(screen.getAllByText('Searching...').length).toBeGreaterThan(0);
+
+    rerender(<TorrentControls {...defaultProps}
+      titleFilter='sintl' />);
+    expect(screen.queryByText('Searching...')).toBeNull();
+    expect(screen.getAllByText('0 of 0 torrents').length).toBeGreaterThan(0);
+  });
+
   const sampleTorrent = {
     hash: '123',
     name: 'Test',

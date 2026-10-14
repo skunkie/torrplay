@@ -15,10 +15,11 @@ import type {
 
 export async function getTorrents(params?: {
   categories?: string[],
+  fuzzy?: boolean,
   hashes?: string[],
-  names?: string[],
   limit?: number,
-  offset?: number
+  offset?: number,
+  search?: string
 }): Promise<TorrentsResponse> {
   const searchParams = new URLSearchParams();
 
@@ -28,11 +29,12 @@ export async function getTorrents(params?: {
   if (params?.hashes?.length) {
     params.hashes.forEach(hash => searchParams.append('hashes', hash));
   }
-  if (params?.names?.length) {
-    params.names.forEach(name => searchParams.append('names', name));
-  }
   if (params?.limit) searchParams.append('limit', params.limit.toString());
   if (params?.offset) searchParams.append('offset', params.offset.toString());
+  if (params?.search) {
+    searchParams.append('search', params.search);
+    if (params.fuzzy) searchParams.append('fuzzy', 'true');
+  }
 
   const query = searchParams.toString();
   const endpoint = `/api/v1/torrents${query ? `?${query}` : ''}`;

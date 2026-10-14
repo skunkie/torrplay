@@ -149,10 +149,45 @@ describe('useTorrentFilterSettings', () => {
     );
 
     act(() => {
-      result.current.handleTitleFilterChange('matrix');
+      result.current.handleTitleFilterChange('sintel');
     });
 
-    expect(result.current.titleFilter).toBe('matrix');
+    expect(result.current.titleFilter).toBe('sintel');
+  });
+
+  it('sorts a search by relevance until another order is picked', () => {
+    localStorage.setItem(STORAGE_KEY_SORT_BY, 'size');
+    const { result } = renderHook(() =>
+      useTorrentFilterSettings({ searchParams: new URLSearchParams() })
+    );
+
+    act(() => {
+      result.current.handleTitleFilterChange('sintel');
+    });
+    expect(result.current.searchSortBy).toBe('relevance');
+
+    act(() => {
+      result.current.handleSearchSortByChange('name');
+    });
+    expect(result.current.searchSortBy).toBe('name');
+    expect(result.current.sortBy).toBe('size');
+    expect(localStorage.getItem(STORAGE_KEY_SORT_BY)).toBe('size');
+    expect(navigationMocks.replace).not.toHaveBeenCalled();
+
+    act(() => {
+      result.current.handleSearchSortByChange('invalid_sort');
+    });
+    expect(result.current.searchSortBy).toBe('name');
+
+    act(() => {
+      result.current.handleTitleFilterChange('sintel 2');
+    });
+    expect(result.current.searchSortBy).toBe('name');
+
+    act(() => {
+      result.current.handleTitleFilterChange('  ');
+    });
+    expect(result.current.searchSortBy).toBe('relevance');
   });
 
   it('handles responsive layout transitions between mobile and desktop', () => {

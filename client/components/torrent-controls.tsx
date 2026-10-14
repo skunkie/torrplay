@@ -26,6 +26,8 @@ interface TorrentControlsProps {
   sortBy: string,
   onSortByChange: (value: string) => void,
   onAddTorrent: () => void,
+  isSearchPending?: boolean,
+  isSearching?: boolean,
   titleFilter?: string,
   topControlsRef?: React.RefObject<HTMLDivElement | null>,
   mobileControlsRef?: React.RefObject<HTMLDivElement | null>
@@ -40,6 +42,8 @@ export function TorrentControls({
   sortBy,
   onSortByChange,
   onAddTorrent,
+  isSearchPending = false,
+  isSearching = false,
   titleFilter,
   topControlsRef: externalTopControlsRef,
   mobileControlsRef: externalMobileControlsRef,
@@ -55,9 +59,11 @@ export function TorrentControls({
   const hasActiveFilter = Boolean(titleFilter?.trim()) || (Boolean(categoryFilter) && categoryFilter !== 'all');
   const isFiltered = hasActiveFilter || filteredCount !== totalCount;
 
-  const countLabel = isFiltered
-    ? `${filteredCount} of ${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`
-    : `${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`;
+  const totalLabel = `${totalCount} ${totalCount === 1 ? 'torrent' : 'torrents'}`;
+  let countLabel = isFiltered ? `${filteredCount} of ${totalLabel}` : totalLabel;
+  if (isSearchPending && filteredCount === 0) {
+    countLabel = 'Searching...';
+  }
 
   return (
     <div className='mb-3'>
@@ -93,6 +99,7 @@ export function TorrentControls({
               <SelectValue placeholder='Sort by...' />
             </SelectTrigger>
             <SelectContent>
+              {isSearching && <SelectItem value='relevance'>Relevance</SelectItem>}
               <SelectItem value='date'>Date Added</SelectItem>
               <SelectItem value='updated'>Date Updated</SelectItem>
               <SelectItem value='name'>Name</SelectItem>
@@ -148,6 +155,7 @@ export function TorrentControls({
               <SelectValue placeholder='Sort by...' />
             </SelectTrigger>
             <SelectContent>
+              {isSearching && <SelectItem value='relevance'>Relevance</SelectItem>}
               <SelectItem value='date'>Date Added</SelectItem>
               <SelectItem value='updated'>Date Updated</SelectItem>
               <SelectItem value='name'>Name</SelectItem>

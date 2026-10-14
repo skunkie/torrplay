@@ -20,6 +20,7 @@ import {
   Deployment,
   useOptionalAppUpdate,
 } from '@/lib/app-update-context';
+import { visibleTorrents } from '@/lib/torrent-list';
 import { Torrent, TorrentStats } from '@/lib/types/api';
 
 import { DemoAddTorrentDialog } from './demo-add-torrent-dialog';
@@ -350,7 +351,11 @@ function DemoContent({
     handleCategoryFilterChange,
     sortBy,
     handleSortByChange,
+    searchSortBy,
+    handleSearchSortByChange,
   } = useTorrentFilterSettings({ searchParams });
+  const query = titleFilter.trim();
+  const isSearching = query !== '';
 
   const [isDeleting, setIsDeleting] = useState(false);
   const [liveUpdatesPaused, setLiveUpdatesPaused] = useState(false);
@@ -375,32 +380,10 @@ function DemoContent({
     return Array.from(new Set(allCategories)).sort();
   }, [torrents]);
 
-  const filteredAndSortedTorrents = useMemo(() => {
-    const filtered = torrents
-      .filter(torrent => {
-        const titleMatch =
-          !titleFilter ||
-          (torrent.title || torrent.name || '')
-            .toLowerCase()
-            .includes(titleFilter.toLowerCase());
-        const categoryMatch = !categoryFilter || (torrent.category || '') === categoryFilter;
-        return titleMatch && categoryMatch;
-      });
-
-    return filtered.slice().sort((a, b) => {
-      switch (sortBy) {
-        case 'name':
-          return (a.title || a.name || '').localeCompare(b.title || b.name || '');
-        case 'size':
-          return (b.totalSize || 0) - (a.totalSize || 0);
-        case 'updated':
-          return new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-        case 'date':
-        default:
-          return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-      }
-    });
-  }, [torrents, titleFilter, categoryFilter, sortBy]);
+  const filteredAndSortedTorrents = useMemo(
+    () => visibleTorrents({ search: '', torrents }, { categoryFilter, query, searchSortBy, sortBy }),
+    [torrents, categoryFilter, query, searchSortBy, sortBy],
+  );
 
   const selectedTorrent = useMemo(() => {
     const validModals = ['edit', 'stats', 'play', 'delete'];
@@ -494,9 +477,10 @@ function DemoContent({
           filteredAndSortedTorrents={filteredAndSortedTorrents}
           categoryFilter={categoryFilter}
           onCategoryFilterChange={handleCategoryFilterChange}
-          sortBy={sortBy}
-          onSortByChange={handleSortByChange}
+          sortBy={isSearching ? searchSortBy : sortBy}
+          onSortByChange={isSearching ? handleSearchSortByChange : handleSortByChange}
           onAddTorrent={() => updateModal('add')}
+          isSearching={isSearching}
           titleFilter={titleFilter}
         />
 

@@ -13,7 +13,9 @@ import {
   isValidSortBy,
   setStoredCategoryFilter,
   setStoredSortBy,
+  type SortByOption,
 } from '@/lib/torrent-filter-storage';
+import type { TorrentListSortBy } from '@/lib/torrent-list';
 
 export interface UseTorrentFilterSettingsOptions {
   searchParams?: { get: (name: string) => string | null } | null
@@ -28,6 +30,9 @@ export function useTorrentFilterSettings(options: UseTorrentFilterSettingsOption
   const sortParam = searchParams?.get('sortBy') || searchParams?.get('sort');
 
   const [titleFilter, setTitleFilter] = useState('');
+  // A search starts best match first; another order picked during a search
+  // lasts until the search is cleared and is not stored.
+  const [searchSortBy, setSearchSortBy] = useState<TorrentListSortBy>('relevance');
   const [isDesktop, setIsDesktop] = useState(true);
 
   // Initialize categoryFilter from URL search params if present, else localStorage
@@ -39,7 +44,7 @@ export function useTorrentFilterSettings(options: UseTorrentFilterSettingsOption
   });
 
   // Initialize sortBy from URL search params if present and valid, else localStorage
-  const [sortBy, setSortBy] = useState<string>(() => {
+  const [sortBy, setSortBy] = useState<SortByOption>(() => {
     if (sortParam && isValidSortBy(sortParam)) {
       return sortParam;
     }
@@ -62,6 +67,9 @@ export function useTorrentFilterSettings(options: UseTorrentFilterSettingsOption
 
   const handleTitleFilterChange = useCallback((query: string) => {
     setTitleFilter(query);
+    if (!query.trim()) {
+      setSearchSortBy('relevance');
+    }
   }, []);
 
   const handleCategoryFilterChange = useCallback((value: string) => {
@@ -78,6 +86,12 @@ export function useTorrentFilterSettings(options: UseTorrentFilterSettingsOption
       replaceFilterParam('sortBy', value);
     }
   }, [replaceFilterParam]);
+
+  const handleSearchSortByChange = useCallback((value: string) => {
+    if (value === 'relevance' || isValidSortBy(value)) {
+      setSearchSortBy(value);
+    }
+  }, []);
 
   useEffect(() => {
     if (categoryParam === null || categoryParam === undefined) return;
@@ -117,6 +131,8 @@ export function useTorrentFilterSettings(options: UseTorrentFilterSettingsOption
     sortBy,
     setSortBy,
     handleSortByChange,
+    searchSortBy,
+    handleSearchSortByChange,
     isDesktop,
     setIsDesktop,
   };

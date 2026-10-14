@@ -4,7 +4,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { addTorrent, getTorrentStreamUrl } from '@/lib/api/torrents';
+import { addTorrent, getTorrents, getTorrentStreamUrl } from '@/lib/api/torrents';
 import { api } from '@/lib/api-client';
 
 describe('getTorrentStreamUrl', () => {
@@ -34,5 +34,21 @@ describe('addTorrent', () => {
     expect(body.get('title')).toBe('Movie');
 
     post.mockRestore();
+  });
+});
+
+describe('getTorrents', () => {
+  it('sends the search with the fuzzy flag', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ torrents: [] } as never);
+
+    await getTorrents({ fuzzy: true, search: 'sintel' });
+    await getTorrents({ fuzzy: true });
+
+    expect(get.mock.calls.map(call => call[0])).toEqual([
+      '/api/v1/torrents?search=sintel&fuzzy=true',
+      '/api/v1/torrents',
+    ]);
+
+    get.mockRestore();
   });
 });
