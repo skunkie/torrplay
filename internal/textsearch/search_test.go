@@ -5,10 +5,13 @@
 package textsearch
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type release struct {
@@ -141,6 +144,36 @@ func TestSearch(t *testing.T) {
 			insideWords = append(insideWords, insideWord)
 		}
 		assert.Equal(t, append(wholeWords, insideWords...), releaseNames(Search(releases, "sintel", false, releaseFields)))
+	})
+
+	// The web client runs these cases against its local search too, so a
+	// change on either side that alters these results fails until both agree.
+	t.Run("matches the cases shared with the web client", func(t *testing.T) {
+		data, err := os.ReadFile("testdata/shared-cases.json")
+		require.NoError(t, err)
+		var shared struct {
+			Library []struct {
+				Name  string `json:"name"`
+				Title string `json:"title"`
+			} `json:"library"`
+			Cases []struct {
+				Name  string   `json:"name"`
+				Query string   `json:"query"`
+				Want  []string `json:"want"`
+			} `json:"cases"`
+		}
+		require.NoError(t, json.Unmarshal(data, &shared))
+		library := make([]release, 0, len(shared.Library))
+		for _, r := range shared.Library {
+			library = append(library, newRelease(r.Name, r.Title))
+		}
+		require.NotEmpty(t, shared.Cases)
+
+		for _, tt := range shared.Cases {
+			t.Run(tt.Name, func(t *testing.T) {
+				assert.Equal(t, tt.Want, releaseNames(Search(library, tt.Query, false, releaseFields)))
+			})
+		}
 	})
 }
 

@@ -2,6 +2,9 @@
 //
 // SPDX-License-Identifier: MIT
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { api } from '@/lib/api-client';
@@ -206,6 +209,24 @@ describe('searchTorrentsByText', () => {
 
     it('keeps the given order for a query of punctuation alone', () => {
       expect(names(named('Sintel.2010', 'Big.Buck.Bunny'), ' . ')).toEqual(['Sintel.2010', 'Big.Buck.Bunny']);
+    });
+  });
+
+  // internal/textsearch runs these cases too, so a change on either side that
+  // alters these results fails until both agree.
+  describe('cases shared with internal/textsearch', () => {
+    const shared: {
+      cases: { name: string, query: string, want: string[] }[],
+      library: { name: string, title: string }[]
+    } = JSON.parse(readFileSync(join(__dirname, '../../../internal/textsearch/testdata/shared-cases.json'), 'utf8'));
+    const library = shared.library.map(({ name, title }) => torrent(name, { title: title || undefined }));
+
+    it('has cases', () => {
+      expect(shared.cases.length).toBeGreaterThan(0);
+    });
+
+    it.each(shared.cases)('$name', ({ query, want }) => {
+      expect(names(library, query)).toEqual(want);
     });
   });
 });
