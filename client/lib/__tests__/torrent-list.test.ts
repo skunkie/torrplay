@@ -7,9 +7,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/lib/api-client';
 import {
   filterAndSortTorrents,
-  filterTorrentsByText,
   getTorrentList,
   isAwaitingSearch,
+  searchTorrentsByText,
   type TorrentListView,
   visibleTorrents,
 } from '@/lib/torrent-list';
@@ -100,52 +100,113 @@ describe('filterAndSortTorrents', () => {
   });
 });
 
-describe('filterTorrentsByText', () => {
-  const torrents = [
-    torrent('titled', { name: 'unrelated', title: 'Big Buck Bunny' }),
-    torrent('named', { name: 'big.buck.bunny.1080p' }),
-    torrent('other', { title: 'Sintel - 2010.mkv' }),
-  ];
-  const hashes = (query: string) => filterTorrentsByText(torrents, query).map(t => t.hash);
+describe('searchTorrentsByText', () => {
+  const names = (torrents: Torrent[], query: string) => searchTorrentsByText(torrents, query).map(t => t.name);
+  const named = (...names: string[]) => names.map(name => torrent(name));
 
-  it('matches the title or the name, ignoring case', () => {
-    expect(hashes('buck.')).toEqual(['named']);
-    expect(hashes('UNRELATED')).toEqual(['titled']);
+  describe('matching', () => {
+    const torrents = [
+      torrent('titled', { name: 'unrelated', title: 'Big Buck Bunny' }),
+      torrent('named', { name: 'big.buck.bunny.1080p' }),
+      torrent('other', { title: 'Sintel - 2010.mkv' }),
+    ];
+    const hashes = (query: string) => searchTorrentsByText(torrents, query).map(t => t.hash);
+
+    it('matches the title or the name, ignoring case', () => {
+      expect(hashes('UNRELATED')).toEqual(['titled']);
+      expect(hashes('1080P')).toEqual(['named']);
+    });
+
+    it('requires every word of the query in any order', () => {
+      expect(hashes('BIG BUCK')).toEqual(['titled', 'named']);
+      expect(hashes('  bunny   big ')).toEqual(['titled', 'named']);
+      expect(hashes('sintel unrelated')).toEqual([]);
+      expect(hashes('sintel 2014')).toEqual([]);
+    });
+
+    it('takes the words from the title and the name alike', () => {
+      expect(hashes('unrelated bunny')).toEqual(['titled']);
+    });
+
+    it('reads punctuation in the query as a word break', () => {
+      expect(hashes('buck.')).toEqual(['titled', 'named']);
+      expect(names(named('Sintel 2010'), 'sintel.2010')).toEqual(['Sintel 2010']);
+    });
+
+    it('matches a query of punctuation alone as text', () => {
+      expect(hashes('- .')).toEqual(['other']);
+      expect(hashes(' _ ')).toEqual([]);
+    });
   });
 
-  it('requires every part of the query in any order', () => {
-    expect(hashes('BIG BUCK')).toEqual(['titled', 'named']);
-    expect(hashes('  bunny   big ')).toEqual(['titled', 'named']);
-    expect(hashes('sintel unrelated')).toEqual([]);
-    expect(hashes('- .')).toEqual(['other']);
-  });
-
-  it('takes the parts from the title and the name alike', () => {
-    expect(hashes('unrelated bunny')).toEqual(['titled']);
-  });
-
-  it('ignores accents, full-width letters, and apostrophe styles', () => {
+  describe('folding', () => {
     const folded = [
       torrent('accented', { title: 'Élan.Vital.2001' }),
       torrent('apostrophe', { name: 'Wing’s.Flight.2021' }),
-    ];
-    const foldedHashes = (query: string) => filterTorrentsByText(folded, query).map(t => t.hash);
-
-    expect(foldedHashes('elan')).toEqual(['accented']);
-    expect(foldedHashes('ｖｉｔａｌ')).toEqual(['accented']);
-    expect(foldedHashes("wing's")).toEqual(['apostrophe']);
-  });
-
-  it('folds a sharp s and a final sigma as the server does', () => {
-    const folded = [
+      torrent('plain-apostrophe', { name: "Llama's.Journey.2019" }),
       torrent('sharp-s', { title: 'Hauptstraße.Tour.1998' }),
       torrent('sigma', { name: 'ΚΑΛΟΣ.ΔΡΟΜΟΣ.2008' }),
     ];
-    const foldedHashes = (query: string) => filterTorrentsByText(folded, query).map(t => t.hash);
+    const hashes = (query: string) => searchTorrentsByText(folded, query).map(t => t.hash);
 
-    expect(foldedHashes('hauptstrasse')).toEqual(['sharp-s']);
-    expect(foldedHashes('καλοσ')).toEqual(['sigma']);
-    expect(foldedHashes('δρομος')).toEqual(['sigma']);
+    it('ignores accents and full-width letters', () => {
+      expect(hashes('elan')).toEqual(['accented']);
+      expect(hashes('ｖｉｔａｌ')).toEqual(['accented']);
+    });
+
+    it('drops apostrophes of either style', () => {
+      expect(hashes("wing's")).toEqual(['apostrophe']);
+      expect(hashes('wings flight')).toEqual(['apostrophe']);
+      expect(hashes('llamas journey')).toEqual(['plain-apostrophe']);
+    });
+
+    it('folds a sharp s and a final sigma as the server does', () => {
+      expect(hashes('hauptstrasse')).toEqual(['sharp-s']);
+      expect(hashes('καλοσ')).toEqual(['sigma']);
+      expect(hashes('δρομος')).toEqual(['sigma']);
+    });
+  });
+
+  describe('ranking', () => {
+    it('ranks whole words above word starts', () => {
+      expect(names(named('Springtime.Walk', 'Spring.2019'), 'spring')).toEqual(['Spring.2019', 'Springtime.Walk']);
+    });
+
+    it('ranks word starts above matches inside words', () => {
+      expect(names(named('Bigllama.Demo', 'Llamaland.Demo'), 'llama')).toEqual(['Llamaland.Demo', 'Bigllama.Demo']);
+    });
+
+    it('sums the quality of every query word', () => {
+      expect(names(named('Show.Bigllamaland', 'Llamalandia.Show', 'Show.Llamaland'), 'llamaland show'))
+        .toEqual(['Show.Llamaland', 'Llamalandia.Show', 'Show.Bigllamaland']);
+    });
+
+    it('keeps the given order among equal matches', () => {
+      // Long enough that an unstable sort would reorder ties.
+      const wholeWords = Array.from({ length: 40 }, (_, i) => `Sintel.${String(39 - i).padStart(2, '0')}`);
+      const insideWords = wholeWords.map(name => `X${name.toLowerCase()}`);
+      const interleaved = wholeWords.flatMap((name, i) => [name, insideWords[i]]);
+
+      expect(names(named(...interleaved), 'sintel')).toEqual([...wholeWords, ...insideWords]);
+    });
+
+    it('reads release names and apostrophes as words', () => {
+      expect(names(named('Llamasaurus.Journey', "Llama's.Journey.2019"), 'llamas')).toEqual(["Llama's.Journey.2019", 'Llamasaurus.Journey']);
+      expect(names(named('Sintel2010', 'Sintel.2010'), '2010')).toEqual(['Sintel.2010', 'Sintel2010']);
+    });
+
+    it('ranks the title and the name together', () => {
+      const torrents = [
+        torrent('named', { name: 'Llamaland.Demo', title: 'Bigllama' }),
+        torrent('titled', { name: 'llamaland', title: 'Llama' }),
+      ];
+
+      expect(searchTorrentsByText(torrents, 'llama').map(t => t.hash)).toEqual(['titled', 'named']);
+    });
+
+    it('keeps the given order for a query of punctuation alone', () => {
+      expect(names(named('Sintel.2010', 'Big.Buck.Bunny'), ' . ')).toEqual(['Sintel.2010', 'Big.Buck.Bunny']);
+    });
   });
 });
 
@@ -178,6 +239,13 @@ describe('visibleTorrents', () => {
     expect(hashes(answered, { query: 'sint' })).toEqual(['sintel', 'sintel-show']);
     expect(hashes({ search: '', torrents }, { query: 'SPR' })).toEqual(['spring']);
     expect(hashes(undefined, { query: 'sint' })).toEqual([]);
+  });
+
+  it('ranks the title matches as the server does until it answers', () => {
+    const list = { search: '', torrents: [torrent('showcase', { createdAt: '2026-01-04', title: 'Showcase' }), ...torrents] };
+
+    expect(hashes(list, { query: 'show' })).toEqual(['sintel-show', 'showcase']);
+    expect(hashes(list, { query: 'show', searchSortBy: 'date' })).toEqual(['showcase', 'sintel-show']);
   });
 });
 
