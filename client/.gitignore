@@ -14,6 +14,9 @@
 /.next/
 /out/
 
+# next telemetry config written outside a build
+/cache/
+
 # production
 /build
 
@@ -25,6 +28,7 @@ yarn-error.log*
 
 # env files
 .env*
+!/.env
 
 # typescript
 *.tsbuildinfo
