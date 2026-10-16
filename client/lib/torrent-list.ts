@@ -13,6 +13,14 @@ export interface TorrentList extends TorrentsResponse {
   search: string
 }
 
+// KnownTorrents is the full list known from the newest answer, with the seq
+// that orders the request that fetched it among the loader's requests, or 0
+// before any has.
+export interface KnownTorrents {
+  seq: number,
+  torrents?: Torrent[]
+}
+
 export interface TorrentListView {
   categoryFilter: string,
   query: string,
@@ -23,59 +31,181 @@ export interface TorrentListView {
 // TorrentListLoader loads the torrent list for a search.
 export interface TorrentListLoader {
   (search: string): Promise<TorrentList>,
-  // known returns the torrents known from the newest answer, which a cached
-  // answer to an earlier search may predate.
-  known: () => Torrent[] | undefined
+  // known returns the full list known from the newest answer, which a cached
+  // answer to an earlier search may predate. It returns the same object until
+  // that list changes.
+  known: () => KnownTorrents,
+  // seqOf returns the seq of the request list answered, or 0 for a list the
+  // loader did not return. Answers carry no seq of their own, so an unchanged
+  // answer stays equal to the one before it.
+  seqOf: (list: TorrentList | undefined) => number,
+  // subscribe calls listener whenever known changes, and returns a function
+  // that stops it.
+  subscribe: (listener: () => void) => () => void
 }
 
 // createTorrentListLoader returns a loader that answers both the list and the
 // search with one request: while searching, the response holds only the
 // matches, and its facets describe every torrent for the category filter and
-// the torrent count. The loader remembers the torrents known from the newest
-// answer, refreshed with each search's matches, so a newly typed query can be
-// matched locally until the server answers it. A search opened before any
-// full list was known also fetches the full list, once.
+// the torrent count. The loader remembers the full list from the newest
+// answer, so a newly typed query can be matched locally until the server
+// answers it. The facets' version tells whether that list is still current;
+// when a search requested after it reports another version, the loader
+// fetches the full list again in the background, one fetch at a time, and
+// answers the search at once. A search made before any full list is known
+// waits for one.
 export function createTorrentListLoader(): TorrentListLoader {
-  let known: Torrent[] | undefined;
-  let started = 0;
+  let known: KnownTorrents = { seq: 0 };
+  let knownVersion: string | undefined;
+  // accepted is the seq of the newest full list answered, which may have
+  // kept known unchanged.
   let accepted = 0;
-  const load = async (search: string) => {
-    const id = ++started;
-    // A failed seed leaves the full list unknown, to be fetched again with the
-    // next search, rather than failing a search the server did answer.
-    const [res, seed] = await Promise.all([
-      getTorrents(search ? { fuzzy: true, search } : {}),
-      search && !known ? getTorrents({}).catch(() => null) : undefined,
-    ]);
-    const torrents = search
-      ? mergeMatches(seed?.torrents ?? known ?? [], res.torrents, search)
-      : res.torrents;
-    // An answer to an older request must not roll back a newer one.
-    if (id > accepted && seed !== null) {
-      accepted = id;
-      known = torrents;
+  let started = 0;
+  // reported is the version the newest answered search reported, and
+  // reportedSeq the seq of that search.
+  let reported: string | undefined;
+  let reportedSeq = 0;
+  // fetching settles with the full-list fetch of the refetch in flight, and
+  // loadingFull with the newest load of the full list in flight.
+  let fetching: Promise<void> | undefined;
+  let loadingFull: Promise<void> | undefined;
+  // refetchAbort aborts the full-list fetch of the refetch in flight.
+  let refetchAbort: AbortController | undefined;
+  const seqs = new WeakMap<TorrentList, number>();
+  const listeners = new Set<() => void>();
+
+  // accept keeps full as the known list unless a later request has answered.
+  // A full list of the known version keeps the known one, so an unchanged
+  // refresh notifies no listener and leaves the view to its memoized torrents.
+  const accept = (seq: number, full: TorrentsResponse) => {
+    if (seq <= accepted) {
+      return;
     }
-    return search ? { ...res, matches: res.torrents, search, torrents } : { ...res, search };
+    accepted = seq;
+    if (known.torrents && full.facets.version === knownVersion) {
+      return;
+    }
+    known = { seq, torrents: full.torrents };
+    knownVersion = full.facets.version;
+    listeners.forEach(listener => listener());
   };
-  return Object.assign(load, { known: () => known });
+
+  // fetchFull fetches and accepts the full list under the seq it takes when
+  // it starts, so a full list requested earlier but answered later cannot
+  // roll it back.
+  const fetchFull = async () => {
+    const seq = ++started;
+    const abort = new AbortController();
+    refetchAbort = abort;
+    try {
+      accept(seq, await getTorrents({}, { signal: abort.signal }));
+    } finally {
+      if (refetchAbort === abort) {
+        refetchAbort = undefined;
+      }
+    }
+  };
+
+  // refetch fetches the full list unless a fetch is in flight, and returns a
+  // promise that settles with the fetch in flight. A search that started after
+  // the newest full list answered and reports a version other than that
+  // list's is fetched for again, so the known list catches up without waiting
+  // for another search. A failed fetch leaves the known list as it is, to be
+  // fetched again when the next search reports another version.
+  const refetch = (): Promise<void> => {
+    if (!fetching) {
+      void (async () => {
+        try {
+          do {
+            const current = fetchFull();
+            fetching = current.then(() => undefined, () => undefined);
+            await current;
+          } while (reportedSeq > accepted && reported !== knownVersion);
+        } catch {
+          // The next search that reports another version retries.
+        } finally {
+          fetching = undefined;
+        }
+      })();
+    }
+    // The refetch sets fetching before its first await.
+    return fetching!;
+  };
+
+  const load = async (search: string): Promise<TorrentList> => {
+    const seq = ++started;
+    let list: TorrentList;
+    if (!search) {
+      // This load answers a newer full list than a refetch in flight, which
+      // it would only roll back, so it aborts that refetch rather than
+      // downloading the full list twice. It does not reuse the refetch's
+      // answer, which may predate a write the caller revalidates after.
+      refetchAbort?.abort();
+      const answer = getTorrents({}).then(res => {
+        accept(seq, res);
+        return res;
+      });
+      const settled = answer.then(() => undefined, () => undefined);
+      loadingFull = settled;
+      void settled.then(() => {
+        if (loadingFull === settled) {
+          loadingFull = undefined;
+        }
+      });
+      list = { ...await answer, search };
+    } else {
+      const request = getTorrents({ fuzzy: true, search });
+      // Without a known list, the next typed query has nothing to match
+      // locally, so the search waits for the full list loading or fetched
+      // alongside it.
+      const seeding = known.torrents ? undefined : loadingFull ?? refetch();
+      const res = await request;
+      if (seq > reportedSeq) {
+        reportedSeq = seq;
+        reported = res.facets.version;
+      }
+      // The seed decides whether the search reports a newer version, and a
+      // search requested before the known list reports none. A failed seed
+      // is retried by the next search rather than at once.
+      await seeding;
+      if (known.torrents && seq > accepted && res.facets.version !== knownVersion) {
+        void refetch();
+      }
+      list = { ...res, matches: res.torrents, search, torrents: known.torrents ?? res.torrents };
+    }
+    seqs.set(list, seq);
+    return list;
+  };
+
+  const subscribe = (listener: () => void) => {
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+    };
+  };
+  return Object.assign(load, {
+    known: () => known,
+    seqOf: (list: TorrentList | undefined) => (list && seqs.get(list)) ?? 0,
+    subscribe,
+  });
 }
 
-// mergeMatches refreshes known torrents with the server's matches for search
-// and appends the matches that were not known. Every torrent the local match
-// finds is one the server matches too, so a saved torrent the local match finds
-// but the server did not return is gone, and is dropped. A torrent merely
-// loaded in the client is kept, since the server leaves one out while its
-// metadata is still resolving.
-function mergeMatches(known: Torrent[], matches: Torrent[], search: string): Torrent[] {
-  const byHash = new Map(matches.map(torrent => [torrent.hash, torrent]));
-  const gone = new Set(searchTorrentsByText(known, search)
-    .filter(torrent => torrent.createdAt !== undefined && !byHash.has(torrent.hash))
-    .map(torrent => torrent.hash));
-  const knownHashes = new Set(known.map(torrent => torrent.hash));
-  return [
-    ...known.filter(torrent => !gone.has(torrent.hash)).map(torrent => byHash.get(torrent.hash) ?? torrent),
-    ...matches.filter(torrent => !knownHashes.has(torrent.hash)),
-  ];
+// findTorrent finds the torrent of hash in list, answered for the request
+// listSeq, or known, looking first in whichever was requested later: the
+// matches of a search answered after known may hold a torrent added since,
+// while known fetched after a cached answer to an earlier search holds the
+// newer fields.
+export function findTorrent(
+  list: Pick<TorrentList, 'matches' | 'torrents'> | undefined,
+  listSeq: number,
+  known: KnownTorrents,
+  hash: string,
+): Torrent | undefined {
+  const byHash = (torrent: Torrent) => torrent.hash === hash;
+  const inMatches = () => list?.matches?.find(byHash);
+  const inKnown = () => known.torrents?.find(byHash);
+  const [first, second] = listSeq > known.seq ? [inMatches, inKnown] : [inKnown, inMatches];
+  return first() ?? second() ?? list?.torrents.find(byHash);
 }
 
 // Until the server has answered the current query, matching titles and names

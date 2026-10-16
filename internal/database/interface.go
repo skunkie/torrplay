@@ -12,6 +12,7 @@ import (
 type DatabaseInterface interface {
 	CreateTorrent(t *Torrent) error
 	GetTorrents() ([]*Torrent, error)
+	GetTorrentsAtRevision() ([]*Torrent, int, error)
 	GetTorrent(ih metainfo.Hash) (*Torrent, error)
 	UpdateTorrent(t *Torrent) error
 	DeleteTorrent(ih metainfo.Hash) error

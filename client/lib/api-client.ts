@@ -159,6 +159,11 @@ export async function apiFetch(path: string, options: RequestInit = {}): Promise
     if (error instanceof HttpError) {
       throw error;
     }
+    // An aborted request was cancelled on purpose, not lost to the network,
+    // so its AbortError reaches the caller unchanged.
+    if (options.signal?.aborted) {
+      throw error;
+    }
     throw new HttpError(0, 'Network Error', 'Could not connect to the server. Please check your network connection and the API URL configuration.');
   }
 }
@@ -198,8 +203,9 @@ const buildRequestOptions = (method: string, data?: unknown, contentType?: strin
 };
 
 export const api = {
-  get: async <T>(path: string): Promise<T> => {
-    const response = await apiFetch(path, { method: 'GET' });
+  // get takes an optional signal that aborts the request.
+  get: async <T>(path: string, options: Pick<RequestInit, 'signal'> = {}): Promise<T> => {
+    const response = await apiFetch(path, { ...options, method: 'GET' });
     return handleResponse<T>(response);
   },
   post: async <T>(path: string, data: unknown, contentType?: string): Promise<T> => {

@@ -192,7 +192,8 @@ interface TorrentCategoryCount {
 
 interface TorrentFacets {
   categories: TorrentCategoryCount[],
-  total: number
+  total: number,
+  version: string
 }
 
 interface TorrentsResponse {

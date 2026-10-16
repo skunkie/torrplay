@@ -20,7 +20,7 @@ export async function getTorrents(params?: {
   limit?: number,
   offset?: number,
   search?: string
-}): Promise<TorrentsResponse> {
+}, options: { signal?: AbortSignal } = {}): Promise<TorrentsResponse> {
   const searchParams = new URLSearchParams();
 
   if (params?.categories?.length) {
@@ -38,7 +38,7 @@ export async function getTorrents(params?: {
 
   const query = searchParams.toString();
   const endpoint = `/api/v1/torrents${query ? `?${query}` : ''}`;
-  const res = await api.get<TorrentsResponse>(endpoint);
+  const res = await api.get<TorrentsResponse>(endpoint, options);
   if (res.torrents) {
     res.torrents.forEach(t => {
       if (!t.files) return;

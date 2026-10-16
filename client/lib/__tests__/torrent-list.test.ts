@@ -11,6 +11,7 @@ import { api } from '@/lib/api-client';
 import {
   createTorrentListLoader,
   filterAndSortTorrents,
+  findTorrent,
   isAwaitingSearch,
   searchTorrentsByText,
   type TorrentListView,
@@ -33,7 +34,15 @@ function torrent(hash: string, overrides: Partial<Torrent> = {}): Torrent {
   } as Torrent;
 }
 
-function response(torrents: Torrent[], facets: TorrentFacets = { categories: [], total: torrents.length }): TorrentsResponse {
+// versionOf stands in for the server's version of the full list all.
+function versionOf(all: Torrent[]): string {
+  return JSON.stringify(all);
+}
+
+function response(
+  torrents: Torrent[],
+  facets: TorrentFacets = { categories: [], total: torrents.length, version: versionOf(torrents) },
+): TorrentsResponse {
   return { facets, limit: 0, offset: 0, torrents, total: torrents.length };
 }
 
@@ -45,100 +54,198 @@ describe('createTorrentListLoader', () => {
   const spring = torrent('b', { createdAt, title: 'Spring' });
   const tearsOfSteel = torrent('c', { createdAt, title: 'Tears of Steel' });
 
-  // answerWith answers a full listing with all and a search with the torrents
-  // that matches maps it to.
+  // answerWith answers a full listing with the current all and a search with
+  // the torrents that matches maps it to, both versioned by all, as the server
+  // versions every listing by its full list. Changing the returned server's
+  // all changes the version of later answers.
   function answerWith(all: Torrent[], matches: Record<string, Torrent[]> = {}) {
-    return vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) => {
+    const server = { all };
+    const get = vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) => {
       const search = new URLSearchParams(endpoint.split('?')[1]).get('search');
-      return response(search ? matches[search] ?? [] : all) as never;
+      const facets = { categories: [], total: server.all.length, version: versionOf(server.all) };
+      return response(search ? matches[search] ?? [] : server.all, facets) as never;
     });
+    return Object.assign(server, { get });
   }
 
-  function endpoints(get: ReturnType<typeof answerWith>): string[] {
-    return get.mock.calls.map(call => call[0]);
+  function endpoints(server: ReturnType<typeof answerWith>): string[] {
+    return server.get.mock.calls.map(call => call[0]);
   }
 
   it('fetches only the full list without a search', async () => {
-    const get = answerWith([sintel]);
+    const server = answerWith([sintel]);
 
     const list = await createTorrentListLoader()('');
 
-    expect(endpoints(get)).toEqual(['/api/v1/torrents']);
+    expect(endpoints(server)).toEqual(['/api/v1/torrents']);
     expect(list.torrents).toEqual([sintel]);
     expect(list.matches).toBeUndefined();
     expect(list.search).toBe('');
   });
 
-  it('fetches only the fuzzy matches once the full list is known', async () => {
-    const facets = { categories: [{ count: 2, name: 'movie' }], total: 2 };
-    const get = vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) =>
-      (endpoint.includes('search=') ? response([spring], facets) : response([sintel, spring], facets)) as never);
+  it('fetches only the fuzzy matches while the full list is current', async () => {
+    const server = answerWith([sintel, spring], { sp: [spring], spr: [spring] });
     const load = createTorrentListLoader();
     await load('');
-    get.mockClear();
+    server.get.mockClear();
 
     const list = await load('sp');
+    await load('spr');
 
-    expect(endpoints(get)).toEqual(['/api/v1/torrents?search=sp&fuzzy=true']);
-    expect(list.facets).toEqual(facets);
+    expect(endpoints(server)).toEqual([
+      '/api/v1/torrents?search=sp&fuzzy=true',
+      '/api/v1/torrents?search=spr&fuzzy=true',
+    ]);
+    expect(list.facets.version).toBe(versionOf([sintel, spring]));
     expect(list.matches).toEqual([spring]);
     expect(list.torrents).toEqual([sintel, spring]);
     expect(list.search).toBe('sp');
   });
 
-  it('fetches the full list once for a search made before it was known', async () => {
-    const get = answerWith([sintel, spring], { sp: [spring], spr: [spring] });
+  it('waits for the full list with a search made before it was known', async () => {
+    const server = answerWith([sintel, spring], { sp: [spring], spr: [spring] });
     const load = createTorrentListLoader();
 
     const list = await load('sp');
 
-    expect(endpoints(get).sort()).toEqual(['/api/v1/torrents', '/api/v1/torrents?search=sp&fuzzy=true']);
     expect(list.torrents).toEqual([sintel, spring]);
     expect(list.matches).toEqual([spring]);
+    expect(load.known().torrents).toEqual([sintel, spring]);
+    expect(endpoints(server)).toEqual(['/api/v1/torrents?search=sp&fuzzy=true', '/api/v1/torrents']);
 
-    get.mockClear();
-    await load('spr');
+    server.get.mockClear();
+    expect((await load('spr')).torrents).toEqual([sintel, spring]);
 
-    expect(endpoints(get)).toEqual(['/api/v1/torrents?search=spr&fuzzy=true']);
+    expect(endpoints(server)).toEqual(['/api/v1/torrents?search=spr&fuzzy=true']);
   });
 
-  it('refreshes known torrents with the matches and appends new ones', async () => {
-    const fresh = torrent('b', { createdAt, title: 'Spring', totalSize: 7 });
-    answerWith([sintel, spring], { spring: [tearsOfSteel, fresh] });
+  it('fetches the full list again once a search reports a new version', async () => {
+    const server = answerWith([sintel, spring, tearsOfSteel], { s: [spring, tearsOfSteel], z: [] });
     const load = createTorrentListLoader();
     await load('');
+    const changes = vi.fn();
+    load.subscribe(changes);
+    // Sintel is deleted on the server.
+    server.all = [spring, tearsOfSteel];
+    server.get.mockClear();
 
-    const list = await load('spring');
+    await load('s');
 
-    expect(list.torrents).toEqual([sintel, fresh, tearsOfSteel]);
-    expect(list.matches).toEqual([tearsOfSteel, fresh]);
-  });
+    await vi.waitFor(() => expect(load.known().torrents).toEqual([spring, tearsOfSteel]));
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(endpoints(server)).toEqual(['/api/v1/torrents?search=s&fuzzy=true', '/api/v1/torrents']);
 
-  it('drops known torrents the local match finds but the server no longer returns', async () => {
-    answerWith([sintel, spring, tearsOfSteel], { s: [spring, tearsOfSteel], z: [] });
-    const load = createTorrentListLoader();
-    await load('');
-
-    expect((await load('s')).torrents).toEqual([spring, tearsOfSteel]);
-    // The pruned torrent stays out of later local matches.
+    server.get.mockClear();
     expect((await load('z')).torrents).toEqual([spring, tearsOfSteel]);
+    expect(endpoints(server)).toEqual(['/api/v1/torrents?search=z&fuzzy=true']);
   });
 
-  it('keeps a loaded torrent the server left out while its metadata resolves', async () => {
-    const loaded = torrent('d', { title: 'Sintel Extras' });
-    answerWith([loaded, sintel], { sintel: [sintel] });
+  it('answers a search without waiting for the full list', async () => {
+    const server = answerWith([sintel, spring], { sp: [spring], spr: [spring] });
     const load = createTorrentListLoader();
     await load('');
+    let answerFull: () => void = () => {};
+    server.all = [spring];
+    server.get.mockImplementation(async (endpoint: string) => {
+      const facets = { categories: [], total: 1, version: versionOf([spring]) };
+      if (endpoint.includes('search=')) {
+        return response([spring], facets) as never;
+      }
+      return new Promise(resolve => {
+        answerFull = () => resolve(response([spring], facets) as never);
+      });
+    });
 
-    expect((await load('sintel')).torrents).toEqual([loaded, sintel]);
+    const list = await load('sp');
+
+    expect(list.matches).toEqual([spring]);
+    expect(list.torrents).toEqual([sintel, spring]);
+    expect(load.known().torrents).toEqual([sintel, spring]);
+
+    // A refresh while the full list is still loading does not fetch it again.
+    await load('spr');
+    expect(endpoints(server).filter(endpoint => !endpoint.includes('search='))).toEqual([
+      '/api/v1/torrents',
+      '/api/v1/torrents',
+    ]);
+
+    answerFull();
+    await vi.waitFor(() => expect(load.known().torrents).toEqual([spring]));
   });
 
-  it('answers a search whose full-list seed failed and fetches the seed again', async () => {
-    const get = vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) => {
+  it('fetches the full list again when a search during a refetch reports a newer version', async () => {
+    const server = answerWith([sintel], { s: [sintel, spring] });
+    const load = createTorrentListLoader();
+    await load('');
+    server.all = [sintel, spring];
+    const answers: Array<() => void> = [];
+    server.get.mockImplementation(async (endpoint: string) => {
+      const all = server.all;
+      const facets = { categories: [], total: all.length, version: versionOf(all) };
+      if (endpoint.includes('search=')) {
+        return response([spring], facets) as never;
+      }
+      return new Promise(resolve => answers.push(() => resolve(response(all, facets) as never)));
+    });
+
+    // The first search starts a refetch of the version with Spring.
+    await load('s');
+    expect(answers).toHaveLength(1);
+    // Tears of Steel is added while the refetch is in flight, and a later
+    // search reports that version without starting a second fetch.
+    server.all = [sintel, spring, tearsOfSteel];
+    await load('s');
+    expect(answers).toHaveLength(1);
+
+    answers[0]();
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    expect(load.known().torrents).toEqual([sintel, spring]);
+    answers[1]();
+
+    await vi.waitFor(() => expect(load.known().torrents).toEqual([sintel, spring, tearsOfSteel]));
+  });
+
+  it('does not let a full list requested before a refetch roll it back', async () => {
+    const server = answerWith([sintel]);
+    const load = createTorrentListLoader();
+    await load('');
+    const pending: Record<string, () => void> = {};
+    server.all = [sintel, spring];
+    server.get.mockImplementation(async (endpoint: string) => {
+      const facets = { categories: [], total: 2, version: versionOf([sintel, spring]) };
+      if (endpoint.includes('search=')) {
+        return new Promise(resolve => {
+          pending.search = () => resolve(response([spring], facets) as never);
+        });
+      }
+      if (!pending.older) {
+        // The full list of a cleared search, requested while the search is
+        // pending, answers late with the torrents from before Spring.
+        return new Promise(resolve => {
+          pending.older = () => resolve(response([sintel]) as never);
+        });
+      }
+      return response(server.all, facets) as never;
+    });
+
+    const search = load('s');
+    const older = load('');
+    pending.search();
+    await search;
+    await vi.waitFor(() => expect(load.known().torrents).toEqual([sintel, spring]));
+
+    pending.older();
+    await older;
+    expect(load.known().torrents).toEqual([sintel, spring]);
+  });
+
+  it('answers a search whose full-list refetch failed and fetches it again', async () => {
+    const server = answerWith([sintel, spring], { sp: [spring], spr: [spring] });
+    server.get.mockImplementation(async (endpoint: string) => {
       if (!endpoint.includes('search=')) {
         throw new Error('network down');
       }
-      return response([spring]) as never;
+      return response([spring], { categories: [], total: 2, version: versionOf([sintel, spring]) }) as never;
     });
     const load = createTorrentListLoader();
 
@@ -146,47 +253,245 @@ describe('createTorrentListLoader', () => {
 
     expect(list.matches).toEqual([spring]);
     expect(list.torrents).toEqual([spring]);
+    await vi.waitFor(() => expect(endpoints(server)).toHaveLength(2));
+    expect(load.known().torrents).toBeUndefined();
 
-    get.mockClear();
+    server.get.mockClear();
     await load('spr');
 
-    expect(endpoints(get).sort()).toEqual(['/api/v1/torrents', '/api/v1/torrents?search=spr&fuzzy=true']);
+    await vi.waitFor(() => expect(endpoints(server)).toEqual([
+      '/api/v1/torrents?search=spr&fuzzy=true',
+      '/api/v1/torrents',
+    ]));
   });
 
-  it('exposes the torrents known from the newest answer', async () => {
-    answerWith([sintel, spring], { sintel: [] });
+  it('keeps the known list and notifies no listener while the version is unchanged', async () => {
+    const server = answerWith([sintel, spring]);
+    const load = createTorrentListLoader();
+    const changes = vi.fn();
+    load.subscribe(changes);
+    await load('');
+    const known = load.known();
+
+    await load('');
+
+    expect(load.known()).toBe(known);
+    expect(changes).toHaveBeenCalledTimes(1);
+
+    server.all = [spring];
+    await load('');
+
+    expect(load.known().torrents).toEqual([spring]);
+    expect(changes).toHaveBeenCalledTimes(2);
+  });
+
+  it('answers an unchanged listing equal to the answer before it', async () => {
+    answerWith([sintel, spring], { sp: [spring] });
     const load = createTorrentListLoader();
 
-    expect(load.known()).toBeUndefined();
+    expect(await load('')).toEqual(await load(''));
+    expect(await load('sp')).toEqual(await load('sp'));
+  });
+
+  it('orders its answers and its known list by request', async () => {
+    answerWith([sintel, spring], { sp: [spring] });
+    const load = createTorrentListLoader();
+
+    const full = await load('');
+    expect(load.seqOf(full)).toBe(load.known().seq);
+    const search = await load('sp');
+    expect(load.seqOf(search)).toBeGreaterThan(load.known().seq);
+    expect(load.seqOf({ ...search })).toBe(0);
+    expect(load.seqOf(undefined)).toBe(0);
+  });
+
+  it('does not fetch the full list for a search requested before the known list', async () => {
+    const server = answerWith([sintel]);
+    const load = createTorrentListLoader();
     await load('');
-    expect(load.known()).toEqual([sintel, spring]);
+    let answerSearch: () => void = () => {};
+    server.get.mockImplementationOnce(() => new Promise(resolve => {
+      answerSearch = () => resolve(response([sintel], { categories: [], total: 1, version: versionOf([sintel]) }) as never);
+    }));
+    const search = load('s');
+    // Spring is added and a refresh answers with it before the search does.
+    server.all = [sintel, spring];
+    await load('');
+    server.get.mockClear();
+
+    answerSearch();
+    await search;
+
+    expect(endpoints(server)).toEqual([]);
+    expect(load.known().torrents).toEqual([sintel, spring]);
+  });
+
+  it('answers a search made before the full list was known after its first fetch', async () => {
+    const server = answerWith([sintel]);
+    const answers: Array<() => void> = [];
+    server.get.mockImplementation(async (endpoint: string) => {
+      const all = server.all;
+      const facets = { categories: [], total: all.length, version: versionOf(all) };
+      if (endpoint.includes('search=')) {
+        return response([], facets) as never;
+      }
+      return new Promise(resolve => answers.push(() => resolve(response(all, facets) as never)));
+    });
+    const load = createTorrentListLoader();
+
+    const first = load('s');
+    // Spring is added and a second search reports it while the seed is in
+    // flight, so the seed fetches the full list twice.
+    server.all = [sintel, spring];
+    const second = load('sp');
+    await vi.waitFor(() => expect(answers).toHaveLength(1));
+    answers[0]();
+
+    expect((await first).torrents).toEqual([sintel]);
+    expect((await second).torrents).toEqual([sintel]);
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    answers[1]();
+    await vi.waitFor(() => expect(load.known().torrents).toEqual([sintel, spring]));
+  });
+
+  it('does not fetch again for a search a newer full list supersedes', async () => {
+    const server = answerWith([sintel]);
+    const load = createTorrentListLoader();
+    await load('');
+    const pending: Record<string, () => void> = {};
+    server.get.mockImplementation(async (endpoint: string) => {
+      const all = server.all;
+      const facets = { categories: [], total: all.length, version: versionOf(all) };
+      const key = endpoint.includes('search=') ? 'search' : !pending.refetch ? 'refetch' : 'cleared';
+      return new Promise(resolve => {
+        pending[key] = () => resolve(response(endpoint.includes('search=') ? [] : all, facets) as never);
+      });
+    });
+
+    // A search reports the version with Spring and starts a refetch.
+    server.all = [sintel, spring];
+    const first = load('s');
+    pending.search();
+    await first;
+    await vi.waitFor(() => expect(pending.refetch).toBeDefined());
+    // While the refetch is in flight, a later search reports the version with
+    // Tears of Steel, and a cleared search then answers a newer full list.
+    server.all = [sintel, spring, tearsOfSteel];
+    const second = load('s');
+    pending.search();
+    await second;
+    server.all = [spring, tearsOfSteel];
+    const cleared = load('');
+    pending.cleared();
+    await cleared;
+    server.get.mockClear();
+
+    pending.refetch();
+
+    await vi.waitFor(() => expect(load.known().torrents).toEqual([spring, tearsOfSteel]));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(endpoints(server)).toEqual([]);
+  });
+
+  it('seeds a search with the full list already loading', async () => {
+    const server = answerWith([sintel, spring], { sp: [spring] });
+    const load = createTorrentListLoader();
+
+    const full = load('');
+    const search = await load('sp');
+    await full;
+
+    expect(search.torrents).toEqual([sintel, spring]);
+    expect(endpoints(server)).toEqual(['/api/v1/torrents', '/api/v1/torrents?search=sp&fuzzy=true']);
+  });
+
+  it('does not refetch for a search answered before the full list already loading', async () => {
+    const server = answerWith([sintel, spring], { sp: [spring] });
+    let answerFull: () => void = () => {};
+    server.get.mockImplementationOnce(() => new Promise(resolve => {
+      answerFull = () => resolve(response([sintel, spring]) as never);
+    }));
+    const load = createTorrentListLoader();
+
+    const full = load('');
+    const search = load('sp');
+    await vi.waitFor(() => expect(endpoints(server)).toHaveLength(2));
+    answerFull();
+
+    expect((await search).torrents).toEqual([sintel, spring]);
+    await full;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(endpoints(server)).toEqual(['/api/v1/torrents', '/api/v1/torrents?search=sp&fuzzy=true']);
+  });
+
+  it('aborts a refetch in flight when a cleared search loads the full list', async () => {
+    const server = answerWith([sintel], { s: [sintel, spring] });
+    const load = createTorrentListLoader();
+    await load('');
+    server.all = [sintel, spring];
+    let refetchSignal: AbortSignal | undefined;
+    server.get.mockImplementationOnce(async () => response([sintel, spring]) as never);
+    server.get.mockImplementationOnce((_endpoint: string, options?: { signal?: AbortSignal | null }) => {
+      refetchSignal = options?.signal ?? undefined;
+      return new Promise((_resolve, reject) => {
+        refetchSignal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      });
+    });
+
+    // The search reports the version with Spring and starts a refetch.
+    await load('s');
+    await vi.waitFor(() => expect(refetchSignal).toBeDefined());
+    expect(refetchSignal?.aborted).toBe(false);
+
+    const cleared = await load('');
+
+    expect(refetchSignal?.aborted).toBe(true);
+    expect(cleared.torrents).toEqual([sintel, spring]);
+    expect(load.known().torrents).toEqual([sintel, spring]);
+    // A later search reporting the same version starts no refetch.
+    server.get.mockClear();
+    await load('s');
+    expect(endpoints(server)).toEqual(['/api/v1/torrents?search=s&fuzzy=true']);
+  });
+
+  it('stops notifying an unsubscribed listener', async () => {
+    answerWith([sintel]);
+    const load = createTorrentListLoader();
+    const changes = vi.fn();
+    const unsubscribe = load.subscribe(changes);
+
+    await load('');
+    unsubscribe();
+    await load('');
+
+    expect(changes).toHaveBeenCalledTimes(1);
+  });
+
+  it('exposes the full list known from the newest answer', async () => {
+    answerWith([sintel, spring], { sintel: [sintel] });
+    const load = createTorrentListLoader();
+
+    expect(load.known().torrents).toBeUndefined();
+    await load('');
+    expect(load.known().torrents).toEqual([sintel, spring]);
     await load('sintel');
-    expect(load.known()).toEqual([spring]);
-  });
-
-  it('keeps known torrents the server matches only with typo tolerance', async () => {
-    answerWith([sintel, spring], { sintl: [sintel] });
-    const load = createTorrentListLoader();
-    await load('');
-
-    expect((await load('sintl')).torrents).toEqual([sintel, spring]);
+    expect(load.known().torrents).toEqual([sintel, spring]);
   });
 
   it('does not let an older answer roll back a newer one', async () => {
     let answerOlder: () => void = () => {};
-    const get = vi.spyOn(api, 'get').mockImplementationOnce(() => new Promise(resolve => {
+    const server = answerWith([sintel, spring, tearsOfSteel]);
+    server.get.mockImplementationOnce(() => new Promise(resolve => {
       answerOlder = () => resolve(response([sintel]) as never);
     }));
     const load = createTorrentListLoader();
     const older = load('');
-    get.mockImplementation(async (endpoint: string) =>
-      response(endpoint.includes('search=') ? [] : [sintel, spring, tearsOfSteel]) as never);
     await load('');
 
     answerOlder();
     expect((await older).torrents).toEqual([sintel]);
 
-    expect((await load('none')).torrents).toEqual([sintel, spring, tearsOfSteel]);
+    expect(load.known().torrents).toEqual([sintel, spring, tearsOfSteel]);
   });
 });
 
@@ -414,7 +719,7 @@ describe('visibleTorrents', () => {
 
 describe('torrentTotal', () => {
   const torrents = [torrent('a'), torrent('b'), torrent('c')];
-  const facets = { categories: [], total: 5 };
+  const facets = { categories: [], total: 5, version: 'v1' };
 
   it('counts nothing before the first answer', () => {
     expect(torrentTotal(undefined, '')).toBeUndefined();
@@ -439,5 +744,31 @@ describe('isAwaitingSearch', () => {
     expect(isAwaitingSearch({ search: 'sint' }, 'sintel')).toBe(true);
     expect(isAwaitingSearch(undefined, 'sintel')).toBe(true);
     expect(isAwaitingSearch({ search: 'sint' }, 'sintel', true)).toBe(false);
+  });
+});
+
+describe('findTorrent', () => {
+  const old = torrent('a', { title: 'Sintel' });
+  const renamed = torrent('a', { title: 'Sintel 2010' });
+  const added = torrent('b', { title: 'Spring' });
+
+  it('prefers the matches of a search answered after the known list', () => {
+    const list = { matches: [renamed, added], torrents: [old] };
+
+    expect(findTorrent(list, 3, { seq: 2, torrents: [old] }, 'a')).toBe(renamed);
+    expect(findTorrent(list, 3, { seq: 2, torrents: [old] }, 'b')).toBe(added);
+  });
+
+  it('prefers a known list fetched after a cached search answer', () => {
+    const list = { matches: [old], torrents: [old] };
+
+    expect(findTorrent(list, 2, { seq: 3, torrents: [renamed] }, 'a')).toBe(renamed);
+  });
+
+  it('falls back to the other source and then to the listed torrents', () => {
+    expect(findTorrent({ matches: [added], torrents: [] }, 2, { seq: 3, torrents: [old] }, 'b')).toBe(added);
+    expect(findTorrent({ torrents: [old] }, 1, { seq: 0 }, 'a')).toBe(old);
+    expect(findTorrent({ torrents: [old] }, 0, { seq: 0, torrents: [renamed] }, 'a')).toBe(renamed);
+    expect(findTorrent(undefined, 0, { seq: 0 }, 'a')).toBeUndefined();
   });
 });

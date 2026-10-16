@@ -96,6 +96,38 @@ func TestCORSAllowedHeaders(t *testing.T) {
 	assert.Contains(t, rr.Header().Get("Access-Control-Allow-Headers"), "X-Requested-With")
 }
 
+func TestCORSAllowsConditionalListing(t *testing.T) {
+	ctrl := &Controller{}
+	ctrl.settings.Store(&api.Settings{})
+	handler := ctrl.corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `W/"v1"`)
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	t.Run("allows if-none-match in a preflight", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodOptions, "/api/v1/torrents", http.NoBody)
+		req.Header.Set("Origin", "http://localhost:3000")
+		req.Header.Set("Access-Control-Request-Method", http.MethodGet)
+		req.Header.Set("Access-Control-Request-Headers", "if-none-match")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code)
+		assert.Contains(t, strings.ToLower(rr.Header().Get("Access-Control-Allow-Headers")), "if-none-match")
+	})
+
+	t.Run("exposes the etag", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/torrents", http.NoBody)
+		req.Header.Set("Origin", "http://localhost:3000")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		assert.Contains(t, rr.Header().Get("Access-Control-Expose-Headers"), "Etag")
+	})
+}
+
 func TestCORSAllowsMethodOverridePreflight(t *testing.T) {
 	ctrl := &Controller{}
 	ctrl.settings.Store(&api.Settings{})

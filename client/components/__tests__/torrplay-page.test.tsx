@@ -7,32 +7,49 @@ import { SWRConfig } from 'swr';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TorrPlayPage from '@/components/torrplay-page';
-import { getTorrents } from '@/lib/api/torrents';
+import { getTorrent, getTorrents } from '@/lib/api/torrents';
 import { STORAGE_KEY_SORT_BY } from '@/lib/torrent-filter-storage';
 import type { Torrent, TorrentsResponse } from '@/lib/types/api';
 
 // The header, controls, and grid are stubbed so the tests drive the page's own
 // search wiring: the stubs expose the props the page passes and the callbacks
 // it hands back.
-const page = vi.hoisted(() => ({
-  controls: {} as Record<string, unknown>,
-  replace: vi.fn(),
-}));
-
-vi.mock('next/navigation', () => {
-  const searchParams = new URLSearchParams();
-  return {
-    usePathname: () => '/',
-    useRouter: () => ({ push: vi.fn(), replace: page.replace }),
-    useSearchParams: () => searchParams,
+// The router keeps the pushed query as the search params, a deep link reaches
+// the page through the captured listener, and the player, the page's only
+// dynamic component, exposes the props it gets.
+const page = vi.hoisted(() => {
+  const state = {
+    controls: {} as Record<string, unknown>,
+    openUrl: undefined as ((event: { url: string }) => Promise<void>) | undefined,
+    params: new URLSearchParams(),
+    player: {} as Record<string, unknown>,
+    push: vi.fn((url: string) => {
+      state.params = new URLSearchParams(url.split('?')[1] ?? '');
+    }),
+    replace: vi.fn(),
   };
+  return state;
 });
 
-vi.mock('next/dynamic', () => ({ default: () => () => null }));
+vi.mock('next/navigation', () => ({
+  usePathname: () => '/',
+  useRouter: () => ({ push: page.push, replace: page.replace }),
+  useSearchParams: () => page.params,
+}));
+
+vi.mock('next/dynamic', () => ({
+  default: () => (props: Record<string, unknown>) => {
+    page.player = props;
+    return null;
+  },
+}));
 
 vi.mock('@capacitor/app', () => ({
   App: {
-    addListener: () => Promise.resolve({ remove: () => {} }),
+    addListener: (_event: string, listener: (event: { url: string }) => Promise<void>) => {
+      page.openUrl = listener;
+      return Promise.resolve({ remove: () => {} });
+    },
     getLaunchUrl: () => Promise.resolve(undefined),
   },
 }));
@@ -108,10 +125,12 @@ function torrent(hash: string, title: string, createdAt: string, totalSize: numb
   } as Torrent;
 }
 
-// The facets describe every torrent, whatever the search matched.
-const facets = { categories: [{ count: 2, name: 'Fantasy' }, { count: 1, name: 'Sci-Fi' }], total: 3 };
+// The facets describe the library, every torrent on the server, whatever the
+// search matched, and version it as the server does.
+const categories = [{ count: 2, name: 'Fantasy' }, { count: 1, name: 'Sci-Fi' }];
 
-function response(torrents: Torrent[]): TorrentsResponse {
+function response(torrents: Torrent[], library: Torrent[] = all): TorrentsResponse {
+  const facets = { categories, total: library.length, version: library.map(t => t.hash).join() };
   return { facets, limit: 0, offset: 0, torrents, total: torrents.length };
 }
 
@@ -123,11 +142,13 @@ const tearsOfSteel = torrent('c', 'Tears of Steel', '2026-01-03T00:00:00Z', 2);
 const all = [spring, sintel, tearsOfSteel];
 
 function renderPage() {
-  return render(
+  const tree = () => (
     <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
       <TorrPlayPage homeHref='/' />
-    </SWRConfig>,
+    </SWRConfig>
   );
+  const view = render(tree());
+  return { ...view, rerender: () => view.rerender(tree()) };
 }
 
 function shownTitles(): string[] {
@@ -145,6 +166,8 @@ function search(query: string) {
 describe('TorrPlayPage search', () => {
   beforeEach(() => {
     page.controls = {};
+    page.params = new URLSearchParams();
+    page.player = {};
     mockGetTorrents.mockImplementation(async params => {
       if (!params?.search) {
         return response(all);
@@ -263,11 +286,12 @@ describe('TorrPlayPage search', () => {
     search('s');
     await waitFor(() => expect(shownTitles()).toEqual(['Tears of Steel', 'Spring', 'Sintel']));
     // Sintel is deleted on the server.
+    const library = [spring, tearsOfSteel];
     mockGetTorrents.mockImplementation(async params => {
       if (!params?.search) {
-        return response([spring, tearsOfSteel]);
+        return response(library, library);
       }
-      return response(params.search === 's' ? [tearsOfSteel, spring] : []);
+      return response(params.search === 's' ? [tearsOfSteel, spring] : [], library);
     });
 
     search('si');
@@ -285,7 +309,7 @@ describe('TorrPlayPage search', () => {
 
     expect(shownTitles()).toEqual([]);
     await waitFor(() => expect(searchCalls()).toContain('sin'));
-    await act(async () => answer(response([])));
+    await act(async () => answer(response([], library)));
   });
 
   it('matches the newest known torrents while a cached search revalidates', async () => {
@@ -294,7 +318,8 @@ describe('TorrPlayPage search', () => {
     search('s');
     await waitFor(() => expect(shownTitles()).toEqual(['Tears of Steel', 'Spring', 'Sintel']));
     // Sintel is deleted on the server.
-    mockGetTorrents.mockImplementation(async () => response([]));
+    const library = [spring, tearsOfSteel];
+    mockGetTorrents.mockImplementation(async params => response(params?.search ? [] : library, library));
     search('si');
     await waitFor(() => expect(searchCalls()).toContain('si'));
     await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
@@ -316,19 +341,81 @@ describe('TorrPlayPage search', () => {
     search('spr');
     await waitFor(() => expect(searchCalls()).toEqual(['spr']));
     await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
-    // Sintel is deleted and another torrent added on the server, and the full
-    // list has not answered yet.
-    mockGetTorrents.mockImplementation(params => params?.search
-      ? Promise.resolve(response([]))
-      : new Promise(() => {}));
+    // Sintel is deleted on the server. A search fetches the changed full list
+    // once, and the next full list does not answer.
+    const library = [spring, tearsOfSteel];
+    let fullLists = 0;
+    mockGetTorrents.mockImplementation(params => {
+      if (params?.search) {
+        return Promise.resolve(response([], library));
+      }
+      return ++fullLists === 1 ? Promise.resolve(response(library, library)) : new Promise(() => {});
+    });
     search('sintel');
     await waitFor(() => expect(searchCalls()).toContain('sintel'));
-    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false, torrentCount: 3 }));
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false, torrentCount: 2 }));
 
     search('');
 
     expect(shownTitles()).toEqual(['Tears of Steel', 'Spring']);
     expect(page.controls).toMatchObject({ torrentCount: 2 });
+  });
+
+  it('shows the matches before a changed full list arrives and shows that list once it does', async () => {
+    renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    // Sintel is deleted on the server. The full list fetched for the search
+    // answers only when told, and the one for the cleared search never does.
+    const library = [spring, tearsOfSteel];
+    let answerFull: () => void = () => {};
+    let fullLists = 0;
+    mockGetTorrents.mockImplementation(params => {
+      if (params?.search) {
+        return Promise.resolve(response(params.search === 'spr' ? [spring] : [], library));
+      }
+      return ++fullLists === 1
+        ? new Promise(resolve => {
+          answerFull = () => resolve(response(library, library));
+        })
+        : new Promise(() => {});
+    });
+
+    search('spr');
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
+    expect(shownTitles()).toEqual(['Spring']);
+
+    search('');
+    expect(shownTitles()).toEqual(['Tears of Steel', 'Sintel', 'Spring']);
+
+    await act(async () => answerFull());
+
+    expect(shownTitles()).toEqual(['Tears of Steel', 'Spring']);
+  });
+
+  it('opens the player for a torrent added and played while searching', async () => {
+    const extra = torrent('d'.repeat(40), 'Spring Extras', '2026-01-04T00:00:00Z', 4);
+    localStorage.setItem('torrent_handler_choice', 'add_and_play');
+    vi.mocked(getTorrent).mockResolvedValue({
+      ...extra,
+      files: [{ length: 4, name: 'Spring Extras.mp4', path: 'Spring Extras.mp4' }],
+    });
+    const view = renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    search('spr');
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
+    // The added torrent is on the server, whose full list does not answer, so
+    // the known list still lacks it.
+    const library = [...all, extra];
+    mockGetTorrents.mockImplementation(params => params?.search
+      ? Promise.resolve(response([spring, extra], library))
+      : new Promise(() => {}));
+
+    await act(async () => page.openUrl?.({ url: extra.magnet }));
+    await waitFor(() => expect(page.push).toHaveBeenCalledWith(`/?modal=play&hash=${extra.hash}`, { scroll: false }));
+    await waitFor(() => expect(searchCalls().filter(call => call === 'spr')).toHaveLength(2));
+    view.rerender();
+
+    await waitFor(() => expect(page.player).toMatchObject({ open: true, torrent: { hash: extra.hash } }));
   });
 
   it('stops waiting for a search that fails', async () => {

@@ -214,6 +214,7 @@ func TestTools(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(textContent.Text), &list))
 		assert.Equal(t, []api.TorrentCategoryCount{{Count: 1, Name: "Movies"}}, list.Facets.Categories)
 		assert.Contains(t, tool.Tool.Description, "facets.total")
+		assert.Contains(t, tool.Tool.Description, "facets.version")
 	})
 
 	t.Run("get_torrent", func(t *testing.T) {

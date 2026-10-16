@@ -223,6 +223,7 @@ paths:
         - $ref: "#/components/parameters/TorrentSearchFuzzy"
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Offset"
+        - $ref: "#/components/parameters/IfNoneMatch"
       responses:
         "200":
           description: A paginated list of torrents.
@@ -230,6 +231,20 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ListTorrents"
+          headers:
+            ETag:
+              description: Weak entity tag of the response, derived from `facets.version` and the request, so responses to different queries never share one.
+              schema:
+                type: string
+                example: 'W/"1x7k2m9q4w3e"'
+        "304":
+          description: The listing is unchanged since the response whose `ETag` was sent in `If-None-Match`.
+          headers:
+            ETag:
+              description: Weak entity tag of the unchanged response.
+              schema:
+                type: string
+                example: 'W/"1x7k2m9q4w3e"'
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1156,6 +1171,14 @@ components:
       schema:
         type: boolean
         default: false
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      description: Entity tags of earlier responses to the same request; when one matches the current listing, the server answers `304 Not Modified` without a body.
+      required: false
+      schema:
+        type: string
+        example: 'W/"1x7k2m9q4w3e"'
     Limit:
       name: limit
       in: query
@@ -1912,6 +1935,7 @@ components:
       required:
         - categories
         - total
+        - version
       properties:
         categories:
           type: array
@@ -1922,6 +1946,10 @@ components:
           type: integer
           description: Number of those torrents.
           example: 150
+        version:
+          type: string
+          description: Opaque version of those torrents that changes whenever any of them is added, removed or changed, including whether it is active or whether its poster image is stored, and whenever the server restarts. A client holding the full list can compare it with the version of a filtered or searched response to tell whether its list is still current. The response's `ETag` is derived from it and the request.
+          example: "1x7k2m9q4w3e"
 
     TorrentCategoryCount:
       type: object

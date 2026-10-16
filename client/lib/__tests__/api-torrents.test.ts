@@ -51,6 +51,17 @@ describe('getTorrents', () => {
 
     get.mockRestore();
   });
+
+  it('forwards an abort signal', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({ torrents: [] } as never);
+    const abort = new AbortController();
+
+    await getTorrents({}, { signal: abort.signal });
+
+    expect(get).toHaveBeenCalledWith('/api/v1/torrents', { signal: abort.signal });
+
+    get.mockRestore();
+  });
 });
 
 describe('getCategories', () => {

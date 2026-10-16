@@ -6,10 +6,15 @@ package controller
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"io"
 	"maps"
 	"math"
 	"net"
@@ -769,7 +774,7 @@ func (c *Controller) HealthCheck(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params api.ListTorrentsParams) {
-	ts, err := c.snapshotTorrents(r)
+	ts, revision, err := c.snapshotTorrents(r)
 	if err != nil {
 		api.HandleError(w, err)
 		return
@@ -786,8 +791,23 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 
 	// Facets describe the torrents before the category and search filters, so
 	// a client showing search results needs no second request for its
-	// category menu and torrent count.
-	facets := torrentFacets(ts)
+	// category menu and torrent count. Their version, with the request the
+	// rest of the response derives from them, also identifies this response,
+	// so an unchanged listing is answered without a body.
+	c.setActivity(ts)
+	version, err := torrentsVersion(listingInstance, revision, ts, c.storedPosters())
+	if err != nil {
+		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	facets := torrentFacets(ts, version)
+	etag := listingETag(facets.Version, r)
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", etag)
+	if params.IfNoneMatch != nil && matchesETag(*params.IfNoneMatch, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	if params.Categories != nil {
 		ts = categoryOpt(*params.Categories...)(ts)
 	}
@@ -820,7 +840,7 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 		}
 	}
 
-	c.decorateTorrents(r, ts)
+	c.setPosterURLs(r, ts)
 	out := make([]api.Torrent, 0, len(ts))
 	for _, t := range ts {
 		out = append(out, *t)
@@ -838,9 +858,37 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 	}
 }
 
+// listingETag returns the weak entity tag of the listing of version answered
+// for r. The version is the same for every query, so the tag adds a hash of
+// what else the response derives from: the query, and the scheme and host
+// poster URLs are built with. Responses to different requests then never
+// share a tag, even for a client that keeps tags by version rather than URL.
+func listingETag(version string, r *http.Request) string {
+	h := fnv.New64a()
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	_, _ = io.WriteString(h, scheme+"\x00"+r.Host+"\x00"+r.URL.Query().Encode())
+	return `W/"` + version + "." + strconv.FormatUint(h.Sum64(), 36) + `"`
+}
+
+// matchesETag reports whether an If-None-Match header lists etag, comparing
+// entity tags weakly as RFC 9110 requires for that header.
+func matchesETag(header, etag string) bool {
+	for tag := range strings.SplitSeq(header, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag == "*" || strings.TrimPrefix(tag, "W/") == strings.TrimPrefix(etag, "W/") {
+			return true
+		}
+	}
+	return false
+}
+
 // torrentFacets counts ts and the torrents in each category, ordered by
-// category name, leaving out torrents without a category.
-func torrentFacets(ts []*api.Torrent) api.TorrentFacets {
+// category name, leaving out torrents without a category, and versions them
+// with version.
+func torrentFacets(ts []*api.Torrent, version string) api.TorrentFacets {
 	counts := make(map[string]int)
 	for _, t := range ts {
 		if category := utils.Val(t.Category); category != "" {
@@ -851,7 +899,73 @@ func torrentFacets(ts []*api.Torrent) api.TorrentFacets {
 	for _, name := range slices.Sorted(maps.Keys(counts)) {
 		categories = append(categories, api.TorrentCategoryCount{Count: counts[name], Name: name})
 	}
-	return api.TorrentFacets{Categories: categories, Total: len(ts)}
+	return api.TorrentFacets{Categories: categories, Total: len(ts), Version: version}
+}
+
+// listingInstance identifies this process in listing versions, so a restarted
+// or upgraded server, which may encode or match torrents differently, never
+// answers a listing cached from an earlier process as unchanged.
+var listingInstance = rand.Text()
+
+// torrentsVersion hashes the listing ts, read at the database revision, in
+// order, so it changes whenever any of them is added, removed or changed. A
+// torrent with a creation time is saved, so it is hashed as its hash and
+// activity, since the revision covers its fields; any other torrent is hashed
+// whole, which is correct whether or not it has a row. Every torrent's poster
+// is hashed as whether its image is stored, which no row records: poster image
+// IDs name their content, so the presence of an image settles its URL.
+func torrentsVersion(instance string, revision int, ts []*api.Torrent, posterStored func(id string) bool) (string, error) {
+	h := fnv.New64a()
+	_, _ = io.WriteString(h, instance)
+	_ = binary.Write(h, binary.BigEndian, int64(revision))
+	enc := json.NewEncoder(h)
+	for _, t := range ts {
+		if t.CreatedAt == nil {
+			_, _ = h.Write([]byte{'L'})
+			if err := enc.Encode(t); err != nil {
+				return "", fmt.Errorf("version torrent %s: %w", t.Hash.HexString(), err)
+			}
+		} else {
+			_, _ = h.Write([]byte{'S'})
+			_, _ = h.Write(t.Hash[:])
+			_, _ = h.Write([]byte{flagByte(utils.Val(t.Active))})
+		}
+		_, _ = h.Write([]byte{flagByte(t.Poster != nil && posterStored(*t.Poster))})
+	}
+	return strconv.FormatUint(h.Sum64(), 36), nil
+}
+
+// flagByte encodes b as a byte for hashing.
+func flagByte(b bool) byte {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// storedPosters reports whether a poster image is stored, reading the image
+// IDs once, on first use, rather than the images, so a listing without
+// posters reads none. A store that cannot list them reports none stored, as
+// it then builds no poster URLs either.
+func (c *Controller) storedPosters() func(id string) bool {
+	stored := sync.OnceValue(func() map[string]struct{} {
+		if c.images == nil {
+			return nil
+		}
+		ids, err := c.images.ListIDs()
+		if err != nil {
+			return nil
+		}
+		set := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			set[id] = struct{}{}
+		}
+		return set
+	})
+	return func(id string) bool {
+		_, ok := stored()[id]
+		return ok
+	}
 }
 
 func (c *Controller) ResolveTorrent(w http.ResponseWriter, r *http.Request) {
@@ -2005,28 +2119,30 @@ const loadedInfoWait = 100 * time.Millisecond
 // listTorrents lists the database rows and the torrents merely loaded in the
 // client, applying opts, with their activity and poster URLs.
 func (c *Controller) listTorrents(r *http.Request, opts ...torrentsOpt) ([]*api.Torrent, error) {
-	ts, err := c.snapshotTorrents(r)
+	ts, _, err := c.snapshotTorrents(r)
 	if err != nil {
 		return nil, err
 	}
 	for _, opt := range opts {
 		ts = opt(ts)
 	}
-	c.decorateTorrents(r, ts)
+	c.setActivity(ts)
+	c.setPosterURLs(r, ts)
 
 	return ts, nil
 }
 
-// snapshotTorrents lists the database rows and the torrents merely loaded in
-// the client. It holds c.mu only to snapshot both, and waits for unresolved
-// metadata after releasing it, so stalled torrents never hold up writers.
-func (c *Controller) snapshotTorrents(r *http.Request) ([]*api.Torrent, error) {
+// snapshotTorrents lists the database rows, with the database revision they
+// were read at, and the torrents merely loaded in the client. It holds c.mu
+// only to snapshot both, and waits for unresolved metadata after releasing
+// it, so stalled torrents never hold up writers.
+func (c *Controller) snapshotTorrents(r *http.Request) ([]*api.Torrent, int, error) {
 	c.mu.RLock()
-	dbTs, err := c.db.GetTorrents()
+	dbTs, revision, err := c.db.GetTorrentsAtRevision()
 	loaded := c.client.Torrents()
 	c.mu.RUnlock()
 	if err != nil {
-		return nil, api.NewError(err.Error(), http.StatusInternalServerError)
+		return nil, 0, api.NewError(err.Error(), http.StatusInternalServerError)
 	}
 
 	ts := database.ToAPITorrents(dbTs)
@@ -2046,19 +2162,27 @@ func (c *Controller) snapshotTorrents(r *http.Request) ([]*api.Torrent, error) {
 		}
 	}
 
-	// Sort new torrents alphabetically by name.
+	// Sort new torrents alphabetically by name, and torrents of the same name
+	// by hash, so a listing's order, and with it its version, does not follow
+	// the client's map order.
 	slices.SortFunc(untrackedTorrents, func(a, b *api.Torrent) int {
-		return strings.Compare(a.Name, b.Name)
+		return cmp.Or(strings.Compare(a.Name, b.Name), bytes.Compare(a.Hash[:], b.Hash[:]))
 	})
 
-	return append(untrackedTorrents, ts...), nil
+	return append(untrackedTorrents, ts...), revision, nil
 }
 
-// decorateTorrents sets the activity and the poster URL of ts, which only the
-// listed torrents need.
-func (c *Controller) decorateTorrents(r *http.Request, ts []*api.Torrent) {
+// setActivity sets whether each of ts has readers.
+func (c *Controller) setActivity(ts []*api.Torrent) {
 	for _, t := range ts {
 		t.Active = new(c.hasTorrentReaders(t.Hash))
+	}
+}
+
+// setPosterURLs replaces the poster image IDs of ts with their URLs, which
+// reads each image, so only the listed torrents need it.
+func (c *Controller) setPosterURLs(r *http.Request, ts []*api.Torrent) {
+	for _, t := range ts {
 		if t.Poster != nil {
 			t.Poster = c.buildPosterUrl(r, *t.Poster)
 		}

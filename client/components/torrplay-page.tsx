@@ -9,7 +9,7 @@ import { Filesystem } from '@capacitor/filesystem';
 import dynamic from 'next/dynamic';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import parseTorrent from 'parse-torrent';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { toast } from 'sonner';
 import useSWR from 'swr';
 
@@ -40,6 +40,7 @@ import { useAuth } from '@/lib/auth-context';
 import { useLiveUpdates } from '@/lib/live-updates-context';
 import {
   createTorrentListLoader,
+  findTorrent,
   isAwaitingSearch,
   type TorrentListLoader,
   torrentTotal,
@@ -170,13 +171,15 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     }
   }, [isOffline, liveUpdatesPaused, mutate]);
 
+  const known = useSyncExternalStore(getTorrentList.subscribe, getTorrentList.known, getTorrentList.known);
+  const knownTorrents = known.torrents;
   const selectedTorrent = useMemo(() => {
     const validModals = ['edit', 'stats', 'play', 'delete'];
-    if (modal && validModals.includes(modal) && hash && torrentsData?.torrents) {
-      return torrentsData.torrents.find(t => t.hash === hash) || null;
+    if (!modal || !validModals.includes(modal) || !hash) {
+      return null;
     }
-    return null;
-  }, [modal, hash, torrentsData]);
+    return findTorrent(torrentsData, getTorrentList.seqOf(torrentsData), known, hash) ?? null;
+  }, [modal, hash, torrentsData, known, getTorrentList]);
 
   const lastActiveElementRef = useRef<HTMLElement | null>(null);
 
@@ -405,7 +408,6 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     }
   };
   const isSearchPending = isAwaitingSearch(torrentsData, query, Boolean(error));
-  const knownTorrents = getTorrentList.known();
   const filteredAndSortedTorrents = useMemo(
     () => visibleTorrents(torrentsData, { categoryFilter, query, searchSortBy, sortBy }, knownTorrents),
     [torrentsData, categoryFilter, query, searchSortBy, sortBy, knownTorrents],

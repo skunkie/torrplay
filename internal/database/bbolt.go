@@ -94,9 +94,21 @@ func (b *BBoltDB) CreateTorrent(t *Torrent) error {
 }
 
 func (b *BBoltDB) GetTorrents() ([]*Torrent, error) {
-	var ts []*Torrent
+	ts, _, err := b.GetTorrentsAtRevision()
+	return ts, err
+}
+
+// GetTorrentsAtRevision returns the torrents with the revision of the
+// database they were read at. The revision grows with every committed write,
+// so equal revisions read equal torrents.
+func (b *BBoltDB) GetTorrentsAtRevision() ([]*Torrent, int, error) {
+	var (
+		ts       []*Torrent
+		revision int
+	)
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
+		revision = tx.ID()
 		bucket := tx.Bucket([]byte(torrentsBucket))
 		if bucket == nil {
 			return errBucketNotFound
@@ -131,7 +143,7 @@ func (b *BBoltDB) GetTorrents() ([]*Torrent, error) {
 		return 0
 	})
 
-	return ts, err
+	return ts, revision, err
 }
 
 func (b *BBoltDB) GetTorrent(ih metainfo.Hash) (*Torrent, error) {

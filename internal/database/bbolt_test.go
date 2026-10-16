@@ -440,6 +440,44 @@ func TestBBoltDB_IsPosterUsed(t *testing.T) {
 	assert.False(t, used)
 }
 
+func TestBBoltDB_GetTorrentsAtRevision(t *testing.T) {
+	db, err := NewBBoltDB(tempfile(t))
+	require.NoError(t, err)
+	defer db.Close()
+
+	sintel := &Torrent{Torrent: api.Torrent{Hash: metainfo.NewHashFromHex("1111111111111111111111111111111111111111"), Name: "Sintel"}}
+	require.NoError(t, db.CreateTorrent(sintel))
+	read := func(t *testing.T) ([]*Torrent, int) {
+		t.Helper()
+		ts, revision, err := db.GetTorrentsAtRevision()
+		require.NoError(t, err)
+		return ts, revision
+	}
+	ts, created := read(t)
+	require.Len(t, ts, 1)
+
+	t.Run("stays the same without writes", func(t *testing.T) {
+		_, revision := read(t)
+		assert.Equal(t, created, revision)
+	})
+
+	t.Run("grows with an update", func(t *testing.T) {
+		sintel.Title = new("Sintel 2010")
+		require.NoError(t, db.UpdateTorrent(sintel))
+		ts, revision := read(t)
+		assert.Greater(t, revision, created)
+		assert.Equal(t, "Sintel 2010", *ts[0].Title)
+	})
+
+	t.Run("grows with a deletion", func(t *testing.T) {
+		_, before := read(t)
+		require.NoError(t, db.DeleteTorrent(sintel.Hash))
+		ts, revision := read(t)
+		assert.Greater(t, revision, before)
+		assert.Empty(t, ts)
+	})
+}
+
 func TestBBoltDB_GetOrCreateSetting(t *testing.T) {
 	getters := []struct {
 		name string

@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { apiFetch, clearStoredCredentials, getApiBaseUrl, setApiBaseUrlOverride } from '@/lib/api-client';
+import { api, apiFetch, clearStoredCredentials, getApiBaseUrl, setApiBaseUrlOverride } from '@/lib/api-client';
 
 describe('apiFetch', () => {
   const originalFetch = global.fetch;
@@ -31,6 +31,36 @@ describe('apiFetch', () => {
     const [, options] = fetchMock.mock.calls[0];
     const headers = options?.headers as Headers;
     expect(headers.get('X-Requested-With')).toBe('XMLHttpRequest');
+  });
+
+  it('passes an abort signal to a GET request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    global.fetch = fetchMock;
+    const abort = new AbortController();
+
+    await api.get('/api/v1/torrents', { signal: abort.signal });
+
+    const [, options] = fetchMock.mock.calls[0];
+    expect(options?.method).toBe('GET');
+    expect(options?.signal).toBe(abort.signal);
+  });
+
+  it('rethrows an aborted request unchanged', async () => {
+    const abort = new AbortController();
+    const aborted = new DOMException('Aborted', 'AbortError');
+    global.fetch = vi.fn().mockImplementation(() => {
+      abort.abort();
+      return Promise.reject(aborted);
+    });
+
+    await expect(apiFetch('/api/v1/torrents', { signal: abort.signal })).rejects.toBe(aborted);
+  });
+
+  it('reports a failed request that was not aborted as a network error', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    await expect(apiFetch('/api/v1/torrents', { signal: new AbortController().signal }))
+      .rejects.toMatchObject({ status: 0, statusText: 'Network Error' });
   });
 
   it('performs PUT request with serialized body', async () => {

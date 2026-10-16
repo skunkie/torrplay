@@ -77,7 +77,7 @@ func registerTools(s *server.MCPServer, client *Client) {
 	// 1. list_torrents
 	s.AddTool(
 		mcp.NewTool("list_torrents",
-			mcp.WithDescription("List torrents currently managed by TorrPlay with optional filtering and pagination. total counts the torrents matching every filter, before pagination; facets.total and facets.categories count the torrents matching only the saved filter, before category and search, with the number of torrents in each category."),
+			mcp.WithDescription("List torrents currently managed by TorrPlay with optional filtering and pagination. total counts the torrents matching every filter, before pagination; facets.total and facets.categories count the torrents matching only the saved filter, before category and search, with the number of torrents in each category, and facets.version changes whenever any of those torrents changes."),
 			mcp.WithInteger("limit", mcp.Description("Maximum number of torrents to return (default 50).")),
 			mcp.WithInteger("offset", mcp.Description("Pagination offset (default 0).")),
 			mcp.WithString("category", mcp.Description("Optional category to filter by (e.g. Movies, Series).")),

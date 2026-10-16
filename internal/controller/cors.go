@@ -19,10 +19,10 @@ func corsOptions() cors.Options {
 		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "SUBSCRIBE", "UNSUBSCRIBE", "NOTIFY"},
 		AllowedHeaders: []string{
 			"Accept", "Accept-Ranges", "Accept-Language", "Access-Control-Request-Private-Network",
-			"Authorization", "Content-Language", "Content-Type", "Content-Length", "Origin", "Range",
-			"X-Http-Method-Override", "X-Requested-With",
+			"Authorization", "Content-Language", "Content-Type", "Content-Length", "If-None-Match", "Origin",
+			"Range", "X-Http-Method-Override", "X-Requested-With",
 		},
-		ExposedHeaders: []string{"Content-Range"},
+		ExposedHeaders: []string{"Content-Range", "ETag"},
 		MaxAge:         600,
 	}
 }
