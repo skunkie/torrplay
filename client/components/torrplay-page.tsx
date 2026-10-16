@@ -38,7 +38,13 @@ import { getApiBaseUrl, HttpError } from '@/lib/api-client';
 import { useOptionalAppUpdate } from '@/lib/app-update-context';
 import { useAuth } from '@/lib/auth-context';
 import { useLiveUpdates } from '@/lib/live-updates-context';
-import { getTorrentList, isAwaitingSearch, visibleTorrents } from '@/lib/torrent-list';
+import {
+  createTorrentListLoader,
+  isAwaitingSearch,
+  type TorrentListLoader,
+  torrentTotal,
+  visibleTorrents,
+} from '@/lib/torrent-list';
 import type { Torrent } from '@/lib/types/api';
 
 const TorrentPlayerDialog = dynamic(
@@ -126,6 +132,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
   const modal = searchParams.get('modal');
   const hash = searchParams.get('hash');
 
+  const [getTorrentList] = useState<TorrentListLoader>(createTorrentListLoader);
   const { data: torrentsData, mutate, isLoading, error } = useSWR(
     isAuthenticated ? ['torrents', search] : null,
     ([, searchKey]: [string, string]) => getTorrentList(searchKey),
@@ -378,11 +385,10 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     };
   }, []);
 
-  const categories = useMemo(() => {
-    if (!torrentsData?.torrents) return [];
-    const allCategories = torrentsData.torrents.map(t => t.category).filter(Boolean) as string[];
-    return Array.from(new Set(allCategories)).sort();
-  }, [torrentsData]);
+  const categories = useMemo(
+    () => torrentsData?.facets.categories.map(category => category.name) ?? [],
+    [torrentsData],
+  );
 
   const openDeleteDialog = (torrent: Torrent) => {
     updateModal('delete', torrent.hash);
@@ -399,9 +405,10 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
     }
   };
   const isSearchPending = isAwaitingSearch(torrentsData, query, Boolean(error));
+  const knownTorrents = getTorrentList.known();
   const filteredAndSortedTorrents = useMemo(
-    () => visibleTorrents(torrentsData, { categoryFilter, query, searchSortBy, sortBy }),
-    [torrentsData, categoryFilter, query, searchSortBy, sortBy],
+    () => visibleTorrents(torrentsData, { categoryFilter, query, searchSortBy, sortBy }, knownTorrents),
+    [torrentsData, categoryFilter, query, searchSortBy, sortBy, knownTorrents],
   );
 
   if (isAuthLoading) {
@@ -523,7 +530,7 @@ export default function TorrPlayPage({ homeHref }: { homeHref: string }) {
       />
       <PageContainer inert={hasOpenDialog}>
         <TorrentControls
-          torrentsData={torrentsData}
+          torrentCount={torrentTotal(torrentsData, query, knownTorrents)}
           torrents={categories}
           filteredAndSortedTorrents={filteredAndSortedTorrents}
           categoryFilter={categoryFilter}

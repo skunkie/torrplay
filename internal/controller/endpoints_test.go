@@ -116,6 +116,115 @@ func TestListTorrentsSearchAndSavedFilters(t *testing.T) {
 	})
 }
 
+func TestListTorrentsFacets(t *testing.T) {
+	ctrl, cleanup := newTestController(t)
+	defer cleanup()
+
+	addAllSampleTorrents(t, ctrl)
+	loaded, _, err := ctrl.client.AddTorrentSpec(torrent.TorrentSpecFromMetaInfo(newMetadataFixture("Big Buck Bunnyland Extras")))
+	require.NoError(t, err)
+	<-loaded.GotInfo()
+	for ih, category := range map[metainfo.Hash]string{bunnyHash: "Animation", cosmosHash: "Animation", sintelHash: "Fantasy"} {
+		body := strings.NewReader(`{"category":"` + category + `"}`)
+		req := httptest.NewRequest(http.MethodPatch, "/api/v1/torrents/"+ih.HexString(), body)
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		ctrl.router.ServeHTTP(rr, req)
+		require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	}
+
+	list := func(t *testing.T, query url.Values) api.ListTorrents {
+		t.Helper()
+		rr := doGet(t, ctrl.router, "/api/v1/torrents?"+query.Encode())
+		require.Equal(t, http.StatusOK, rr.Code)
+		var result api.ListTorrents
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&result))
+
+		return result
+	}
+	allFacets := api.TorrentFacets{
+		Categories: []api.TorrentCategoryCount{{Count: 2, Name: "Animation"}, {Count: 1, Name: "Fantasy"}},
+		Total:      4,
+	}
+
+	t.Run("describes every torrent without filters", func(t *testing.T) {
+		result := list(t, url.Values{})
+		assert.Equal(t, allFacets, result.Facets)
+		assert.Equal(t, 4, result.Total)
+	})
+
+	t.Run("ignores the search query", func(t *testing.T) {
+		result := list(t, url.Values{"fuzzy": {"true"}, "search": {"bunny"}})
+		assert.Equal(t, allFacets, result.Facets)
+		assert.Equal(t, 2, result.Total)
+	})
+
+	t.Run("ignores the category filter", func(t *testing.T) {
+		result := list(t, url.Values{"categories": {"Fantasy"}, "search": {"bunny"}})
+		assert.Equal(t, allFacets, result.Facets)
+		assert.Empty(t, result.Torrents)
+		assert.Equal(t, 0, result.Total)
+	})
+
+	t.Run("ignores pagination", func(t *testing.T) {
+		result := list(t, url.Values{"limit": {"1"}})
+		assert.Equal(t, allFacets, result.Facets)
+		assert.Len(t, result.Torrents, 1)
+	})
+
+	t.Run("decorates the listed torrents", func(t *testing.T) {
+		result := list(t, url.Values{"limit": {"1"}, "search": {"bunny"}})
+		require.Len(t, result.Torrents, 1)
+		assert.NotNil(t, result.Torrents[0].Active)
+	})
+
+	t.Run("follows the other filters", func(t *testing.T) {
+		result := list(t, url.Values{"saved": {"false"}, "search": {"bunny"}})
+		assert.Equal(t, api.TorrentFacets{Categories: []api.TorrentCategoryCount{}, Total: 1}, result.Facets)
+
+		result = list(t, url.Values{"hashes": {bunnyHash.HexString() + "," + sintelHash.HexString()}})
+		assert.Equal(t, api.TorrentFacets{
+			Categories: []api.TorrentCategoryCount{{Count: 1, Name: "Animation"}, {Count: 1, Name: "Fantasy"}},
+			Total:      2,
+		}, result.Facets)
+	})
+}
+
+func TestTorrentFacets(t *testing.T) {
+	tests := []struct {
+		name string
+		ts   []*api.Torrent
+		want api.TorrentFacets
+	}{
+		{
+			name: "returns empty categories for no torrents",
+			want: api.TorrentFacets{Categories: []api.TorrentCategoryCount{}},
+		},
+		{
+			name: "counts torrents per category ordered by name",
+			ts: []*api.Torrent{
+				{Category: utils.Ptr("Shows")},
+				{Category: utils.Ptr("Movies")},
+				{Category: utils.Ptr("Shows")},
+			},
+			want: api.TorrentFacets{
+				Categories: []api.TorrentCategoryCount{{Count: 1, Name: "Movies"}, {Count: 2, Name: "Shows"}},
+				Total:      3,
+			},
+		},
+		{
+			name: "counts uncategorized torrents only in the total",
+			ts:   []*api.Torrent{{}, {Category: utils.Ptr("")}, {Category: utils.Ptr("Movies")}},
+			want: api.TorrentFacets{Categories: []api.TorrentCategoryCount{{Count: 1, Name: "Movies"}}, Total: 3},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, torrentFacets(tt.ts))
+		})
+	}
+}
+
 // addStalledTorrents loads count torrents the client can never fetch metadata
 // for, since the test client has no peers, trackers, or DHT.
 func addStalledTorrents(t *testing.T, ctrl *Controller, count int) {

@@ -185,7 +185,18 @@ interface TorrentStats {
   totalSize: number
 }
 
+interface TorrentCategoryCount {
+  count: number,
+  name: string
+}
+
+interface TorrentFacets {
+  categories: TorrentCategoryCount[],
+  total: number
+}
+
 interface TorrentsResponse {
+  facets: TorrentFacets,
   limit: number,
   offset: number,
   torrents: Torrent[],
@@ -238,7 +249,9 @@ export type {
   Torrent,
   TorrentAdd,
   TorrentAddWithFile,
+  TorrentCategoryCount,
   TorrentClient,
+  TorrentFacets,
   TorrentFile,
   TorrentsResponse,
   TorrentStats,

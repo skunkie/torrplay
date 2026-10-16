@@ -12,7 +12,7 @@ import { TorrentControls } from '../torrent-controls';
 
 describe('TorrentControls', () => {
   const defaultProps = {
-    torrentsData: { torrents: [] },
+    torrentCount: 0,
     torrents: ['Movies', 'TV Shows'],
     filteredAndSortedTorrents: [],
     categoryFilter: 'all',
@@ -88,7 +88,7 @@ describe('TorrentControls', () => {
     render(
       <TorrentControls
         {...defaultProps}
-        torrentsData={{ torrents: [sampleTorrent] }}
+        torrentCount={1}
         filteredAndSortedTorrents={[sampleTorrent]}
       />
     );
@@ -101,7 +101,7 @@ describe('TorrentControls', () => {
     render(
       <TorrentControls
         {...defaultProps}
-        torrentsData={{ torrents: [sampleTorrent, sampleTorrent2] }}
+        torrentCount={2}
         filteredAndSortedTorrents={[sampleTorrent, sampleTorrent2]}
       />
     );
@@ -114,7 +114,7 @@ describe('TorrentControls', () => {
     render(
       <TorrentControls
         {...defaultProps}
-        torrentsData={{ torrents: [sampleTorrent, sampleTorrent2] }}
+        torrentCount={2}
         filteredAndSortedTorrents={[sampleTorrent]}
       />
     );
@@ -128,7 +128,7 @@ describe('TorrentControls', () => {
       <TorrentControls
         {...defaultProps}
         categoryFilter='Movies'
-        torrentsData={{ torrents: [sampleTorrent] }}
+        torrentCount={1}
         filteredAndSortedTorrents={[sampleTorrent]}
       />
     );
@@ -142,7 +142,7 @@ describe('TorrentControls', () => {
       <TorrentControls
         {...defaultProps}
         titleFilter='Test'
-        torrentsData={{ torrents: [sampleTorrent, sampleTorrent2] }}
+        torrentCount={2}
         filteredAndSortedTorrents={[sampleTorrent, sampleTorrent2]}
       />
     );
@@ -156,7 +156,7 @@ describe('TorrentControls', () => {
       <TorrentControls
         {...defaultProps}
         titleFilter='nonexistent'
-        torrentsData={{ torrents: [sampleTorrent, sampleTorrent2] }}
+        torrentCount={2}
         filteredAndSortedTorrents={[]}
       />
     );

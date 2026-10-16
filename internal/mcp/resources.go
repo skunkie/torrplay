@@ -47,7 +47,7 @@ func registerResources(s *server.MCPServer, client *Client) {
 		mcp.NewResource(
 			"torrplay://torrents",
 			"Active Torrents",
-			mcp.WithResourceDescription("List of all torrents currently tracked by TorrPlay in JSON format."),
+			mcp.WithResourceDescription("List of all torrents currently tracked by TorrPlay in JSON format, with facets counting them in total and per category."),
 			mcp.WithMIMEType("application/json"),
 		),
 		jsonResource("torrents", func(ctx context.Context) (*api.ListTorrents, error) {

@@ -20,8 +20,9 @@ import {
   Deployment,
   useOptionalAppUpdate,
 } from '@/lib/app-update-context';
+import { demoTorrentFacets, demoTorrentsResponse } from '@/lib/demo-torrents';
 import { visibleTorrents } from '@/lib/torrent-list';
-import { Torrent, TorrentStats } from '@/lib/types/api';
+import { Torrent, TorrentsResponse, TorrentStats } from '@/lib/types/api';
 
 import { DemoAddTorrentDialog } from './demo-add-torrent-dialog';
 import { DemoDeleteTorrentDialog } from './demo-delete-torrent-dialog';
@@ -286,7 +287,7 @@ const demoTorrentStats: Record<string, TorrentStats> = {
 
 let dbTorrents = [...demoTorrentsData];
 
-const getTorrents = () => new Promise<{ torrents: Torrent[], total: number, limit: number, offset: number }>(resolve => setTimeout(() => resolve({ torrents: demoTorrentsData, total: demoTorrentsData.length, limit: 100, offset: 0 }), 500));
+const getTorrents = () => new Promise<TorrentsResponse>(resolve => setTimeout(() => resolve(demoTorrentsResponse(demoTorrentsData)), 500));
 
 const deleteTorrent = (hash: string) => new Promise(resolve => setTimeout(() => {
   dbTorrents = dbTorrents.filter(t => t.hash !== hash);
@@ -369,16 +370,14 @@ function DemoContent({
   const handlePauseClick = () => setLiveUpdatesPaused(prev => !prev);
 
   useEffect(() => {
-    getTorrents().then((data: { torrents: Torrent[], total: number, limit: number, offset: number }) => {
+    getTorrents().then(data => {
       setTorrents(data.torrents);
     });
   }, []);
 
   const [torrents, setTorrents] = useState<Torrent[]>([]);
-  const categories = useMemo(() => {
-    const allCategories = torrents.map(t => t.category).filter(Boolean) as string[];
-    return Array.from(new Set(allCategories)).sort();
-  }, [torrents]);
+  const facets = useMemo(() => demoTorrentFacets(torrents), [torrents]);
+  const categories = useMemo(() => facets.categories.map(category => category.name), [facets]);
 
   const filteredAndSortedTorrents = useMemo(
     () => visibleTorrents({ search: '', torrents }, { categoryFilter, query, searchSortBy, sortBy }),
@@ -472,7 +471,7 @@ function DemoContent({
       />
       <PageContainer inert={hasOpenDialog}>
         <TorrentControls
-          torrentsData={{ torrents }}
+          torrentCount={facets.total}
           torrents={categories}
           filteredAndSortedTorrents={filteredAndSortedTorrents}
           categoryFilter={categoryFilter}

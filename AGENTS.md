@@ -166,6 +166,7 @@ fix(controller): move debug profiler to loopback-only listener
   - Apply the HTML `inert` attribute to background containers while modal dialogs are active.
 - **Torrent Search**:
   - Search through the `search` and `fuzzy` filters of `GET /api/v1/torrents`, so the client tolerates typos and orders the best match first as the REST API, Stremio, and DLNA do. Until the server answers the current query, match and rank titles and names as `internal/textsearch` does without typo tolerance, so the shown torrents keep their order when the server answers; when changing either side, update `internal/textsearch/testdata/shared-cases.json`, which both test suites run; `/demo` has no server and always uses that match.
+  - While searching, request only the matches and take the category menu and torrent count from the response's `facets`, which ignore the `categories`, `search`, and `fuzzy` filters. Keep the torrents known from the newest answer for the local match, refreshed by each search's matches; drop a saved torrent that the local match finds but the server no longer returns, which relies on the local match finding nothing the server does not.
 - **Audio Demuxing & Decoding**:
   - Use `MkvAudioSyncEngine` with Mediabunny and WASM decoders for formats not natively supported by browsers (AC-3, E-AC-3, DTS).
   - Route standard browser audio codecs (AAC, MP3, Opus, FLAC) directly to native HTML5 audio elements to minimize CPU and battery overhead.

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/http"
@@ -768,27 +769,30 @@ func (c *Controller) HealthCheck(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params api.ListTorrentsParams) {
-	var opts []torrentsOpt
-	if params.Categories != nil {
-		opts = append(opts, categoryOpt(*params.Categories...))
-	}
-	if params.Hashes != nil {
-		opts = append(opts, hashOpt(*params.Hashes...))
-	}
-	if params.Names != nil {
-		opts = append(opts, nameOpt(*params.Names...))
-	}
-	if params.Saved != nil {
-		opts = append(opts, savedOpt(*params.Saved))
-	}
-	if params.Search != nil {
-		opts = append(opts, searchOpt(*params.Search, params.Fuzzy != nil && *params.Fuzzy))
-	}
-
-	ts, err := c.listTorrents(r, opts...)
+	ts, err := c.snapshotTorrents(r)
 	if err != nil {
 		api.HandleError(w, err)
 		return
+	}
+	if params.Hashes != nil {
+		ts = hashOpt(*params.Hashes...)(ts)
+	}
+	if params.Names != nil {
+		ts = nameOpt(*params.Names...)(ts)
+	}
+	if params.Saved != nil {
+		ts = savedOpt(*params.Saved)(ts)
+	}
+
+	// Facets describe the torrents before the category and search filters, so
+	// a client showing search results needs no second request for its
+	// category menu and torrent count.
+	facets := torrentFacets(ts)
+	if params.Categories != nil {
+		ts = categoryOpt(*params.Categories...)(ts)
+	}
+	if params.Search != nil {
+		ts = searchOpt(*params.Search, params.Fuzzy != nil && *params.Fuzzy)(ts)
 	}
 
 	total := len(ts)
@@ -816,6 +820,7 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 		}
 	}
 
+	c.decorateTorrents(r, ts)
 	out := make([]api.Torrent, 0, len(ts))
 	for _, t := range ts {
 		out = append(out, *t)
@@ -823,6 +828,7 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(api.ListTorrents{
+		Facets:   facets,
 		Limit:    limit,
 		Offset:   offset,
 		Torrents: out,
@@ -830,6 +836,22 @@ func (c *Controller) ListTorrents(w http.ResponseWriter, r *http.Request, params
 	}); err != nil {
 		api.HTTPError(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// torrentFacets counts ts and the torrents in each category, ordered by
+// category name, leaving out torrents without a category.
+func torrentFacets(ts []*api.Torrent) api.TorrentFacets {
+	counts := make(map[string]int)
+	for _, t := range ts {
+		if category := utils.Val(t.Category); category != "" {
+			counts[category]++
+		}
+	}
+	categories := make([]api.TorrentCategoryCount, 0, len(counts))
+	for _, name := range slices.Sorted(maps.Keys(counts)) {
+		categories = append(categories, api.TorrentCategoryCount{Count: counts[name], Name: name})
+	}
+	return api.TorrentFacets{Categories: categories, Total: len(ts)}
 }
 
 func (c *Controller) ResolveTorrent(w http.ResponseWriter, r *http.Request) {
@@ -1981,10 +2003,24 @@ func (c *Controller) startPosterUpdate(ih metainfo.Hash, urlStr string) {
 const loadedInfoWait = 100 * time.Millisecond
 
 // listTorrents lists the database rows and the torrents merely loaded in the
-// client, applying opts. It holds c.mu only to snapshot both, and waits for
-// unresolved metadata after releasing it, so stalled torrents never hold up
-// writers.
+// client, applying opts, with their activity and poster URLs.
 func (c *Controller) listTorrents(r *http.Request, opts ...torrentsOpt) ([]*api.Torrent, error) {
+	ts, err := c.snapshotTorrents(r)
+	if err != nil {
+		return nil, err
+	}
+	for _, opt := range opts {
+		ts = opt(ts)
+	}
+	c.decorateTorrents(r, ts)
+
+	return ts, nil
+}
+
+// snapshotTorrents lists the database rows and the torrents merely loaded in
+// the client. It holds c.mu only to snapshot both, and waits for unresolved
+// metadata after releasing it, so stalled torrents never hold up writers.
+func (c *Controller) snapshotTorrents(r *http.Request) ([]*api.Torrent, error) {
 	c.mu.RLock()
 	dbTs, err := c.db.GetTorrents()
 	loaded := c.client.Torrents()
@@ -2015,20 +2051,18 @@ func (c *Controller) listTorrents(r *http.Request, opts ...torrentsOpt) ([]*api.
 		return strings.Compare(a.Name, b.Name)
 	})
 
-	ts = append(untrackedTorrents, ts...)
+	return append(untrackedTorrents, ts...), nil
+}
 
-	for _, opt := range opts {
-		ts = opt(ts)
-	}
-
+// decorateTorrents sets the activity and the poster URL of ts, which only the
+// listed torrents need.
+func (c *Controller) decorateTorrents(r *http.Request, ts []*api.Torrent) {
 	for _, t := range ts {
 		t.Active = new(c.hasTorrentReaders(t.Hash))
 		if t.Poster != nil {
 			t.Poster = c.buildPosterUrl(r, *t.Poster)
 		}
 	}
-
-	return ts, nil
 }
 
 // gotInfoBy reports whether to has its metadata by the time ctx is done,

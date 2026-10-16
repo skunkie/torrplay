@@ -4,7 +4,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { addTorrent, getTorrents, getTorrentStreamUrl } from '@/lib/api/torrents';
+import { addTorrent, getCategories, getTorrents, getTorrentStreamUrl } from '@/lib/api/torrents';
 import { api } from '@/lib/api-client';
 
 describe('getTorrentStreamUrl', () => {
@@ -48,6 +48,23 @@ describe('getTorrents', () => {
       '/api/v1/torrents?search=sintel&fuzzy=true',
       '/api/v1/torrents',
     ]);
+
+    get.mockRestore();
+  });
+});
+
+describe('getCategories', () => {
+  it('reads the category names from the facets of a single torrent', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue({
+      facets: { categories: [{ count: 2, name: 'Movies' }, { count: 1, name: 'Shows' }], total: 3 },
+      limit: 1,
+      offset: 0,
+      torrents: [],
+      total: 3,
+    } as never);
+
+    expect(await getCategories()).toEqual(['Movies', 'Shows']);
+    expect(get.mock.calls.map(call => call[0])).toEqual(['/api/v1/torrents?limit=1']);
 
     get.mockRestore();
   });

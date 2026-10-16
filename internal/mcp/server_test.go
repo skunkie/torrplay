@@ -62,6 +62,10 @@ func setupMockTorrPlay(t *testing.T) *Client {
 		switch r.Method {
 		case http.MethodGet:
 			res := api.ListTorrents{
+				Facets: api.TorrentFacets{
+					Categories: []api.TorrentCategoryCount{{Count: 1, Name: "Movies"}},
+					Total:      1,
+				},
 				Limit:    50,
 				Offset:   0,
 				Total:    1,
@@ -206,6 +210,10 @@ func TestTools(t *testing.T) {
 		textContent, ok := mcp.AsTextContent(res.Content[0])
 		require.True(t, ok)
 		assert.Contains(t, textContent.Text, "Sintel")
+		var list api.ListTorrents
+		require.NoError(t, json.Unmarshal([]byte(textContent.Text), &list))
+		assert.Equal(t, []api.TorrentCategoryCount{{Count: 1, Name: "Movies"}}, list.Facets.Categories)
+		assert.Contains(t, tool.Tool.Description, "facets.total")
 	})
 
 	t.Run("get_torrent", func(t *testing.T) {
@@ -571,6 +579,7 @@ func TestResources(t *testing.T) {
 		textContent, ok := mcp.AsTextResourceContents(contents[0])
 		require.True(t, ok)
 		assert.Contains(t, textContent.Text, "Sintel")
+		assert.Contains(t, textContent.Text, `"facets"`)
 	})
 
 	t.Run("torrplay://system/memory", func(t *testing.T) {

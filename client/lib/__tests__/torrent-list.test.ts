@@ -9,14 +9,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { api } from '@/lib/api-client';
 import {
+  createTorrentListLoader,
   filterAndSortTorrents,
-  getTorrentList,
   isAwaitingSearch,
   searchTorrentsByText,
   type TorrentListView,
+  torrentTotal,
   visibleTorrents,
 } from '@/lib/torrent-list';
-import type { Torrent, TorrentsResponse } from '@/lib/types/api';
+import type { Torrent, TorrentFacets, TorrentsResponse } from '@/lib/types/api';
 
 function torrent(hash: string, overrides: Partial<Torrent> = {}): Torrent {
   return {
@@ -32,39 +33,160 @@ function torrent(hash: string, overrides: Partial<Torrent> = {}): Torrent {
   } as Torrent;
 }
 
-function response(torrents: Torrent[]): TorrentsResponse {
-  return { limit: 0, offset: 0, torrents, total: torrents.length };
+function response(torrents: Torrent[], facets: TorrentFacets = { categories: [], total: torrents.length }): TorrentsResponse {
+  return { facets, limit: 0, offset: 0, torrents, total: torrents.length };
 }
 
-describe('getTorrentList', () => {
+describe('createTorrentListLoader', () => {
   afterEach(() => vi.restoreAllMocks());
 
+  const createdAt = '2026-01-01T00:00:00Z';
+  const sintel = torrent('a', { createdAt, title: 'Sintel' });
+  const spring = torrent('b', { createdAt, title: 'Spring' });
+  const tearsOfSteel = torrent('c', { createdAt, title: 'Tears of Steel' });
+
+  // answerWith answers a full listing with all and a search with the torrents
+  // that matches maps it to.
+  function answerWith(all: Torrent[], matches: Record<string, Torrent[]> = {}) {
+    return vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) => {
+      const search = new URLSearchParams(endpoint.split('?')[1]).get('search');
+      return response(search ? matches[search] ?? [] : all) as never;
+    });
+  }
+
+  function endpoints(get: ReturnType<typeof answerWith>): string[] {
+    return get.mock.calls.map(call => call[0]);
+  }
+
   it('fetches only the full list without a search', async () => {
-    const get = vi.spyOn(api, 'get').mockResolvedValue(response([torrent('a')]) as never);
+    const get = answerWith([sintel]);
 
-    const list = await getTorrentList('');
+    const list = await createTorrentListLoader()('');
 
-    expect(get.mock.calls.map(call => call[0])).toEqual(['/api/v1/torrents']);
-    expect(list.torrents.map(t => t.hash)).toEqual(['a']);
+    expect(endpoints(get)).toEqual(['/api/v1/torrents']);
+    expect(list.torrents).toEqual([sintel]);
     expect(list.matches).toBeUndefined();
     expect(list.search).toBe('');
   });
 
-  it('fetches the fuzzy matches alongside the full list', async () => {
+  it('fetches only the fuzzy matches once the full list is known', async () => {
+    const facets = { categories: [{ count: 2, name: 'movie' }], total: 2 };
     const get = vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) =>
-      (endpoint.includes('search=')
-        ? response([torrent('b')])
-        : response([torrent('a'), torrent('b')])) as never);
+      (endpoint.includes('search=') ? response([spring], facets) : response([sintel, spring], facets)) as never);
+    const load = createTorrentListLoader();
+    await load('');
+    get.mockClear();
 
-    const list = await getTorrentList('big buck');
+    const list = await load('sp');
 
-    expect(get.mock.calls.map(call => call[0]).sort()).toEqual([
-      '/api/v1/torrents',
-      '/api/v1/torrents?search=big+buck&fuzzy=true',
-    ]);
-    expect(list.torrents.map(t => t.hash)).toEqual(['a', 'b']);
-    expect(list.matches?.map(t => t.hash)).toEqual(['b']);
-    expect(list.search).toBe('big buck');
+    expect(endpoints(get)).toEqual(['/api/v1/torrents?search=sp&fuzzy=true']);
+    expect(list.facets).toEqual(facets);
+    expect(list.matches).toEqual([spring]);
+    expect(list.torrents).toEqual([sintel, spring]);
+    expect(list.search).toBe('sp');
+  });
+
+  it('fetches the full list once for a search made before it was known', async () => {
+    const get = answerWith([sintel, spring], { sp: [spring], spr: [spring] });
+    const load = createTorrentListLoader();
+
+    const list = await load('sp');
+
+    expect(endpoints(get).sort()).toEqual(['/api/v1/torrents', '/api/v1/torrents?search=sp&fuzzy=true']);
+    expect(list.torrents).toEqual([sintel, spring]);
+    expect(list.matches).toEqual([spring]);
+
+    get.mockClear();
+    await load('spr');
+
+    expect(endpoints(get)).toEqual(['/api/v1/torrents?search=spr&fuzzy=true']);
+  });
+
+  it('refreshes known torrents with the matches and appends new ones', async () => {
+    const fresh = torrent('b', { createdAt, title: 'Spring', totalSize: 7 });
+    answerWith([sintel, spring], { spring: [tearsOfSteel, fresh] });
+    const load = createTorrentListLoader();
+    await load('');
+
+    const list = await load('spring');
+
+    expect(list.torrents).toEqual([sintel, fresh, tearsOfSteel]);
+    expect(list.matches).toEqual([tearsOfSteel, fresh]);
+  });
+
+  it('drops known torrents the local match finds but the server no longer returns', async () => {
+    answerWith([sintel, spring, tearsOfSteel], { s: [spring, tearsOfSteel], z: [] });
+    const load = createTorrentListLoader();
+    await load('');
+
+    expect((await load('s')).torrents).toEqual([spring, tearsOfSteel]);
+    // The pruned torrent stays out of later local matches.
+    expect((await load('z')).torrents).toEqual([spring, tearsOfSteel]);
+  });
+
+  it('keeps a loaded torrent the server left out while its metadata resolves', async () => {
+    const loaded = torrent('d', { title: 'Sintel Extras' });
+    answerWith([loaded, sintel], { sintel: [sintel] });
+    const load = createTorrentListLoader();
+    await load('');
+
+    expect((await load('sintel')).torrents).toEqual([loaded, sintel]);
+  });
+
+  it('answers a search whose full-list seed failed and fetches the seed again', async () => {
+    const get = vi.spyOn(api, 'get').mockImplementation(async (endpoint: string) => {
+      if (!endpoint.includes('search=')) {
+        throw new Error('network down');
+      }
+      return response([spring]) as never;
+    });
+    const load = createTorrentListLoader();
+
+    const list = await load('sp');
+
+    expect(list.matches).toEqual([spring]);
+    expect(list.torrents).toEqual([spring]);
+
+    get.mockClear();
+    await load('spr');
+
+    expect(endpoints(get).sort()).toEqual(['/api/v1/torrents', '/api/v1/torrents?search=spr&fuzzy=true']);
+  });
+
+  it('exposes the torrents known from the newest answer', async () => {
+    answerWith([sintel, spring], { sintel: [] });
+    const load = createTorrentListLoader();
+
+    expect(load.known()).toBeUndefined();
+    await load('');
+    expect(load.known()).toEqual([sintel, spring]);
+    await load('sintel');
+    expect(load.known()).toEqual([spring]);
+  });
+
+  it('keeps known torrents the server matches only with typo tolerance', async () => {
+    answerWith([sintel, spring], { sintl: [sintel] });
+    const load = createTorrentListLoader();
+    await load('');
+
+    expect((await load('sintl')).torrents).toEqual([sintel, spring]);
+  });
+
+  it('does not let an older answer roll back a newer one', async () => {
+    let answerOlder: () => void = () => {};
+    const get = vi.spyOn(api, 'get').mockImplementationOnce(() => new Promise(resolve => {
+      answerOlder = () => resolve(response([sintel]) as never);
+    }));
+    const load = createTorrentListLoader();
+    const older = load('');
+    get.mockImplementation(async (endpoint: string) =>
+      response(endpoint.includes('search=') ? [] : [sintel, spring, tearsOfSteel]) as never);
+    await load('');
+
+    answerOlder();
+    expect((await older).torrents).toEqual([sintel]);
+
+    expect((await load('none')).torrents).toEqual([sintel, spring, tearsOfSteel]);
   });
 });
 
@@ -262,11 +384,51 @@ describe('visibleTorrents', () => {
     expect(hashes(undefined, { query: 'sint' })).toEqual([]);
   });
 
+  it('matches the known torrents rather than a cached list until the server answers', () => {
+    const cached = { matches: torrents, search: 's', torrents };
+    const known = [torrents[1], torrents[2]];
+    const visible = (query: string) => visibleTorrents(cached, { ...view, query }, known).map(t => t.hash);
+
+    expect(visible('sint')).toEqual(['sintel-show']);
+    // The server's answer to the list's own query still wins.
+    expect(visible('s')).toEqual(['sintel', 'spring', 'sintel-show']);
+    // Without a query the known torrents show until the full list answers.
+    expect(visible('')).toEqual(['sintel-show', 'spring']);
+  });
+
+  it('shows the known torrents while a cleared search awaits the full list', () => {
+    const searched = { matches: [torrents[0]], search: 'sintel', torrents };
+    const known = [torrents[0], torrents[1]];
+
+    expect(visibleTorrents(searched, view, known).map(t => t.hash)).toEqual(['spring', 'sintel']);
+    expect(visibleTorrents(searched, view).map(t => t.hash)).toEqual(['sintel-show', 'spring', 'sintel']);
+  });
+
   it('ranks the title matches as the server does until it answers', () => {
     const list = { search: '', torrents: [torrent('showcase', { createdAt: '2026-01-04', title: 'Showcase' }), ...torrents] };
 
     expect(hashes(list, { query: 'show' })).toEqual(['sintel-show', 'showcase']);
     expect(hashes(list, { query: 'show', searchSortBy: 'date' })).toEqual(['showcase', 'sintel-show']);
+  });
+});
+
+describe('torrentTotal', () => {
+  const torrents = [torrent('a'), torrent('b'), torrent('c')];
+  const facets = { categories: [], total: 5 };
+
+  it('counts nothing before the first answer', () => {
+    expect(torrentTotal(undefined, '')).toBeUndefined();
+  });
+
+  it('reads the facets for the full list and for a search', () => {
+    expect(torrentTotal({ facets, search: '', torrents }, '')).toBe(5);
+    expect(torrentTotal({ facets, search: 'a', torrents }, 'a')).toBe(5);
+    expect(torrentTotal({ facets, search: 'a', torrents }, 'b')).toBe(5);
+  });
+
+  it('counts the shown torrents while a cleared search awaits the full list', () => {
+    expect(torrentTotal({ facets, search: 'a', torrents }, '', [torrent('a')])).toBe(1);
+    expect(torrentTotal({ facets, search: 'a', torrents }, '')).toBe(3);
   });
 });
 

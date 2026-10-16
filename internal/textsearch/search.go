@@ -206,14 +206,19 @@ func foldText(s string) string {
 // neither a letter nor a digit, so release names such as "Sintel.2010.1080p"
 // yield the same words as "sintel 2010 1080p".
 // Apostrophes are dropped rather than split on, so "Llama's" reads "llamas".
+// Folding again after the decomposition folds compatibility forms that
+// decompose to capitals, so "𝐒𝐢𝐧𝐭𝐞𝐥" reads "sintel". Each letter is then
+// lowercased, since x/text folds Cherokee by swapping its case rather than
+// mapping both cases to one.
 func splitWords(s string) []string {
 	var b strings.Builder
 	b.Grow(len(s))
-	for _, r := range norm.NFKD.String(cases.Fold().String(s)) {
+	fold := cases.Fold()
+	for _, r := range fold.String(norm.NFKD.String(fold.String(s))) {
 		switch {
 		case unicode.Is(unicode.Mn, r), r == '\'', r == '’':
 		case unicode.IsLetter(r), unicode.IsDigit(r):
-			b.WriteRune(r)
+			b.WriteRune(unicode.ToLower(r))
 		default:
 			b.WriteByte(' ')
 		}

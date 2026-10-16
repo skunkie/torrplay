@@ -212,7 +212,7 @@ paths:
       tags:
         - v1
       summary: List all torrents.
-      description: Returns a paginated list of all torrents currently managed by the system. Supports filtering by category, info hash, name, database persistence and a free-text search query.
+      description: Returns a paginated list of all torrents currently managed by the system. Supports filtering by category, info hash, name, database persistence and a free-text search query. The response also summarizes the torrents before the category and search filters, so a client can show its category menu and torrent count alongside search results.
       operationId: listTorrents
       parameters:
         - $ref: "#/components/parameters/TorrentCategories"
@@ -1885,6 +1885,7 @@ components:
         - limit
         - offset
         - total
+        - facets
       properties:
         torrents:
           type: array
@@ -1902,6 +1903,41 @@ components:
           type: integer
           description: Total number of torrents available.
           example: 150
+        facets:
+          $ref: "#/components/schemas/TorrentFacets"
+
+    TorrentFacets:
+      type: object
+      description: Summary of the torrents matching every filter except `categories`, `search` and `fuzzy`, so a client can show its category menu and torrent count from a filtered or searched list.
+      required:
+        - categories
+        - total
+      properties:
+        categories:
+          type: array
+          description: Categories of those torrents, ordered by name. Torrents without a category are not counted.
+          items:
+            $ref: "#/components/schemas/TorrentCategoryCount"
+        total:
+          type: integer
+          description: Number of those torrents.
+          example: 150
+
+    TorrentCategoryCount:
+      type: object
+      description: Number of torrents in a category.
+      required:
+        - count
+        - name
+      properties:
+        count:
+          type: integer
+          description: Number of torrents in the category.
+          example: 12
+        name:
+          type: string
+          description: Category name.
+          example: "Movies"
 
     Settings:
       type: object

@@ -18,7 +18,7 @@ import {
 import type { Torrent } from '@/lib/types/api';
 
 interface TorrentControlsProps {
-  torrentsData?: { torrents: Torrent[] },
+  torrentCount?: number,
   torrents: string[],
   filteredAndSortedTorrents: Torrent[],
   categoryFilter: string,
@@ -34,7 +34,7 @@ interface TorrentControlsProps {
 }
 
 export function TorrentControls({
-  torrentsData,
+  torrentCount,
   torrents,
   filteredAndSortedTorrents,
   categoryFilter,
@@ -54,7 +54,7 @@ export function TorrentControls({
   const topControlsRef = externalTopControlsRef || internalTopControlsRef;
   const mobileControlsRef = externalMobileControlsRef || internalMobileControlsRef;
 
-  const totalCount = torrentsData?.torrents.length ?? 0;
+  const totalCount = torrentCount ?? 0;
   const filteredCount = filteredAndSortedTorrents.length;
   const hasActiveFilter = Boolean(titleFilter?.trim()) || (Boolean(categoryFilter) && categoryFilter !== 'all');
   const isFiltered = hasActiveFilter || filteredCount !== totalCount;
@@ -108,7 +108,7 @@ export function TorrentControls({
           </Select>
         </div>
         <div className='flex items-center gap-2'>
-          {torrentsData && (
+          {torrentCount !== undefined && (
             <span className='text-sm text-muted-foreground'>
               {countLabel}
             </span>
@@ -125,7 +125,7 @@ export function TorrentControls({
             <Plus className='h-4 w-4' />
             Add Torrent
           </Button>
-          {torrentsData && (
+          {torrentCount !== undefined && (
             <span className='text-sm text-muted-foreground'>
               {countLabel}
             </span>

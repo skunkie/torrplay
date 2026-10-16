@@ -108,8 +108,11 @@ function torrent(hash: string, title: string, createdAt: string, totalSize: numb
   } as Torrent;
 }
 
+// The facets describe every torrent, whatever the search matched.
+const facets = { categories: [{ count: 2, name: 'Fantasy' }, { count: 1, name: 'Sci-Fi' }], total: 3 };
+
 function response(torrents: Torrent[]): TorrentsResponse {
-  return { limit: 0, offset: 0, torrents, total: torrents.length };
+  return { facets, limit: 0, offset: 0, torrents, total: torrents.length };
 }
 
 // The list, date, name, size, and relevance orders all differ, so each
@@ -220,6 +223,112 @@ describe('TorrPlayPage search', () => {
     search('s');
 
     await waitFor(() => expect(page.controls).toMatchObject({ sortBy: 'relevance' }));
+  });
+
+  it('makes a single request per refresh while searching', async () => {
+    renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    mockGetTorrents.mockClear();
+
+    search('spr');
+
+    await waitFor(() => expect(searchCalls()).toEqual(['spr']));
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
+    expect(shownTitles()).toEqual(['Spring']);
+    expect(mockGetTorrents.mock.calls).toEqual([[{ fuzzy: true, search: 'spr' }]]);
+    expect(page.controls).toMatchObject({ torrentCount: 3, torrents: ['Fantasy', 'Sci-Fi'] });
+  });
+
+  it('matches every known torrent locally after a search narrowed the response', async () => {
+    let answer: (value: TorrentsResponse) => void = () => {};
+    renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    search('spr');
+    await waitFor(() => expect(shownTitles()).toEqual(['Spring']));
+    mockGetTorrents.mockImplementation(() => new Promise(resolve => {
+      answer = resolve;
+    }));
+
+    search('steel');
+
+    expect(shownTitles()).toEqual(['Tears of Steel']);
+    await waitFor(() => expect(searchCalls()).toContain('steel'));
+    await act(async () => answer(response([tearsOfSteel])));
+    expect(shownTitles()).toEqual(['Tears of Steel']);
+  });
+
+  it('does not restore a deleted torrent from an earlier search', async () => {
+    renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    search('s');
+    await waitFor(() => expect(shownTitles()).toEqual(['Tears of Steel', 'Spring', 'Sintel']));
+    // Sintel is deleted on the server.
+    mockGetTorrents.mockImplementation(async params => {
+      if (!params?.search) {
+        return response([spring, tearsOfSteel]);
+      }
+      return response(params.search === 's' ? [tearsOfSteel, spring] : []);
+    });
+
+    search('si');
+    await waitFor(() => expect(searchCalls()).toContain('si'));
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
+    // Going back serves the cached answer to "s", which still lists Sintel.
+    search('s');
+    await waitFor(() => expect(shownTitles()).toEqual(['Tears of Steel', 'Spring']));
+    let answer: (value: TorrentsResponse) => void = () => {};
+    mockGetTorrents.mockImplementation(() => new Promise(resolve => {
+      answer = resolve;
+    }));
+
+    search('sin');
+
+    expect(shownTitles()).toEqual([]);
+    await waitFor(() => expect(searchCalls()).toContain('sin'));
+    await act(async () => answer(response([])));
+  });
+
+  it('matches the newest known torrents while a cached search revalidates', async () => {
+    renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    search('s');
+    await waitFor(() => expect(shownTitles()).toEqual(['Tears of Steel', 'Spring', 'Sintel']));
+    // Sintel is deleted on the server.
+    mockGetTorrents.mockImplementation(async () => response([]));
+    search('si');
+    await waitFor(() => expect(searchCalls()).toContain('si'));
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
+    // Going back serves the cached answer to "s", which still lists Sintel,
+    // and its revalidation never answers.
+    mockGetTorrents.mockImplementation(() => new Promise(() => {}));
+    search('s');
+    await waitFor(() => expect(shownTitles()).toEqual(['Tears of Steel', 'Spring', 'Sintel']));
+    await waitFor(() => expect(searchCalls().filter(call => call === 's')).toHaveLength(2));
+
+    search('sin');
+
+    expect(shownTitles()).toEqual([]);
+  });
+
+  it('counts the shown torrents while a cleared search awaits the full list', async () => {
+    renderPage();
+    await waitFor(() => expect(shownTitles()).toHaveLength(3));
+    search('spr');
+    await waitFor(() => expect(searchCalls()).toEqual(['spr']));
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false }));
+    // Sintel is deleted and another torrent added on the server, and the full
+    // list has not answered yet.
+    mockGetTorrents.mockImplementation(params => params?.search
+      ? Promise.resolve(response([]))
+      : new Promise(() => {}));
+    search('sintel');
+    await waitFor(() => expect(searchCalls()).toContain('sintel'));
+    await waitFor(() => expect(page.controls).toMatchObject({ isSearchPending: false, torrentCount: 3 }));
+
+    search('');
+
+    expect(shownTitles()).toEqual(['Tears of Steel', 'Spring']);
+    expect(page.controls).toMatchObject({ torrentCount: 2 });
   });
 
   it('stops waiting for a search that fails', async () => {

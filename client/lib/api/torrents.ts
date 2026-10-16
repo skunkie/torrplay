@@ -48,17 +48,10 @@ export async function getTorrents(params?: {
   return res;
 }
 
+// The facets name every category, so one torrent is enough to read them.
 export async function getCategories(): Promise<string[]> {
-  const res = await getTorrents();
-  const categories = new Set<string>();
-  if (res.torrents) {
-    res.torrents.forEach(t => {
-      if (t.category) {
-        categories.add(t.category);
-      }
-    });
-  }
-  return Array.from(categories);
+  const res = await getTorrents({ limit: 1 });
+  return res.facets.categories.map(category => category.name);
 }
 
 export async function addTorrent(data: TorrentAdd | TorrentAddWithFile): Promise<Torrent> {

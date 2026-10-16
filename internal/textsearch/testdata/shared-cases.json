@@ -22,7 +22,10 @@
     { "name": "Show.S01E02", "title": "" },
     { "name": "Sintel2010", "title": "" },
     { "name": "Xsintel.Xtrailer", "title": "" },
-    { "name": "Cosmos.Laundromat.2015.WEB-DL", "title": "Ｃｏｓｍｏｓ Ｌａｕｎｄｒｏｍａｔ" }
+    { "name": "Cosmos.Laundromat.2015.WEB-DL", "title": "Ｃｏｓｍｏｓ Ｌａｕｎｄｒｏｍａｔ" },
+    { "name": "Ψάρι", "title": "" },
+    { "name": "𝐐𝐮𝐢𝐱𝐨𝐭𝐥.𝐃𝐞𝐦𝐨", "title": "" },
+    { "name": "ᎣᏏᏲ", "title": "" }
   ],
   "cases": [
     { "name": "matches words of dotted release names", "query": "sintel 2010", "want": ["Sintel.2010.1080p.mkv", "Sintel - 2010.mkv", "Sintel2010"] },
@@ -47,6 +50,15 @@
     { "name": "ranks matches inside words last", "query": "sintel", "want": ["Sintel.2010.1080p.mkv", "Sintel - 2010.mkv", "Sintel2010", "Xsintel.Xtrailer"] },
     { "name": "matches punctuation alone as text", "query": " - . ", "want": ["Sintel - 2010.mkv", "Cosmos.Laundromat.2015.WEB-DL"] },
     { "name": "finds nothing for punctuation no field contains", "query": " ! ", "want": [] },
-    { "name": "keeps library order for punctuation alone", "query": "'", "want": ["Llama's.Journey.2019", "Wing’s.Flight.2021"] }
+    { "name": "keeps library order for punctuation alone", "query": "'", "want": ["Llama's.Journey.2019", "Wing’s.Flight.2021"] },
+    { "name": "keeps accents when matching punctuation alone", "query": "\u0301", "want": [] },
+    { "name": "splits punctuation alone only on Unicode spaces", "query": "-\u0085.", "want": ["Sintel - 2010.mkv", "Cosmos.Laundromat.2015.WEB-DL"] },
+    { "name": "keeps a byte order mark inside punctuation alone", "query": "-\ufeff.", "want": [] },
+    { "name": "folds a precomposed iota subscript to an iota", "query": "ᾳ", "want": [] },
+    { "name": "folds a lone iota subscript to an iota", "query": "\u0345", "want": ["Ψάρι"] },
+    { "name": "folds styled capitals after decomposing them", "query": "quixotl", "want": ["𝐐𝐮𝐢𝐱𝐨𝐭𝐥.𝐃𝐞𝐦𝐨"] },
+    { "name": "matches styled letters with styled letters", "query": "𝐐𝐔𝐈𝐗", "want": ["𝐐𝐮𝐢𝐱𝐨𝐭𝐥.𝐃𝐞𝐦𝐨"] },
+    { "name": "ignores the case of Cherokee letters", "query": "ꭳꮟᏺ", "want": ["ᎣᏏᏲ"] },
+    { "name": "ignores the case of mixed-case Cherokee", "query": "Ꭳꮟ", "want": ["ᎣᏏᏲ"] }
   ]
 }
