@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { type MediaPlayerInstance, TimeRange, type useMediaContext } from '@vidstack/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -52,9 +52,9 @@ const src = { src: '/movie.mp4', type: 'video/mp4' as const };
 const mkv = { src: '/movie.mkv', type: 'video/mp4' as const };
 const cue = { startTime: 1, endTime: 3, text: 'Embedded dialogue' };
 
-async function select(label: string) {
-  await userEvent.click(screen.getByRole('button', { name: /select subtitle track/i }));
-  await userEvent.click(screen.getByRole('menuitemradio', { name: new RegExp(label) }));
+async function select(label: string, user: Pick<UserEvent, 'click'> = userEvent) {
+  await user.click(screen.getByRole('button', { name: /select subtitle track/i }));
+  await user.click(screen.getByRole('menuitemradio', { name: new RegExp(label) }));
 }
 
 // jsdom does not implement native text tracks or video playback. Keep Vidstack's
@@ -127,23 +127,35 @@ for (const [name, Player] of [['live', VideoPlayer], ['demo', DemoVideoPlayer]] 
     });
 
     it('switches tracks without replacing their instances and preserves Off', async () => {
-      render(<Player options={{ src, tracks: [{ ...english, default: true }, spanish] }} />);
-      act(() => captured.player!.startLoading());
-      const list = captured.player!.textTracks;
-      const first = list.getById(english.id);
-      const second = list.getById(spanish.id);
-      expect(list.selected).toBe(first);
-      await select('Spanish');
-      expect(list.selected).toBe(second);
-      await select('Off');
-      // Wait past Vidstack's debounced default-track selection.
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 350)); });
-      expect(list.selected).toBeNull();
-      await userEvent.click(screen.getByRole('button', { name: /select subtitle track/i }));
-      expect(screen.getByRole('menuitemradio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true');
-      await userEvent.click(screen.getByRole('menuitemradio', { name: /English/ }));
-      expect(list.selected).toBe(first);
-      expect(list.getById(spanish.id)).toBe(second);
+      // userEvent settles through Testing Library's async wrapper, which
+      // advances fake timers only when it detects Jest's (an internal check for
+      // a global jest and a faked setTimeout). Route that to Vitest's for this
+      // test alone, which afterEach unstubs; elsewhere it would make waitFor
+      // advance fake time.
+      vi.useFakeTimers();
+      vi.stubGlobal('jest', { advanceTimersByTime: (ms: number) => vi.advanceTimersByTime(ms) });
+      try {
+        const user = userEvent.setup({ advanceTimers: ms => vi.advanceTimersByTime(ms) });
+        render(<Player options={{ src, tracks: [{ ...english, default: true }, spanish] }} />);
+        act(() => captured.player!.startLoading());
+        const list = captured.player!.textTracks;
+        const first = list.getById(english.id);
+        const second = list.getById(spanish.id);
+        expect(list.selected).toBe(first);
+        await select('Spanish', user);
+        expect(list.selected).toBe(second);
+        await select('Off', user);
+        // Run past Vidstack's 300 ms debounced default-track selection.
+        await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+        expect(list.selected).toBeNull();
+        await user.click(screen.getByRole('button', { name: /select subtitle track/i }));
+        expect(screen.getByRole('menuitemradio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true');
+        await user.click(screen.getByRole('menuitemradio', { name: /English/ }));
+        expect(list.selected).toBe(first);
+        expect(list.getById(spanish.id)).toBe(second);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('selects by identity when two tracks have identical labels', async () => {
