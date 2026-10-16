@@ -5,7 +5,10 @@
 package database
 
 import (
+	"errors"
 	"os"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/torrplay/torrplay/internal/api"
+	appsettings "github.com/torrplay/torrplay/internal/settings"
 	"go.etcd.io/bbolt"
 )
 
@@ -434,6 +438,221 @@ func TestBBoltDB_IsPosterUsed(t *testing.T) {
 	used, err = db.IsPosterUsed("01234567")
 	require.NoError(t, err)
 	assert.False(t, used)
+}
+
+func TestBBoltDB_GetOrCreateSetting(t *testing.T) {
+	getters := []struct {
+		name string
+		get  func(*BBoltDB) (string, error)
+	}{
+		{name: "dlna udn", get: (*BBoltDB).GetDLNAUDN},
+		{name: "jwt secret", get: (*BBoltDB).GetJWTSecret},
+	}
+	open := func(t *testing.T) *BBoltDB {
+		t.Helper()
+		db, err := NewBBoltDB(tempfile(t))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+	// lastWrite returns the ID of the newest committed write transaction.
+	lastWrite := func(t *testing.T, db *BBoltDB) int {
+		t.Helper()
+		var id int
+		require.NoError(t, db.db.View(func(tx *bbolt.Tx) error {
+			id = tx.ID()
+			return nil
+		}))
+		return id
+	}
+
+	for _, getter := range getters {
+		t.Run(getter.name, func(t *testing.T) {
+			t.Run("returns the created value without another write", func(t *testing.T) {
+				db := open(t)
+				created, err := getter.get(db)
+				require.NoError(t, err)
+				require.NotEmpty(t, created)
+				written := lastWrite(t, db)
+
+				again, err := getter.get(db)
+				require.NoError(t, err)
+				assert.Equal(t, created, again)
+				assert.Equal(t, written, lastWrite(t, db), "reading an existing value committed a write")
+			})
+
+			t.Run("returns one value to concurrent callers", func(t *testing.T) {
+				db := open(t)
+				const callers = 8
+				values := make([]string, callers)
+				errs := make([]error, callers)
+				var wg sync.WaitGroup
+				for i := range callers {
+					wg.Go(func() {
+						values[i], errs[i] = getter.get(db)
+					})
+				}
+				wg.Wait()
+
+				for i := range callers {
+					require.NoError(t, errs[i])
+				}
+				assert.Len(t, slices.Compact(values), 1)
+				stored, err := getter.get(db)
+				require.NoError(t, err)
+				assert.Equal(t, values[0], stored)
+			})
+
+			t.Run("stores the default settings with a created value", func(t *testing.T) {
+				db := open(t)
+				_, err := getter.get(db)
+				require.NoError(t, err)
+
+				stored, err := db.GetSettings()
+				require.NoError(t, err)
+				assert.False(t, appsettings.Merge(&stored.Settings, appsettings.Default()), "a default setting is missing")
+			})
+
+			t.Run("keeps existing settings", func(t *testing.T) {
+				db := open(t)
+				require.NoError(t, db.UpdateSettings(&Settings{Settings: api.Settings{FriendlyName: new("Llamaland")}}))
+
+				_, err := getter.get(db)
+				require.NoError(t, err)
+
+				stored, err := db.GetSettings()
+				require.NoError(t, err)
+				assert.Equal(t, "Llamaland", *stored.FriendlyName)
+			})
+		})
+	}
+}
+
+func TestBBoltDB_RotateJWTSecret(t *testing.T) {
+	t.Run("replaces the secret and keeps the other settings", func(t *testing.T) {
+		db, err := NewBBoltDB(tempfile(t))
+		require.NoError(t, err)
+		defer db.Close()
+		require.NoError(t, db.UpdateSettings(&Settings{Settings: api.Settings{FriendlyName: new("Llamaland")}}))
+		udn, err := db.GetDLNAUDN()
+		require.NoError(t, err)
+		old, err := db.GetJWTSecret()
+		require.NoError(t, err)
+
+		require.NoError(t, db.RotateJWTSecret())
+
+		secret, err := db.GetJWTSecret()
+		require.NoError(t, err)
+		assert.NotEqual(t, old, secret)
+		stored, err := db.GetSettings()
+		require.NoError(t, err)
+		assert.Equal(t, secret, stored.JWTSecret)
+		assert.Equal(t, udn, stored.DLNAUDN)
+		assert.Equal(t, "Llamaland", *stored.FriendlyName)
+	})
+
+	t.Run("stores the default settings without a record", func(t *testing.T) {
+		db, err := NewBBoltDB(tempfile(t))
+		require.NoError(t, err)
+		defer db.Close()
+
+		require.NoError(t, db.RotateJWTSecret())
+
+		stored, err := db.GetSettings()
+		require.NoError(t, err)
+		assert.NotEmpty(t, stored.JWTSecret)
+		assert.False(t, appsettings.Merge(&stored.Settings, appsettings.Default()), "a default setting is missing")
+	})
+}
+
+func TestBBoltDB_UpdateSettings(t *testing.T) {
+	open := func(t *testing.T) *BBoltDB {
+		t.Helper()
+		db, err := NewBBoltDB(tempfile(t))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		return db
+	}
+
+	t.Run("keeps the dlna udn and the jwt secret", func(t *testing.T) {
+		db := open(t)
+		udn, err := db.GetDLNAUDN()
+		require.NoError(t, err)
+		secret, err := db.GetJWTSecret()
+		require.NoError(t, err)
+
+		require.NoError(t, db.UpdateSettings(&Settings{Settings: api.Settings{FriendlyName: new("Llamaland")}}))
+
+		stored, err := db.GetSettings()
+		require.NoError(t, err)
+		assert.Equal(t, "Llamaland", *stored.FriendlyName)
+		assert.Equal(t, udn, stored.DLNAUDN)
+		assert.Equal(t, secret, stored.JWTSecret)
+	})
+
+	t.Run("merges the default settings and leaves the caller's unchanged", func(t *testing.T) {
+		db := open(t)
+		in := &Settings{Settings: api.Settings{
+			Auth:          &api.Auth{},
+			TorrentClient: &api.TorrentClient{DisableDHT: new(true)},
+		}}
+
+		require.NoError(t, db.UpdateSettings(in))
+
+		stored, err := db.GetSettings()
+		require.NoError(t, err)
+		assert.True(t, *stored.TorrentClient.DisableDHT)
+		assert.False(t, appsettings.Merge(&stored.Settings, appsettings.Default()), "a default setting is missing")
+		assert.Nil(t, in.Auth.Enabled, "the caller's auth settings changed")
+		assert.Nil(t, in.TorrentClient.DisablePEX, "the caller's torrent client settings changed")
+		assert.Nil(t, in.FriendlyName, "the caller's settings changed")
+	})
+
+	t.Run("rejects nil settings", func(t *testing.T) {
+		assert.Error(t, open(t).UpdateSettings(nil))
+	})
+
+	t.Run("reports a missing settings bucket", func(t *testing.T) {
+		db := open(t)
+		require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error {
+			return tx.DeleteBucket([]byte(settingsBucket))
+		}))
+
+		assert.ErrorIs(t, db.UpdateSettings(&Settings{}), errBucketNotFound)
+	})
+}
+
+func TestBBoltDB_WriteSettings(t *testing.T) {
+	t.Run("reports a missing settings bucket", func(t *testing.T) {
+		db, err := NewBBoltDB(tempfile(t))
+		require.NoError(t, err)
+		defer db.Close()
+		require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error {
+			return tx.DeleteBucket([]byte(settingsBucket))
+		}))
+
+		assert.ErrorIs(t, db.RotateJWTSecret(), errBucketNotFound)
+		_, err = db.GetDLNAUDN()
+		assert.ErrorIs(t, err, errBucketNotFound)
+	})
+
+	t.Run("stores nothing when the change fails", func(t *testing.T) {
+		db, err := NewBBoltDB(tempfile(t))
+		require.NoError(t, err)
+		defer db.Close()
+		failed := errors.New("change failed")
+
+		err = db.db.Update(func(tx *bbolt.Tx) error {
+			return db.writeSettings(tx, func(s *Settings) error {
+				s.DLNAUDN = "uuid:discarded"
+				return failed
+			})
+		})
+
+		assert.ErrorIs(t, err, failed)
+		_, err = db.GetSettings()
+		assert.ErrorIs(t, err, ErrSettingsNotFound)
+	})
 }
 
 func TestTypesConversions(t *testing.T) {

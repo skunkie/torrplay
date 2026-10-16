@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/torrplay/torrplay/internal/api"
 	"github.com/torrplay/torrplay/internal/auth"
+	"github.com/torrplay/torrplay/internal/settings"
 	"github.com/torrplay/torrplay/internal/utils"
 	"go.etcd.io/bbolt"
 )
@@ -245,133 +246,108 @@ func (b *BBoltDB) GetSettings() (*Settings, error) {
 	return s, nil
 }
 
+// UpdateSettings replaces the api.Settings part of the stored settings with
+// that of s, keeping database-specific fields like DLNAUDN and JWTSecret. The
+// record holds a copy, decoded from its encoding as storage decodes it, so
+// merging the default settings into the record leaves s and the nested values
+// it shares with its caller unchanged.
 func (b *BBoltDB) UpdateSettings(s *Settings) error {
 	if s == nil {
 		return errors.New("settings cannot be nil")
 	}
-	return b.db.Update(func(tx *bbolt.Tx) error {
-		return b.updateSettings(tx, &s.Settings)
-	})
-}
-
-// updateSettings updates the settings in the database.
-// This function must be called within a database transaction.
-// It performs a partial update by first reading the existing settings
-// and then overwriting the api.Settings part with the new values.
-// This preserves database-specific fields like DLNAUDN and JWTSecret.
-func (b *BBoltDB) updateSettings(tx *bbolt.Tx, s *api.Settings) error {
-	if s == nil {
-		return errors.New("settings cannot be nil")
-	}
-	bucket := tx.Bucket([]byte(settingsBucket))
-	if bucket == nil {
-		return errBucketNotFound
-	}
-
-	is, err := b.getSettings(tx)
-	if err != nil && !errors.Is(err, ErrSettingsNotFound) {
-		return err
-	}
-
-	if is == nil {
-		is = &Settings{}
-	}
-
-	is.Settings = *s
-
-	encoded, err := json.Marshal(is)
+	encoded, err := json.Marshal(&s.Settings)
 	if err != nil {
 		return fmt.Errorf("failed to marshal settings: %w", err)
 	}
-
-	return bucket.Put([]byte("settings"), encoded)
+	var replacement api.Settings
+	if err := json.Unmarshal(encoded, &replacement); err != nil {
+		return fmt.Errorf("failed to copy settings: %w", err)
+	}
+	return b.db.Update(func(tx *bbolt.Tx) error {
+		return b.writeSettings(tx, func(stored *Settings) error {
+			stored.Settings = replacement
+			return nil
+		})
+	})
 }
 
+// GetDLNAUDN returns the DLNA UDN, creating it on first use.
 func (b *BBoltDB) GetDLNAUDN() (string, error) {
-	var udn string
-	err := b.db.Update(func(tx *bbolt.Tx) error {
-		s, err := b.getSettings(tx)
-		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
-			return err
-		}
-
-		if s == nil {
-			s = &Settings{}
-		}
-
-		if s.DLNAUDN != "" {
-			udn = s.DLNAUDN
-			return nil
-		}
-
-		newUDN, err := uuid.NewRandom()
-		if err != nil {
-			return err
-		}
-		udn = "uuid:" + newUDN.String()
-		s.DLNAUDN = udn
-
-		encoded, err := json.Marshal(s)
-		if err != nil {
-			return fmt.Errorf("failed to marshal settings: %w", err)
-		}
-		return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), encoded)
-	})
-
-	return udn, err
+	return b.getOrCreateSetting(
+		func(s *Settings) string { return s.DLNAUDN },
+		func(s *Settings) (string, error) {
+			udn, err := uuid.NewRandom()
+			if err != nil {
+				return "", err
+			}
+			s.DLNAUDN = "uuid:" + udn.String()
+			return s.DLNAUDN, nil
+		},
+	)
 }
 
 // GetJWTSecret returns the JWT secret, creating it on first use. It runs for
-// every authenticated request, so an existing secret is read in a read-only
-// transaction, and a write transaction only creates a missing one.
+// every authenticated request, which getOrCreateSetting answers with a
+// read-only transaction once the secret exists.
 func (b *BBoltDB) GetJWTSecret() (string, error) {
-	var secret string
+	return b.getOrCreateSetting(
+		func(s *Settings) string { return s.JWTSecret },
+		func(s *Settings) (string, error) {
+			secret, err := auth.GenerateJWTSecret()
+			if err != nil {
+				return "", err
+			}
+			s.JWTSecret = secret
+			return secret, nil
+		},
+	)
+}
+
+// errSettingExists stops the write transaction of getOrCreateSetting when
+// another caller has created the setting since its read.
+var errSettingExists = errors.New("setting exists")
+
+// getOrCreateSetting returns the setting that read reads from the stored
+// settings, storing the one create sets on first use. An existing setting is
+// read in a read-only transaction, so reading it commits no write. The write
+// transaction reads again, since another caller may have created the setting
+// since the read, and then commits nothing.
+func (b *BBoltDB) getOrCreateSetting(read func(*Settings) string, create func(*Settings) (string, error)) (string, error) {
+	var value string
 	err := b.db.View(func(tx *bbolt.Tx) error {
 		s, err := b.getSettings(tx)
 		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
 			return err
 		}
 		if s != nil {
-			secret = s.JWTSecret
+			value = read(s)
 		}
 		return nil
 	})
-	if err != nil || secret != "" {
-		return secret, err
+	if err != nil || value != "" {
+		return value, err
 	}
 
-	// Another caller may have created the secret since the read, so the write
-	// transaction checks again before creating one.
 	err = b.db.Update(func(tx *bbolt.Tx) error {
-		s, err := b.getSettings(tx)
-		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
-			return err
-		}
-
-		if s == nil {
-			s = &Settings{}
-		}
-
-		if s.JWTSecret != "" {
-			secret = s.JWTSecret
+		return b.writeSettings(tx, func(s *Settings) error {
+			if value = read(s); value != "" {
+				return errSettingExists
+			}
+			created, err := create(s)
+			if err != nil {
+				return err
+			}
+			value = created
 			return nil
-		}
-
-		newSecret, err := auth.GenerateJWTSecret()
-		if err != nil {
-			return err
-		}
-		secret = newSecret
-		s.JWTSecret = newSecret
-
-		encoded, err := json.Marshal(s)
-		if err != nil {
-			return fmt.Errorf("failed to marshal settings: %w", err)
-		}
-		return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), encoded)
+		})
 	})
-
-	return secret, err
+	switch {
+	case errors.Is(err, errSettingExists):
+		return value, nil
+	case err != nil:
+		return "", err
+	}
+	return value, nil
 }
 
 // RotateJWTSecret replaces the JWT secret, revoking every token signed with
@@ -382,20 +358,37 @@ func (b *BBoltDB) RotateJWTSecret() error {
 		return err
 	}
 	return b.db.Update(func(tx *bbolt.Tx) error {
-		s, err := b.getSettings(tx)
-		if err != nil && !errors.Is(err, ErrSettingsNotFound) {
-			return err
-		}
-
-		if s == nil {
-			s = &Settings{}
-		}
-		s.JWTSecret = secret
-
-		encoded, err := json.Marshal(s)
-		if err != nil {
-			return fmt.Errorf("failed to marshal settings: %w", err)
-		}
-		return tx.Bucket([]byte(settingsBucket)).Put([]byte("settings"), encoded)
+		return b.writeSettings(tx, func(s *Settings) error {
+			s.JWTSecret = secret
+			return nil
+		})
 	})
+}
+
+// writeSettings stores the settings record after change modifies it, reading
+// the stored record or starting an empty one, and merges the default settings
+// into it, so a record written before the settings are bootstrapped loses no
+// default. It must be called within a write transaction.
+func (b *BBoltDB) writeSettings(tx *bbolt.Tx, change func(*Settings) error) error {
+	bucket := tx.Bucket([]byte(settingsBucket))
+	if bucket == nil {
+		return errBucketNotFound
+	}
+	s, err := b.getSettings(tx)
+	if err != nil && !errors.Is(err, ErrSettingsNotFound) {
+		return err
+	}
+	if s == nil {
+		s = &Settings{}
+	}
+	if err := change(s); err != nil {
+		return err
+	}
+	settings.Merge(&s.Settings, settings.Default())
+
+	encoded, err := json.Marshal(s)
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+	return bucket.Put([]byte("settings"), encoded)
 }
